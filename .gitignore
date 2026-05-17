@@ -1,0 +1,9 @@
+node_modules/
+data/
+*.tmp
+android/build/
+android/app/build/
+.gradle/
+android/.gradle/
+android/.kotlin/
+android/debug.keystore

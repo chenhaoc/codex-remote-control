@@ -1,0 +1,140 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { nowIso } from './protocol.mjs';
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+export class StateStore {
+  constructor(filePath, { maxEventsPerSession = 500 } = {}) {
+    this.filePath = filePath;
+    this.maxEventsPerSession = maxEventsPerSession;
+    this.state = {
+      version: 1,
+      sessions: {},
+      devices: {},
+    };
+  }
+
+  async load() {
+    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+    try {
+      const raw = await fs.readFile(this.filePath, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        this.state = {
+          version: 1,
+          sessions: parsed.sessions ?? {},
+          devices: parsed.devices ?? {},
+        };
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      await this.save();
+    }
+  }
+
+  async save() {
+    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+    const tmp = `${this.filePath}.${randomUUID()}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify(this.state, null, 2), 'utf8');
+    await fs.rename(tmp, this.filePath);
+  }
+
+  listSessions() {
+    return Object.values(this.state.sessions)
+      .map((session) => clone(session))
+      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  }
+
+  getSession(sessionId) {
+    const session = this.state.sessions[sessionId];
+    return session ? clone(session) : null;
+  }
+
+  async upsertSession(session) {
+    const current = this.state.sessions[session.session_id] ?? {
+      session_id: session.session_id,
+      thread_id: session.thread_id ?? session.session_id,
+      title: session.title ?? '',
+      cwd: session.cwd ?? '',
+      model: session.model ?? '',
+      backend: session.backend ?? 'mock',
+      preview: session.preview ?? '',
+      active: true,
+      createdAt: session.createdAt ?? nowIso(),
+      updatedAt: session.updatedAt ?? nowIso(),
+      lastSeq: 0,
+      thread: null,
+      events: [],
+      pending_approvals: {},
+    };
+    const next = {
+      ...current,
+      ...clone(session),
+      session_id: session.session_id,
+      thread_id: session.thread_id ?? current.thread_id,
+      thread: session.thread ?? current.thread,
+      events: current.events ?? [],
+      pending_approvals: current.pending_approvals ?? {},
+      updatedAt: nowIso(),
+    };
+    this.state.sessions[next.session_id] = next;
+    await this.save();
+    return clone(next);
+  }
+
+  async appendEvent(sessionId, event) {
+    const session = this.state.sessions[sessionId];
+    if (!session) {
+      throw new Error(`unknown session: ${sessionId}`);
+    }
+    const stored = {
+      ...clone(event),
+      seq: (session.lastSeq ?? 0) + 1,
+      at: event.at ?? nowIso(),
+    };
+    session.lastSeq = stored.seq;
+    session.updatedAt = stored.at;
+    session.events = session.events ?? [];
+    session.events.push(stored);
+    if (session.events.length > this.maxEventsPerSession) {
+      session.events = session.events.slice(-this.maxEventsPerSession);
+    }
+    this.state.sessions[sessionId] = session;
+    await this.save();
+    return clone(stored);
+  }
+
+  async recordPendingApproval(sessionId, approval) {
+    const session = this.state.sessions[sessionId];
+    if (!session) {
+      throw new Error(`unknown session: ${sessionId}`);
+    }
+    session.pending_approvals = session.pending_approvals ?? {};
+    session.pending_approvals[approval.request_id] = clone(approval);
+    session.updatedAt = nowIso();
+    await this.save();
+    return clone(approval);
+  }
+
+  async resolveApproval(sessionId, requestId) {
+    const session = this.state.sessions[sessionId];
+    if (!session) {
+      throw new Error(`unknown session: ${sessionId}`);
+    }
+    if (session.pending_approvals?.[requestId]) {
+      delete session.pending_approvals[requestId];
+      session.updatedAt = nowIso();
+      await this.save();
+    }
+  }
+
+  syncEvents(sessionId, sinceSeq = 0) {
+    const session = this.state.sessions[sessionId];
+    if (!session) return [];
+    return clone((session.events ?? []).filter((event) => (event.seq ?? 0) > sinceSeq));
+  }
+}
