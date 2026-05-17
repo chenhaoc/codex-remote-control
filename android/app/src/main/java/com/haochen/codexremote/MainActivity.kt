@@ -119,6 +119,7 @@ class MainActivity : ComponentActivity() {
     private var selectedModel by mutableStateOf("")
     private var connectionDetail by mutableStateOf("未连接")
     private var composerText by mutableStateOf("")
+    private var liveTurnStatus by mutableStateOf<String?>(null)
     private var transientNotice by mutableStateOf<String?>(null)
     private var transientNonce by mutableStateOf(0)
     private var disconnectRequested = false
@@ -182,6 +183,7 @@ class MainActivity : ComponentActivity() {
             Scaffold(
                 modifier = Modifier.fillMaxSize(),
                 containerColor = Color.Transparent,
+                contentWindowInsets = WindowInsets(0, 0, 0, 0),
                 snackbarHost = { SnackbarHost(snackbarHostState) },
             ) { scaffoldPadding ->
                 Box(
@@ -423,15 +425,8 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun ChatPage() {
-        val listState = rememberLazyListState()
         val density = LocalDensity.current
         val imeVisible = WindowInsets.ime.getBottom(density) > 0
-
-        LaunchedEffect(conversationItems.size) {
-            if (conversationItems.isNotEmpty()) {
-                listState.animateScrollToItem(conversationItems.lastIndex)
-            }
-        }
 
         Column(
             modifier = Modifier
@@ -484,20 +479,49 @@ class MainActivity : ComponentActivity() {
                         BodyText("选中一个会话后，消息和审批会在这里出现。")
                     }
                 } else {
-                    LazyColumn(
-                        state = listState,
+                    ConversationHistoryWebView(
+                        items = conversationItems,
+                        sessionId = activeSessionId,
+                        followBottom = activeTurnId != null,
+                        onApprovalDecision = { requestId, decision, itemId ->
+                            sendApproval(requestId, decision, itemId)
+                        },
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
-                        items(items = conversationItems, key = { it.id }) { item ->
-                            ConversationItemView(item)
-                        }
-                    }
+                    )
                 }
             }
 
             Spacer(modifier = Modifier.height(10.dp))
+
+            liveTurnStatus?.takeIf { it.isNotBlank() }?.let { status ->
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    color = c(0xFF0F172A),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "\u25cf",
+                            color = c(0xFF38BDF8),
+                            fontSize = 10.sp,
+                        )
+                        Text(
+                            text = status,
+                            color = c(0xFF98A8C2),
+                            fontSize = 12.sp,
+                            lineHeight = 18.sp,
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+            }
 
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -553,6 +577,7 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun SessionPage() {
         val sessionListState = rememberLazyListState()
+        var modelPickerExpanded by remember { mutableStateOf(false) }
 
         Column(
             modifier = Modifier
@@ -566,9 +591,24 @@ class MainActivity : ComponentActivity() {
                 shape = RoundedCornerShape(22.dp),
             ) {
                 Column(modifier = Modifier.padding(18.dp)) {
-                    SectionTitle("新会话模型")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        SectionTitle("新会话模型")
+                        FilledTonalButton(onClick = { modelPickerExpanded = !modelPickerExpanded }) {
+                            Text(if (modelPickerExpanded) "收起列表" else "展开列表")
+                        }
+                    }
                     Spacer(modifier = Modifier.height(8.dp))
-                    BodyText("先选模型，再点新会话。也可以直接在输入框里手填模型 ID。")
+                    BodyText(
+                        if (selectedModel.isBlank()) {
+                            "先选模型，再点新会话。也可以直接在输入框里手填模型 ID。"
+                        } else {
+                            "当前模型: $selectedModel"
+                        },
+                    )
                     Spacer(modifier = Modifier.height(10.dp))
                     OutlinedTextField(
                         value = selectedModel,
@@ -606,9 +646,9 @@ class MainActivity : ComponentActivity() {
                     Spacer(modifier = Modifier.height(12.dp))
                     if (availableModels.isEmpty()) {
                         BodyText(if (connected) "连接后会自动加载模型列表。" else "连接后这里会显示可选模型。")
-                    } else {
+                    } else if (modelPickerExpanded) {
                         LazyColumn(
-                            modifier = Modifier.heightIn(max = 220.dp),
+                            modifier = Modifier.heightIn(max = 148.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             items(items = availableModels, key = { it.id }) { model ->
@@ -619,6 +659,8 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
                         }
+                    } else {
+                        BodyText("已加载 ${availableModels.size} 个模型，展开后可切换。")
                     }
                 }
             }
@@ -766,96 +808,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    @Composable
-    private fun ConversationItemView(item: ConversationItem) {
-        when (item) {
-            is ConversationItem.Bubble -> ChatBubble(item)
-            is ConversationItem.SystemNote -> SystemNote(item)
-            is ConversationItem.Approval -> ApprovalCard(item)
-        }
-    }
-
-    @Composable
-    private fun ChatBubble(item: ConversationItem.Bubble) {
-        val bubbleColor = c(item.backgroundColor)
-        val textColor = c(item.textColor)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = if (item.right) Arrangement.End else Arrangement.Start,
-        ) {
-            Surface(
-                color = bubbleColor,
-                shape = RoundedCornerShape(18.dp),
-                modifier = Modifier.widthIn(max = 320.dp, min = 48.dp),
-            ) {
-                Text(
-                    text = item.text,
-                    color = textColor,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                    lineHeight = 20.sp,
-                )
-            }
-        }
-    }
-
-    @Composable
-    private fun SystemNote(item: ConversationItem.SystemNote) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
-            Surface(
-                color = c(0xFF0F172A),
-                shape = RoundedCornerShape(14.dp),
-            ) {
-                Text(
-                    text = item.text,
-                    color = c(0xFF98A8C2),
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                )
-            }
-        }
-    }
-
-    @Composable
-    private fun ApprovalCard(item: ConversationItem.Approval) {
-        Surface(
-            color = c(0xFF2E245C),
-            shape = RoundedCornerShape(18.dp),
-        ) {
-            Column(modifier = Modifier.padding(14.dp)) {
-                Text(
-                    text = item.title,
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = item.detail,
-                    color = Color.White,
-                    fontSize = 13.sp,
-                    lineHeight = 19.sp,
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    item.availableDecisions.forEach { decision ->
-                        val label = when (decision) {
-                            "accept" -> "接受"
-                            "decline" -> "拒绝"
-                            "cancel" -> "取消"
-                            else -> decision
-                        }
-                        Button(
-                            onClick = { sendApproval(item.requestId, decision, item.id) },
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = c(0xFF0F6D99)),
-                        ) {
-                            Text(label)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     private fun toggleConnection() {
         if (bridgeClient?.isOpen() == true) {
             disconnectRequested = true
@@ -947,7 +899,7 @@ class MainActivity : ComponentActivity() {
         val ok = message.optBoolean("ok", true)
         if (callback != null) {
             if (!ok) {
-                val errorText = safeJson(message.optJSONObject("error"))
+                val errorText = extractErrorText(message.optJSONObject("error")).ifBlank { formatJson(message.optJSONObject("error")) }
                 appendSystemNote("请求失败: $errorText")
                 showNotice("请求失败: $errorText")
                 return
@@ -960,7 +912,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         if (!ok) {
-            val errorText = safeJson(message.optJSONObject("error"))
+            val errorText = extractErrorText(message.optJSONObject("error")).ifBlank { formatJson(message.optJSONObject("error")) }
             appendSystemNote("请求失败: $errorText")
             showNotice("请求失败: $errorText")
         }
@@ -1002,23 +954,46 @@ class MainActivity : ComponentActivity() {
                     message.optString("turn_id", ""),
                     payload.optJSONObject("turn")?.optString("id", "") ?: "",
                 )
-                appendSystemNote("开始处理 ${shortId(activeTurnId)}")
+                updateLiveTurnStatus("Codex 正在响应…")
             }
 
-            "item/agentMessage/delta" -> handleAssistantDelta(message, payload)
+            "item/agentMessage/delta" -> {
+                updateLiveTurnStatus("Codex 正在输出…")
+                handleAssistantDelta(message, payload)
+            }
+            "rawResponseItem/completed" -> {
+                handleRawResponseItem(message, payload)
+            }
             "item/commandExecution/requestApproval" -> handleApprovalRequest(message, payload)
+            "item/started", "item/completed" -> {
+                updateLiveTurnStatusFromItem(eventName, payload.optJSONObject("item"))
+                handleThreadItemEvent(eventName, payload)
+            }
+            "warning" -> updateLiveTurnStatusFromWarning(payload)
+            "error" -> updateLiveTurnStatusFromError(payload)
+            "thread/status/changed" -> updateLiveTurnStatusFromThreadStatus(payload.optJSONObject("status"))
             "turn/completed" -> {
                 val turn = payload.optJSONObject("turn")
                 val status = turn?.optString("status", "completed") ?: payload.optString("status", "completed")
-                appendSystemNote("当前回合结束: $status")
+                val errorText = extractErrorText(turn?.optJSONObject("error"))
+                if (status == "failed" || status == "interrupted" || errorText.isNotBlank()) {
+                    appendSystemNote(
+                        buildString {
+                            append("当前回合结束: $status")
+                            if (errorText.isNotBlank()) {
+                                append('\n')
+                                append(errorText)
+                            }
+                        },
+                    )
+                }
                 if (activeTurnId != null && activeTurnId == message.optString("turn_id", "")) {
                     activeTurnId = null
                 }
+                updateLiveTurnStatus(null)
             }
 
-            else -> if (eventName.startsWith("item/")) {
-                appendSystemNote("$eventName: ${safeJson(payload)}")
-            }
+            else -> Unit
         }
     }
 
@@ -1035,34 +1010,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleAssistantDelta(message: JSONObject, payload: JSONObject) {
-        val turnKey = firstNonEmpty(message.optString("turn_id", ""), payload.optString("turn_id", ""), "assistant")
+        val turnKey = extractTurnKey(message, payload)
+        val itemKey = extractAssistantItemKey(message = message, payload = payload)
         val delta = firstNonEmpty(
             payload.optString("delta", ""),
             payload.optString("text", ""),
             payload.optString("message", ""),
         ).ifBlank { safeJson(payload) }
-
-        val itemId = assistantItemIds[turnKey]
-        if (itemId == null) {
-            val created = ConversationItem.Bubble(
-                id = "assistant_${UUID.randomUUID()}",
-                right = false,
-                text = delta,
-                backgroundColor = 0xFF172033.toInt(),
-                textColor = AndroidColor.WHITE,
-            )
-            assistantItemIds[turnKey] = created.id
-            conversationItems.add(created)
-            return
-        }
-
-        replaceConversationItem(itemId) { item ->
-            if (item is ConversationItem.Bubble) {
-                item.copy(text = item.text + delta)
-            } else {
-                item
-            }
-        }
+        appendAssistantDeltaBubble(turnKey, itemKey.ifBlank { "stream" }, delta)
     }
 
     private fun handleApprovalRequest(message: JSONObject, payload: JSONObject) {
@@ -1146,18 +1101,16 @@ class MainActivity : ComponentActivity() {
                 }
             }
             replaceModels(newModels)
-            if (selectedModel.isBlank()) {
-                val defaultModel = newModels.firstOrNull { it.isDefault } ?: newModels.firstOrNull()
-                if (defaultModel != null) {
-                    selectModel(defaultModel.model)
-                }
+            val defaultModel = newModels.firstOrNull { it.isDefault } ?: newModels.firstOrNull()
+            if (!isKnownModel(selectedModel)) {
+                defaultModel?.let { selectModel(it.model) }
             }
         }
     }
 
     private fun startNewSession() {
         if (!ensureConnected()) return
-        val model = selectedModel.trim().ifBlank { availableModels.firstOrNull()?.model.orEmpty() }
+        val model = resolveModelForSend()
         if (model.isBlank()) {
             showNotice("请先选择一个模型")
             return
@@ -1194,7 +1147,7 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        val model = currentSessionModel()
+        val model = resolveModelForSend()
         val payload = JSONObject().apply {
             put("session_id", activeSessionId)
             put("text", text)
@@ -1258,9 +1211,15 @@ class MainActivity : ComponentActivity() {
             "turn/input",
             "turn/started",
             "item/agentMessage/delta",
+            "rawResponseItem/completed",
             "item/commandExecution/requestApproval",
             "turn/completed",
-            "thread/started" -> handleEvent(event)
+            "thread/started",
+            "item/started",
+            "item/completed",
+            "warning",
+            "error",
+            "thread/status/changed" -> handleEvent(event)
         }
     }
 
@@ -1269,7 +1228,7 @@ class MainActivity : ComponentActivity() {
         activeSessionId = sessionId
         prefs.edit().putString(KEY_SESSION, sessionId).apply()
         sessions.firstOrNull { it.sessionId == sessionId }?.model
-            ?.takeIf { it.isNotBlank() }
+            ?.takeIf { it.isNotBlank() && isKnownModel(it) }
             ?.let { selectModel(it) }
         clearConversation()
         if (syncHistory) {
@@ -1535,6 +1494,425 @@ class MainActivity : ComponentActivity() {
         return lines.joinToString("\n")
     }
 
+    private fun handleThreadItemEvent(eventName: String, payload: JSONObject) {
+        val item = payload.optJSONObject("item") ?: return
+        val turnKey = extractTurnKey(payload = payload)
+        val itemKey = extractAssistantItemKey(payload = payload, item = item)
+        when (item.optString("type", "")) {
+            "agentMessage" -> {
+                if (eventName == "item/completed") {
+                    val text = extractThreadItemText(item).ifBlank { item.optString("text", "").trim() }
+                    finalizeAssistantBubble(turnKey, itemKey, text.ifBlank { formatJson(item) })
+                }
+            }
+            else -> Unit
+        }
+    }
+
+    private fun handleRawResponseItem(message: JSONObject, payload: JSONObject) {
+        val item = payload.optJSONObject("item") ?: return
+        if (item.optString("type", "") != "message") return
+
+        val role = item.optString("role", "").trim()
+        val text = extractResponseItemText(item).ifBlank { formatJson(item) }
+        if (text.isBlank()) return
+
+        when (role) {
+            "assistant" -> {
+                updateLiveTurnStatus("Codex 正在输出…")
+                appendStandaloneAssistantBubble(extractTurnKey(message, payload), text)
+            }
+            "system" -> appendSystemNote("系统消息:\n\n$text")
+            else -> Unit
+        }
+    }
+
+    private fun extractThreadItemText(item: JSONObject): String {
+        return when (item.optString("type", "")) {
+            "userMessage" -> {
+                val content = item.optJSONArray("content") ?: return ""
+                val parts = mutableListOf<String>()
+                for (i in 0 until content.length()) {
+                    val part = content.optJSONObject(i)
+                    if (part?.optString("type", "") == "text") {
+                        part.optString("text", "").trim().takeIf { it.isNotBlank() }?.let(parts::add)
+                    }
+                }
+                parts.joinToString("\n")
+            }
+
+            "agentMessage", "plan" -> item.optString("text", "").trim()
+            "reasoning" -> {
+                val summary = item.optJSONArray("summary")?.let { array ->
+                    buildList {
+                        for (i in 0 until array.length()) {
+                            array.optString(i).trim().takeIf { it.isNotBlank() }?.let(::add)
+                        }
+                    }
+                }.orEmpty()
+                val content = item.optJSONArray("content")?.let { array ->
+                    buildList {
+                        for (i in 0 until array.length()) {
+                            array.optString(i).trim().takeIf { it.isNotBlank() }?.let(::add)
+                        }
+                    }
+                }.orEmpty()
+                listOfNotNull(
+                    summary.takeIf { it.isNotEmpty() }?.joinToString("\n"),
+                    content.takeIf { it.isNotEmpty() }?.joinToString("\n"),
+                ).joinToString("\n").trim()
+            }
+
+            else -> ""
+        }
+    }
+
+    private fun extractResponseItemText(item: JSONObject): String {
+        if (item.optString("type", "") != "message") return ""
+        val content = item.optJSONArray("content") ?: return ""
+        val parts = mutableListOf<String>()
+        for (i in 0 until content.length()) {
+            val part = content.optJSONObject(i) ?: continue
+            val text = when (part.optString("type", "")) {
+                "input_text", "output_text" -> part.optString("text", "")
+                else -> part.optString("text", part.optString("content", ""))
+            }.trim()
+            if (text.isNotBlank()) {
+                parts.add(text)
+            }
+        }
+        return parts.joinToString("\n").trim()
+    }
+
+    private fun formatThreadItemDetails(item: JSONObject): String {
+        return when (item.optString("type", "")) {
+            "reasoning" -> {
+                val summary = item.optJSONArray("summary")?.toString(2).orEmpty()
+                val content = item.optJSONArray("content")?.toString(2).orEmpty()
+                listOf(summary, content).filter { it.isNotBlank() }.joinToString("\n")
+            }
+
+            else -> formatJson(item)
+        }
+    }
+
+    private fun formatToolItemDetails(item: JSONObject, eventName: String): String {
+        val lines = mutableListOf<String>()
+        when (item.optString("type", "")) {
+            "commandExecution" -> {
+                if (eventName == "item/started") {
+                    item.optString("command", "").takeIf { it.isNotBlank() }?.let { lines.add("命令: $it") }
+                    item.optString("cwd", "").takeIf { it.isNotBlank() }?.let { lines.add("目录: $it") }
+                    item.optString("source", "").takeIf { it.isNotBlank() }?.let { lines.add("来源: $it") }
+                    item.optString("status", "").takeIf { it.isNotBlank() }?.let { lines.add("状态: $it") }
+                } else {
+                    item.optString("status", "").takeIf { it.isNotBlank() }?.let { lines.add("状态: $it") }
+                    item.opt("exitCode").takeIf { it != null }?.let { lines.add("退出码: $it") }
+                    item.optString("aggregatedOutput", "").takeIf { it.isNotBlank() }?.let { lines.add("输出:\n$it") }
+                    item.opt("durationMs").takeIf { it != null }?.let { lines.add("耗时: ${it}ms") }
+                }
+            }
+
+            "fileChange" -> {
+                if (eventName == "item/started") {
+                    item.optString("status", "").takeIf { it.isNotBlank() }?.let { lines.add("状态: $it") }
+                } else {
+                    item.optString("status", "").takeIf { it.isNotBlank() }?.let { lines.add("状态: $it") }
+                    item.optJSONArray("changes")?.let { changes ->
+                        lines.add("变更: ${changes.length()} 项")
+                        lines.add(changes.toString(2))
+                    }
+                }
+            }
+
+            "mcpToolCall" -> {
+                item.optString("server", "").takeIf { it.isNotBlank() }?.let { lines.add("服务: $it") }
+                item.optString("tool", "").takeIf { it.isNotBlank() }?.let { lines.add("工具: $it") }
+                item.optString("status", "").takeIf { it.isNotBlank() }?.let { lines.add("状态: $it") }
+                if (eventName == "item/completed") {
+                    item.opt("result")?.let { lines.add("结果: $it") }
+                    item.opt("error")?.let { lines.add("错误: $it") }
+                }
+            }
+
+            "dynamicToolCall" -> {
+                item.optString("namespace", "").takeIf { it.isNotBlank() }?.let { lines.add("命名空间: $it") }
+                item.optString("tool", "").takeIf { it.isNotBlank() }?.let { lines.add("工具: $it") }
+                item.optString("status", "").takeIf { it.isNotBlank() }?.let { lines.add("状态: $it") }
+                if (eventName == "item/completed") {
+                    item.optJSONArray("contentItems")?.let { contentItems ->
+                        lines.add("结果条目: ${contentItems.length()} 项")
+                        lines.add(contentItems.toString(2))
+                    }
+                }
+            }
+
+            "collabAgentToolCall" -> {
+                item.optString("tool", "").takeIf { it.isNotBlank() }?.let { lines.add("工具: $it") }
+                item.optString("status", "").takeIf { it.isNotBlank() }?.let { lines.add("状态: $it") }
+                item.optString("prompt", "").takeIf { it.isNotBlank() }?.let { lines.add("提示:\n$it") }
+            }
+
+            else -> {
+                if (eventName == "item/started") {
+                    lines.add("开始")
+                }
+                lines.add(formatJson(item))
+            }
+        }
+        return if (lines.isEmpty()) formatJson(item) else lines.joinToString("\n")
+    }
+
+    private fun appendAssistantDeltaBubble(turnKey: String, itemKey: String, delta: String) {
+        if (delta.isBlank()) return
+        val bubbleKey = buildAssistantBubbleKey(turnKey, itemKey)
+        val bubbleId = assistantItemIds[bubbleKey]
+        if (bubbleId == null) {
+            val created = createAssistantBubble(turnKey, delta, bubbleKey)
+            assistantItemIds[bubbleKey] = created.id
+            conversationItems.add(created)
+            return
+        }
+
+        replaceConversationItem(bubbleId) { item ->
+            if (item is ConversationItem.Bubble) {
+                item.copy(text = item.text + delta)
+            } else {
+                item
+            }
+        }
+    }
+
+    private fun finalizeAssistantBubble(turnKey: String, itemKey: String, text: String) {
+        if (text.isBlank()) return
+        if (itemKey.isBlank()) {
+            appendStandaloneAssistantBubble(turnKey, text)
+            return
+        }
+
+        val bubbleKey = buildAssistantBubbleKey(turnKey, itemKey)
+        val bubbleId = assistantItemIds[bubbleKey]
+        if (bubbleId == null) {
+            if (hasEquivalentAssistantBubble(turnKey, text)) return
+            val created = createAssistantBubble(turnKey, text, bubbleKey)
+            assistantItemIds[bubbleKey] = created.id
+            conversationItems.add(created)
+            return
+        }
+
+        replaceConversationItem(bubbleId) { item ->
+            if (item is ConversationItem.Bubble) {
+                item.copy(text = preferredAssistantText(item.text, text))
+            } else {
+                item
+            }
+        }
+    }
+
+    private fun appendStandaloneAssistantBubble(turnKey: String, text: String) {
+        if (text.isBlank()) return
+        if (hasEquivalentAssistantBubble(turnKey, text)) return
+        conversationItems.add(createAssistantBubble(turnKey, text))
+    }
+
+    private fun createAssistantBubble(turnKey: String, text: String, assistantKey: String? = null): ConversationItem.Bubble {
+        return ConversationItem.Bubble(
+            id = "assistant_${UUID.randomUUID()}",
+            right = false,
+            text = text,
+            backgroundColor = 0xFF172033.toInt(),
+            textColor = AndroidColor.WHITE,
+            turnKey = turnKey,
+            assistantKey = assistantKey,
+        )
+    }
+
+    private fun extractTurnKey(message: JSONObject? = null, payload: JSONObject? = null): String {
+        return firstNonEmpty(
+            message?.optString("turn_id", "") ?: "",
+            message?.optString("turnId", "") ?: "",
+            payload?.optString("turn_id", "") ?: "",
+            payload?.optString("turnId", "") ?: "",
+            "assistant",
+        )
+    }
+
+    private fun extractAssistantItemKey(message: JSONObject? = null, payload: JSONObject? = null, item: JSONObject? = null): String {
+        return firstNonEmpty(
+            message?.optString("item_id", "") ?: "",
+            message?.optString("itemId", "") ?: "",
+            payload?.optString("item_id", "") ?: "",
+            payload?.optString("itemId", "") ?: "",
+            item?.optString("id", "") ?: "",
+        )
+    }
+
+    private fun buildAssistantBubbleKey(turnKey: String, itemKey: String): String {
+        return "$turnKey::$itemKey"
+    }
+
+    private fun hasEquivalentAssistantBubble(turnKey: String, text: String): Boolean {
+        val normalized = normalizeAssistantText(text)
+        if (normalized.isBlank()) return false
+        return conversationItems.asReversed().any { item ->
+            val bubble = item as? ConversationItem.Bubble ?: return@any false
+            !bubble.right && bubble.turnKey == turnKey && assistantTextsOverlap(bubble.text, normalized)
+        }
+    }
+
+    private fun assistantTextsOverlap(left: String, right: String): Boolean {
+        val leftNormalized = normalizeAssistantText(left)
+        val rightNormalized = normalizeAssistantText(right)
+        if (leftNormalized.isBlank() || rightNormalized.isBlank()) return false
+        return leftNormalized == rightNormalized ||
+            leftNormalized.contains(rightNormalized) ||
+            rightNormalized.contains(leftNormalized)
+    }
+
+    private fun preferredAssistantText(current: String, incoming: String): String {
+        val currentNormalized = normalizeAssistantText(current)
+        val incomingNormalized = normalizeAssistantText(incoming)
+        return when {
+            currentNormalized.isBlank() -> incoming
+            incomingNormalized.isBlank() -> current
+            currentNormalized == incomingNormalized -> incoming
+            incomingNormalized.contains(currentNormalized) -> incoming
+            else -> current
+        }
+    }
+
+    private fun normalizeAssistantText(text: String): String {
+        return text.replace("\r\n", "\n").trim()
+    }
+
+    private fun updateLiveTurnStatusFromItem(eventName: String, item: JSONObject?) {
+        if (item == null) return
+        val started = eventName == "item/started"
+        val status = when (item.optString("type", "")) {
+            "contextCompaction" -> if (started) "Codex 正在整理上下文…" else "Codex 继续响应中…"
+            "reasoning" -> if (started) "Codex 正在思考…" else "Codex 继续响应中…"
+            "plan" -> if (started) "Codex 正在整理计划…" else "Codex 继续响应中…"
+            "commandExecution" -> if (started) "Codex 正在执行命令…" else "Codex 继续响应中…"
+            "fileChange" -> if (started) "Codex 正在修改文件…" else "Codex 继续响应中…"
+            "mcpToolCall" -> if (started) "Codex 正在调用工具…" else "Codex 继续响应中…"
+            "dynamicToolCall" -> if (started) "Codex 正在运行工具…" else "Codex 继续响应中…"
+            "collabAgentToolCall" -> if (started) "Codex 正在协调子任务…" else "Codex 继续响应中…"
+            "agentMessage" -> "Codex 正在输出…"
+            else -> null
+        }
+        if (status != null) {
+            updateLiveTurnStatus(status)
+        }
+    }
+
+    private fun updateLiveTurnStatusFromWarning(payload: JSONObject) {
+        val message = extractWarningText(payload)
+        if (message.contains("Long threads", ignoreCase = true)) {
+            updateLiveTurnStatus("Codex 正在整理长上下文…")
+        }
+    }
+
+    private fun updateLiveTurnStatusFromError(payload: JSONObject) {
+        val error = payload.optJSONObject("error") ?: return
+        val message = cleanDisplayText(error.opt("message"))
+        when {
+            message.startsWith("Reconnecting...", ignoreCase = true) -> updateLiveTurnStatus("Codex 连接波动，正在重试…")
+            payload.optBoolean("willRetry", false) -> updateLiveTurnStatus("Codex 请求异常，正在重试…")
+            message.isNotBlank() -> updateLiveTurnStatus("Codex 响应异常")
+        }
+    }
+
+    private fun updateLiveTurnStatusFromThreadStatus(status: JSONObject?) {
+        when (status?.optString("type", "")?.trim()) {
+            "active" -> updateLiveTurnStatus("Codex 正在处理中…")
+            "idle" -> if (activeTurnId != null) updateLiveTurnStatus("Codex 正在处理中…")
+            "systemError" -> updateLiveTurnStatus("Codex 响应异常")
+        }
+    }
+
+    private fun updateLiveTurnStatus(status: String?) {
+        liveTurnStatus = status?.trim()?.takeIf { it.isNotBlank() }
+    }
+
+    private fun labelRawResponseRole(role: String): String {
+        return when (role) {
+            "assistant" -> "助手"
+            "developer" -> "开发者"
+            "user" -> "用户"
+            else -> role.ifBlank { "消息" }
+        }
+    }
+
+    private fun labelThreadItem(item: JSONObject): String {
+        return when (item.optString("type", "")) {
+            "plan" -> "计划"
+            "reasoning" -> "思考"
+            "commandExecution" -> "命令执行"
+            "fileChange" -> "文件修改"
+            "contextCompaction" -> "上下文压缩"
+            else -> item.optString("type", "项目")
+        }
+    }
+
+    private fun extractWarningText(payload: JSONObject): String {
+        val message = payload.optString("message", "").trim()
+        return if (message.isNotBlank()) message else formatJson(payload)
+    }
+
+    private fun extractErrorText(error: JSONObject?): String {
+        if (error == null) return ""
+        val nestedMessage = cleanDisplayText(error.opt("message"))
+        val parsedNested = nestedMessage.takeIf { it.startsWith("{") && it.endsWith("}") }?.let { raw ->
+            try {
+                JSONObject(raw)
+            } catch (_: JSONException) {
+                null
+            }
+        }
+        val parts = mutableListOf<String>()
+        cleanDisplayText(error.opt("code")).takeIf { it.isNotBlank() }?.let { parts.add(it) }
+        if (parsedNested != null) {
+            val nestedText = extractErrorText(parsedNested)
+            if (nestedText.isNotBlank()) parts.add(nestedText)
+        } else if (nestedMessage.isNotBlank()) {
+            parts.add(nestedMessage)
+        }
+        cleanDisplayText(error.opt("additionalDetails")).takeIf { it.isNotBlank() }?.let { details ->
+            if (details != nestedMessage) parts.add(details)
+        }
+        error.optJSONObject("codexErrorInfo")?.let { nested ->
+            val nestedText = extractErrorText(nested)
+            if (nestedText.isNotBlank()) parts.add(nestedText)
+        }
+        return if (parts.isNotEmpty()) parts.joinToString("\n") else error.keys().asSequence().joinToString("\n") { key ->
+            val value = cleanDisplayText(error.opt(key))
+            if (value.isNotBlank()) "$key: $value" else "$key"
+        }
+    }
+
+    private fun describeThreadStatus(status: JSONObject?): String {
+        if (status == null) return "未知"
+        val type = status.optString("type", "").trim()
+        return when (type) {
+            "active" -> "活跃"
+            "idle" -> "空闲"
+            "systemError" -> "系统错误"
+            "notLoaded" -> "未加载"
+            else -> if (type.isNotBlank()) type else formatJson(status)
+        }
+    }
+
+    private fun cleanDisplayText(value: Any?): String {
+        val text = when (value) {
+            null -> ""
+            is String -> value
+            is JSONObject -> value.toString()
+            is JSONArray -> value.toString()
+            else -> value.toString()
+        }.trim()
+        return if (text.isBlank() || text.equals("null", ignoreCase = true)) "" else text
+    }
+
     private fun selectModel(modelId: String) {
         selectedModel = modelId.trim()
         prefs.edit().putString(KEY_MODEL, selectedModel).apply()
@@ -1548,6 +1926,24 @@ class MainActivity : ComponentActivity() {
     private fun currentSessionModel(): String {
         val sessionId = activeSessionId ?: return ""
         return sessions.firstOrNull { it.sessionId == sessionId }?.model.orEmpty().trim()
+            .takeIf { isKnownModel(it) }
+            .orEmpty()
+    }
+
+    private fun resolveModelForSend(): String {
+        val candidates = listOf(
+            selectedModel.trim(),
+            currentSessionModel(),
+            availableModels.firstOrNull()?.model.orEmpty(),
+            availableModels.firstOrNull()?.id.orEmpty(),
+        )
+        return candidates.firstOrNull { isKnownModel(it) } ?: ""
+    }
+
+    private fun isKnownModel(modelId: String): Boolean {
+        val target = modelId.trim()
+        if (target.isBlank()) return false
+        return availableModels.any { it.model == target || it.id == target }
     }
 
     private fun currentSessionLabel(): String {
@@ -1601,7 +1997,11 @@ class MainActivity : ComponentActivity() {
         return ""
     }
 
-    private fun safeJson(objectValue: JSONObject?): String = objectValue?.toString() ?: "{}"
+    private fun formatJson(objectValue: JSONObject?): String = objectValue?.toString(2) ?: "{}"
+
+    private fun formatJson(arrayValue: JSONArray?): String = arrayValue?.toString(2) ?: "[]"
+
+    private fun safeJson(objectValue: JSONObject?): String = formatJson(objectValue)
 
     private fun describeThrowable(error: Throwable?): String {
         val message = error?.message?.takeIf { it.isNotBlank() } ?: return ""
@@ -1624,7 +2024,7 @@ private enum class AppTab {
     Chat,
 }
 
-private sealed interface ConversationItem {
+sealed interface ConversationItem {
     val id: String
 
     data class Bubble(
@@ -1633,6 +2033,8 @@ private sealed interface ConversationItem {
         val text: String,
         val backgroundColor: Int,
         val textColor: Int,
+        val turnKey: String? = null,
+        val assistantKey: String? = null,
     ) : ConversationItem
 
     data class SystemNote(

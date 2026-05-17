@@ -1,4 +1,5 @@
 import http from 'node:http';
+import fs from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -25,6 +26,33 @@ function normalizeThreadSummary(thread, backend = 'mock') {
     updatedAt: raw.updatedAt ? new Date(raw.updatedAt * 1000).toISOString() : nowIso(),
     thread: clone(raw),
   };
+}
+
+function getThreadStatusType(thread) {
+  const status = thread?.status;
+  if (!status) return null;
+  return typeof status === 'string' ? status : status.type ?? null;
+}
+
+function extractUserMessageText(content = []) {
+  return content
+    .filter((item) => item?.type === 'text' && typeof item.text === 'string')
+    .map((item) => item.text.trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
+function safeJsonLineParse(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function isThreadNotFoundError(error) {
+  const message = String(error?.message ?? '');
+  return /thread not found/i.test(message);
 }
 
 export class BridgeServer extends EventEmitter {
@@ -253,7 +281,7 @@ export class BridgeServer extends EventEmitter {
         }
         await this.store.appendEvent(sessionId, inputEvent);
         this.#broadcast(inputEvent);
-        const turn = await this.backend.startTurn(sessionId, {
+        const turnParams = {
           text: payload.text ?? '',
           input: payload.input ?? null,
           responsesapiClientMetadata: payload.responsesapiClientMetadata ?? null,
@@ -271,7 +299,36 @@ export class BridgeServer extends EventEmitter {
           outputSchema: payload.outputSchema ?? null,
           collaborationMode: payload.collaborationMode ?? null,
           turnId: payload.turn_id ?? null,
+        };
+        let ensured = await this.#ensureSessionLoaded(sessionId, {
+          path: session?.thread?.path ?? null,
+          model: turnParams.model,
+          cwd: turnParams.cwd,
+          approvalPolicy: turnParams.approvalPolicy,
+          approvalsReviewer: turnParams.approvalsReviewer,
+          permissions: turnParams.permissions,
+          personality: turnParams.personality,
+          excludeTurns: true,
         });
+        let targetThreadId = ensured?.session?.thread_id ?? session?.thread_id ?? sessionId;
+        let turn;
+        try {
+          turn = await this.backend.startTurn(targetThreadId, turnParams);
+        } catch (error) {
+          if (!isThreadNotFoundError(error)) throw error;
+          ensured = await this.#resumeStoredSession(sessionId, {
+            path: session?.thread?.path ?? null,
+            model: turnParams.model,
+            cwd: turnParams.cwd,
+            approvalPolicy: turnParams.approvalPolicy,
+            approvalsReviewer: turnParams.approvalsReviewer,
+            permissions: turnParams.permissions,
+            personality: turnParams.personality,
+            excludeTurns: true,
+          });
+          targetThreadId = ensured?.session?.thread_id ?? targetThreadId;
+          turn = await this.backend.startTurn(targetThreadId, turnParams);
+        }
         ws.send(JSON.stringify(createResponse(id, { turn, session_id: sessionId })));
         return;
       }
@@ -292,7 +349,36 @@ export class BridgeServer extends EventEmitter {
       }
       case 'session.sync': {
         const sessionId = payload.session_id ?? payload.thread_id;
-        const events = this.store.syncEvents(sessionId, payload.since_seq ?? 0);
+        const sinceSeq = payload.since_seq ?? 0;
+        let events = this.store.syncEvents(sessionId, sinceSeq);
+        if (sinceSeq === 0) {
+          const hydrated = await this.#hydrateSessionHistory(sessionId);
+          if (hydrated.length > 0) {
+            if (events.length === 0) {
+              events = hydrated;
+            } else {
+              const storedTurnIds = new Set(
+                events
+                  .map((event) => event?.turn_id ?? event?.payload?.turn_id ?? event?.payload?.turn?.id ?? null)
+                  .filter(Boolean),
+              );
+              const seen = new Set(events.map((event) => this.#eventSignature(event)));
+              const merged = [...events];
+              for (const event of hydrated) {
+                const turnId = event?.turn_id ?? event?.payload?.turn_id ?? event?.payload?.turn?.id ?? null;
+                if (turnId && storedTurnIds.has(turnId)) {
+                  continue;
+                }
+                const signature = this.#eventSignature(event);
+                if (!seen.has(signature)) {
+                  seen.add(signature);
+                  merged.push(event);
+                }
+              }
+              events = merged;
+            }
+          }
+        }
         ws.send(JSON.stringify(createResponse(id, { session_id: sessionId, events })));
         return;
       }
@@ -399,6 +485,268 @@ export class BridgeServer extends EventEmitter {
       return result;
     }
     return payload.result ?? payload;
+  }
+
+  async #ensureSessionLoaded(sessionId, params = {}) {
+    const session = this.store.getSession(sessionId);
+    if (!session) return null;
+    if (getThreadStatusType(session.thread) !== 'notLoaded') {
+      return { session, resumed: null };
+    }
+    return this.#resumeStoredSession(sessionId, params);
+  }
+
+  async #resumeStoredSession(sessionId, params = {}) {
+    const session = this.store.getSession(sessionId);
+    if (!session) return null;
+    const resumed = await this.backend.resumeThread(session.thread_id ?? sessionId, {
+      threadId: session.thread_id ?? sessionId,
+      path: params.path ?? session.thread?.path ?? null,
+      model: params.model ?? session.model ?? null,
+      cwd: params.cwd ?? session.cwd ?? null,
+      approvalPolicy: params.approvalPolicy ?? null,
+      approvalsReviewer: params.approvalsReviewer ?? null,
+      permissions: params.permissions ?? null,
+      personality: params.personality ?? null,
+      excludeTurns: params.excludeTurns ?? null,
+      persistExtendedHistory: false,
+    });
+    const normalized = normalizeThreadSummary(resumed, this.backend.constructor.name.replace('Backend', '').toLowerCase() || 'mock');
+    await this.store.upsertSession(normalized);
+    return { session: normalized, resumed };
+  }
+
+  async #hydrateSessionHistory(sessionId) {
+    const session = this.store.getSession(sessionId);
+    if (!session) return [];
+
+    try {
+      if (session.thread?.path) {
+        const fromRollout = await this.#buildEventsFromRolloutFile(sessionId, session.thread.path, session.thread_id ?? sessionId);
+        if (fromRollout.length > 0) {
+          return fromRollout;
+        }
+      }
+
+      const thread = await this.#loadHydrationThread(sessionId, session);
+      const hydratedEvents = await this.#buildEventsFromThread(sessionId, thread);
+      return hydratedEvents.length > 0 ? hydratedEvents : clone(session.events ?? []);
+    } catch {
+      return clone(session.events ?? []);
+    }
+  }
+
+  async #buildEventsFromRolloutFile(sessionId, filePath, threadId = sessionId) {
+    const raw = await fs.readFile(filePath, 'utf8');
+    const lines = raw.split('\n').map((line) => line.trim()).filter(Boolean);
+    const events = [];
+    let currentTurnId = null;
+    let currentItemSeq = 0;
+
+    for (const line of lines) {
+      const record = safeJsonLineParse(line);
+      if (!record || typeof record !== 'object') continue;
+      const payload = record.payload ?? {};
+      if (record.type === 'event_msg') {
+        switch (payload.type) {
+          case 'task_started': {
+            currentTurnId = payload.turn_id ?? currentTurnId;
+            currentItemSeq = 0;
+            if (currentTurnId) {
+              events.push(createEvent('turn/started', {
+                session_id: sessionId,
+                thread_id: threadId,
+                turn_id: currentTurnId,
+                payload: { turn: { id: currentTurnId } },
+              }));
+            }
+            break;
+          }
+          case 'user_message': {
+            const text = String(payload.message ?? '').trim();
+            if (text) {
+              events.push(createEvent('turn/input', {
+                session_id: sessionId,
+                thread_id: threadId,
+                turn_id: currentTurnId,
+                payload: {
+                  text,
+                  input: null,
+                },
+              }));
+            }
+            break;
+          }
+          case 'agent_message': {
+            const text = String(payload.message ?? '').trim();
+            if (text) {
+              events.push(createEvent('item/agentMessage/delta', {
+                session_id: sessionId,
+                thread_id: threadId,
+                turn_id: currentTurnId,
+                payload: {
+                  itemId: currentTurnId ? `rollout_${currentTurnId}_${String(++currentItemSeq).padStart(4, '0')}` : `rollout_${sessionId}_${String(++currentItemSeq).padStart(4, '0')}`,
+                  delta: text,
+                  text,
+                  message: text,
+                },
+              }));
+            }
+            break;
+          }
+          case 'task_complete': {
+            const completedTurnId = payload.turn_id ?? currentTurnId;
+            if (completedTurnId) {
+              events.push(createEvent('turn/completed', {
+                session_id: sessionId,
+                thread_id: threadId,
+                turn_id: completedTurnId,
+                payload: {
+                  status: 'completed',
+                  turn: {
+                    id: completedTurnId,
+                    status: 'completed',
+                  },
+                },
+              }));
+            }
+            currentTurnId = null;
+            break;
+          }
+          default:
+            break;
+        }
+      }
+    }
+
+    return events;
+  }
+
+  async #loadHydrationThread(sessionId, session) {
+    const thread = session.thread ?? null;
+    const status = getThreadStatusType(thread);
+    if (thread && status !== 'notLoaded') {
+      return thread;
+    }
+
+    const resumed = await this.#resumeStoredSession(sessionId, {
+      path: session.thread?.path ?? null,
+      model: session.model ?? null,
+      cwd: session.cwd ?? null,
+      excludeTurns: false,
+    });
+    return resumed?.resumed?.thread ?? resumed?.session?.thread ?? thread ?? null;
+  }
+
+  async #buildEventsFromThread(sessionId, thread) {
+    const rawThread = thread?.thread ?? thread;
+    const turns = Array.isArray(rawThread?.turns) ? rawThread.turns : [];
+    const threadId = rawThread?.id ?? rawThread?.threadId ?? rawThread?.sessionId ?? sessionId;
+    const events = [];
+
+    for (const turn of turns) {
+      if (!turn?.id) continue;
+      events.push(createEvent('turn/started', {
+        session_id: sessionId,
+        thread_id: threadId,
+        turn_id: turn.id,
+        payload: { turn: { id: turn.id } },
+      }));
+
+      const items = await this.#loadTurnItems(threadId, turn);
+      let turnItemSeq = 0;
+      for (const item of items) {
+        if (item?.type === 'userMessage') {
+          const text = extractUserMessageText(item.content ?? []);
+          if (text) {
+            events.push(createEvent('turn/input', {
+              session_id: sessionId,
+              thread_id: threadId,
+              turn_id: turn.id,
+              payload: {
+                text,
+                input: item.content ?? null,
+              },
+            }));
+          }
+          continue;
+        }
+
+        if (item?.type === 'agentMessage' && typeof item.text === 'string' && item.text.trim()) {
+          events.push(createEvent('item/agentMessage/delta', {
+            session_id: sessionId,
+            thread_id: threadId,
+            turn_id: turn.id,
+            payload: {
+              itemId: item.id ?? `turn_${turn.id}_agent_${String(++turnItemSeq).padStart(4, '0')}`,
+              delta: item.text,
+              text: item.text,
+              message: item.text,
+            },
+          }));
+        }
+      }
+
+      if (turn.status && turn.status !== 'inProgress') {
+        events.push(createEvent('turn/completed', {
+          session_id: sessionId,
+          thread_id: threadId,
+          turn_id: turn.id,
+          payload: {
+            status: turn.status,
+            turn: {
+              id: turn.id,
+              status: turn.status,
+            },
+          },
+        }));
+      }
+    }
+
+    return events;
+  }
+
+  async #loadTurnItems(threadId, turn) {
+    const inlineItems = Array.isArray(turn?.items) ? turn.items : [];
+    const canListTurnItems = typeof this.backend.listTurnItems === 'function';
+    const shouldLoadRemoteItems = canListTurnItems && turn?.id && threadId && (turn?.itemsView !== 'full' || inlineItems.length === 0);
+    if (!shouldLoadRemoteItems) {
+      return inlineItems;
+    }
+
+    try {
+      const loaded = [];
+      let cursor = null;
+      do {
+        const page = await this.backend.listTurnItems(threadId, turn.id, {
+          cursor,
+          limit: 200,
+          sortDirection: 'asc',
+        });
+        const data = Array.isArray(page) ? page : page?.data ?? [];
+        loaded.push(...data);
+        cursor = Array.isArray(page) ? null : page?.nextCursor ?? null;
+      } while (cursor);
+
+      return loaded.length > 0 ? loaded : inlineItems;
+    } catch {
+      return inlineItems;
+    }
+  }
+
+  #eventSignature(event) {
+    const payload = event?.payload ?? {};
+    return [
+      event?.event ?? '',
+      event?.turn_id ?? '',
+      payload?.text ?? '',
+      payload?.delta ?? '',
+      payload?.status ?? '',
+      payload?.message ?? '',
+      payload?.error?.message ?? '',
+      payload?.item?.id ?? '',
+      payload?.item?.type ?? '',
+    ].join('|');
   }
 }
 
