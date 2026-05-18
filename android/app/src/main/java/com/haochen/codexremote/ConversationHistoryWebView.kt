@@ -90,20 +90,29 @@ internal fun ConversationHistoryWebView(
     sessionId: String?,
     followBottom: Boolean,
     onApprovalDecision: (requestId: String, decision: String, itemId: String) -> Unit,
+    restoreScrollY: Int? = null,
+    onScrollRestored: () -> Unit = {},
+    onOpenCodeBrowser: (itemId: String, scrollY: Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
-    val pageHtml = remember(items) { buildConversationPageHtml(items) }
-    var pendingScrollMode by remember(sessionId) { mutableStateOf<ConversationScrollMode>(ConversationScrollMode.Bottom) }
+    val pageHtml = buildConversationPageHtml(items)
+    var pendingScrollMode by remember(sessionId, restoreScrollY) {
+        mutableStateOf<ConversationScrollMode>(
+            restoreScrollY?.let { ConversationScrollMode.Restore(it) } ?: ConversationScrollMode.Bottom,
+        )
+    }
     var lastLoadedHtml by remember(sessionId) { mutableStateOf<String?>(null) }
     var expectedHtmlTag by remember(sessionId) { mutableStateOf<String?>(null) }
+    var restoreAnnounced by remember(sessionId, restoreScrollY) { mutableStateOf(false) }
 
     val webView = remember(sessionId) {
         buildConversationWebView(
             context = context,
             onOpenLink = { url -> uriHandler.openUri(url) },
             onApprovalDecision = onApprovalDecision,
+            onOpenCodeBrowser = onOpenCodeBrowser,
             onPageFinished = { view ->
                 val targetMode = pendingScrollMode
                 listOf(0L, 48L, 160L).forEach { delayMs ->
@@ -111,6 +120,10 @@ internal fun ConversationHistoryWebView(
                         {
                             if (view.tag != expectedHtmlTag) return@postDelayed
                             applyConversationScrollMode(view, targetMode)
+                            if (targetMode is ConversationScrollMode.Restore && !restoreAnnounced) {
+                                restoreAnnounced = true
+                                onScrollRestored()
+                            }
                         },
                         delayMs,
                     )
@@ -128,6 +141,7 @@ internal fun ConversationHistoryWebView(
             val wasAtBottom = !view.canScrollVertically(1)
             pendingScrollMode =
                 when {
+                    restoreScrollY != null && sessionChanged -> ConversationScrollMode.Restore(restoreScrollY)
                     sessionChanged -> ConversationScrollMode.Bottom
                     followBottom && wasAtBottom -> ConversationScrollMode.Bottom
                     else -> ConversationScrollMode.Restore(view.scrollY)
@@ -150,6 +164,7 @@ private fun buildConversationWebView(
     context: Context,
     onOpenLink: (String) -> Unit,
     onApprovalDecision: (requestId: String, decision: String, itemId: String) -> Unit,
+    onOpenCodeBrowser: (itemId: String, scrollY: Int) -> Unit,
     onPageFinished: (WebView) -> Unit,
 ): WebView =
     WebView(context).apply {
@@ -179,7 +194,7 @@ private fun buildConversationWebView(
                     request: WebResourceRequest?,
                 ): Boolean {
                     val url = request?.url?.toString() ?: return false
-                    return handleConversationUrl(url, onOpenLink, onApprovalDecision)
+                    return handleConversationUrl(url, view?.scrollY ?: 0, onOpenLink, onApprovalDecision, onOpenCodeBrowser)
                 }
 
                 @Deprecated("Deprecated in Java")
@@ -188,7 +203,7 @@ private fun buildConversationWebView(
                     url: String?,
                 ): Boolean {
                     if (url.isNullOrBlank()) return false
-                    return handleConversationUrl(url, onOpenLink, onApprovalDecision)
+                    return handleConversationUrl(url, view?.scrollY ?: 0, onOpenLink, onApprovalDecision, onOpenCodeBrowser)
                 }
 
                 override fun onPageFinished(
@@ -203,8 +218,10 @@ private fun buildConversationWebView(
 
 private fun handleConversationUrl(
     rawUrl: String,
+    currentScrollY: Int,
     onOpenLink: (String) -> Unit,
     onApprovalDecision: (requestId: String, decision: String, itemId: String) -> Unit,
+    onOpenCodeBrowser: (itemId: String, scrollY: Int) -> Unit,
 ): Boolean {
     val uri = Uri.parse(rawUrl)
     if (uri.scheme == "codex-approval") {
@@ -213,6 +230,13 @@ private fun handleConversationUrl(
         val itemId = uri.getQueryParameter("itemId").orEmpty()
         if (requestId.isNotBlank() && decision.isNotBlank() && itemId.isNotBlank()) {
             onApprovalDecision(requestId, decision, itemId)
+        }
+        return true
+    }
+    if (uri.scheme == "codex-code-browser") {
+        val itemId = uri.getQueryParameter("itemId").orEmpty()
+        if (itemId.isNotBlank()) {
+            onOpenCodeBrowser(itemId, currentScrollY)
         }
         return true
     }
@@ -273,6 +297,7 @@ private fun buildConversationItemsHtml(items: List<ConversationItem>): String =
                 is ConversationItem.Bubble -> append(item.toHtml())
                 is ConversationItem.SystemNote -> append(item.toHtml())
                 is ConversationItem.Approval -> append(item.toHtml())
+                is ConversationItem.FileChange -> append(item.toHtml())
             }
         }
     }
@@ -321,12 +346,83 @@ private fun ConversationItem.Approval.toHtml(): String {
         }
     return """
         <div class="cr-message assistant">
-            <div class="cr-bubble approval">
-                <div class="cr-approval-title">${escapeConversationHtml(title)}</div>
-                <div class="cr-approval-detail">${buildPlainTextHtml(detail)}</div>
+                <div class="cr-bubble approval">
+                    <div class="cr-approval-title">${escapeConversationHtml(title)}</div>
+                    <div class="cr-approval-detail">${buildPlainTextHtml(detail)}</div>
+                ${buildConversationDiffDetailsHtml(diffEntries, null, defaultLabel = "点击查看文件 diff", browserItemId = id)}
                 <div class="cr-approval-actions">$actions</div>
             </div>
         </div>
+    """.trimIndent()
+}
+
+private fun ConversationItem.FileChange.toHtml(): String {
+    return """
+        <div class="cr-message assistant">
+            <div class="cr-bubble file-change">
+                <div class="cr-file-change-title">${escapeConversationHtml(title)}</div>
+                <div class="cr-file-change-summary">${buildPlainTextHtml(summary)}</div>
+                ${buildConversationDiffDetailsHtml(diffEntries, fallbackDiff, defaultLabel = "点击查看 diff", browserItemId = id)}
+            </div>
+        </div>
+    """.trimIndent()
+}
+
+private fun buildConversationDiffDetailsHtml(
+    diffEntries: List<ConversationDiffEntry>,
+    fallbackDiff: String?,
+    defaultLabel: String,
+    browserItemId: String? = null,
+): String {
+    if (diffEntries.isEmpty() && fallbackDiff.isNullOrBlank()) return ""
+
+    val body =
+        if (diffEntries.isNotEmpty()) {
+            buildString {
+                diffEntries.forEach { entry ->
+                    append(entry.toHtml())
+                }
+            }
+        } else {
+            "<pre><code>${escapeConversationHtml(fallbackDiff.orEmpty())}</code></pre>"
+        }
+
+    val browserAction =
+        browserItemId?.takeIf { it.isNotBlank() }?.let {
+            """
+            <div class="cr-diff-browser-row">
+                <a class="cr-diff-browser-action" href="codex-code-browser://open?itemId=${encodeUrlComponent(it)}">浏览代码</a>
+            </div>
+            """.trimIndent()
+        }.orEmpty()
+
+    return """
+        $browserAction
+        <details class="cr-diff-details">
+            <summary>${escapeConversationHtml(defaultLabel)}</summary>
+            <div class="cr-diff-body">$body</div>
+        </details>
+    """.trimIndent()
+}
+
+private fun ConversationDiffEntry.toHtml(): String {
+    val kindLabel =
+        when (kind.trim()) {
+            "add" -> "新增"
+            "delete" -> "删除"
+            "update" -> if (movePath.isNullOrBlank()) "修改" else "重命名"
+            else -> kind.ifBlank { "变更" }
+        }
+    val diffText = diff.ifBlank { "无可显示 diff" }
+    val extraPath = movePath?.takeIf { it.isNotBlank() }?.let { " → $it" }.orEmpty()
+    return """
+        <details class="cr-diff-file">
+            <summary>
+                <span class="cr-diff-kind ${escapeConversationHtmlAttribute(kind.trim())}">${escapeConversationHtml(kindLabel)}</span>
+                <span class="cr-diff-path">${escapeConversationHtml(path + extraPath)}</span>
+            </summary>
+            <pre><code>${escapeConversationHtml(diffText)}</code></pre>
+        </details>
     """.trimIndent()
 }
 
@@ -413,6 +509,11 @@ private fun buildConversationCss(): String =
         color: #FFFFFF !important;
     }
 
+    .cr-bubble.file-change {
+        background: #10263A !important;
+        color: #FFFFFF !important;
+    }
+
     .cr-note-row {
         display: flex;
         justify-content: flex-start;
@@ -458,6 +559,148 @@ private fun buildConversationCss(): String =
         color: #FFFFFF !important;
         text-decoration: none !important;
         font-weight: 600 !important;
+    }
+
+    .cr-file-change-title {
+        font-weight: 700 !important;
+        margin-bottom: 8px;
+    }
+
+    .cr-file-change-summary {
+        font-size: 13px !important;
+        line-height: 1.46 !important;
+        color: #C7D8EA !important;
+        margin-bottom: 10px;
+    }
+
+    .cr-diff-browser-row {
+        margin-bottom: 10px;
+    }
+
+    .cr-diff-browser-action {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 84px;
+        padding: 8px 12px;
+        border-radius: 12px;
+        background: rgba(15, 109, 153, 0.92) !important;
+        color: #FFFFFF !important;
+        text-decoration: none !important;
+        font-weight: 600 !important;
+    }
+
+    .cr-diff-details {
+        margin-top: 10px;
+        border: 1px solid rgba(125, 211, 252, 0.18);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.04);
+        overflow: hidden;
+    }
+
+    .cr-diff-details > summary {
+        cursor: pointer;
+        list-style: none;
+        padding: 10px 12px;
+        color: #7DD3FC !important;
+        font-weight: 600 !important;
+    }
+
+    .cr-diff-details > summary::-webkit-details-marker {
+        display: none;
+    }
+
+    .cr-diff-body {
+        padding: 0 10px 10px;
+    }
+
+    .cr-diff-body > pre {
+        margin: 0;
+        padding: 10px 12px 12px;
+        border-radius: 10px;
+        background: rgba(2, 6, 23, 0.72) !important;
+        overflow-x: auto;
+    }
+
+    .cr-diff-body > pre code {
+        color: #E2E8F0 !important;
+        background: transparent !important;
+        padding: 0 !important;
+        white-space: pre !important;
+    }
+
+    .cr-diff-file {
+        margin-top: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 10px;
+        overflow: hidden;
+        background: rgba(15, 23, 42, 0.88);
+    }
+
+    .cr-diff-file > summary {
+        cursor: pointer;
+        list-style: none;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        padding: 9px 10px;
+        color: #FFFFFF !important;
+        font-size: 13px !important;
+    }
+
+    .cr-diff-file > summary::-webkit-details-marker {
+        display: none;
+    }
+
+    .cr-diff-kind {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 52px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: rgba(125, 211, 252, 0.16);
+        color: #7DD3FC !important;
+        font-size: 11px !important;
+        font-weight: 700 !important;
+    }
+
+    .cr-diff-kind.add {
+        background: rgba(34, 197, 94, 0.18);
+        color: #86EFAC !important;
+    }
+
+    .cr-diff-kind.delete {
+        background: rgba(239, 68, 68, 0.18);
+        color: #FCA5A5 !important;
+    }
+
+    .cr-diff-kind.update {
+        background: rgba(59, 130, 246, 0.18);
+        color: #93C5FD !important;
+    }
+
+    .cr-diff-path {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .cr-diff-file pre {
+        margin: 0;
+        padding: 10px 12px 12px;
+        background: rgba(2, 6, 23, 0.72) !important;
+        overflow-x: auto;
+    }
+
+    .cr-diff-file code {
+        color: #E2E8F0 !important;
+        background: transparent !important;
+        padding: 0 !important;
+        white-space: pre !important;
     }
 
     .cr-md, .cr-md * {

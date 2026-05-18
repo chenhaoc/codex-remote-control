@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -40,11 +41,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DividerDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
@@ -72,10 +75,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
@@ -96,8 +104,10 @@ class MainActivity : ComponentActivity() {
         private const val KEY_HOST = "host"
         private const val KEY_PORT = "port"
         private const val KEY_TOKEN = "token"
+        private const val KEY_CONNECTION_HISTORY = "connection_history"
         private const val KEY_SESSION = "session"
         private const val KEY_MODEL = "model"
+        private const val MAX_CONNECTION_HISTORY = 8
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -108,6 +118,12 @@ class MainActivity : ComponentActivity() {
     private val conversationItems = mutableStateListOf<ConversationItem>()
     private val assistantItemIds = mutableMapOf<String, String>()
     private val approvalItemIds = mutableMapOf<String, String>()
+    private val toolItemIds = mutableMapOf<String, String>()
+    private val fileChangeItemIds = mutableMapOf<String, String>()
+    private val fileChangeTurnIds = mutableMapOf<String, String>()
+    private val turnDiffItemIds = mutableMapOf<String, String>()
+    private val turnDiffs = mutableMapOf<String, String>()
+    private val connectionHistory = mutableStateListOf<BridgeHistoryEntry>()
 
     private lateinit var prefs: SharedPreferences
     private var bridgeClient: BridgeClient? = null
@@ -118,17 +134,36 @@ class MainActivity : ComponentActivity() {
     private var bridgeUrl by mutableStateOf("")
     private var selectedModel by mutableStateOf("")
     private var connectionDetail by mutableStateOf("未连接")
+    private var currentBridgeUrl by mutableStateOf<String?>(null)
     private var composerText by mutableStateOf("")
     private var liveTurnStatus by mutableStateOf<String?>(null)
+    private var chatRestoreScrollY by mutableStateOf<Int?>(null)
+    private var codeBrowserState by mutableStateOf<CodeBrowserState?>(null)
     private var transientNotice by mutableStateOf<String?>(null)
     private var transientNonce by mutableStateOf(0)
     private var disconnectRequested = false
     private var bootSyncRequested = false
+    private var lastSyncedSeq = 0
+    private var syncInFlight = false
+
+    private val syncRunnable = object : Runnable {
+        override fun run() {
+            val sessionId = activeSessionId
+            if (!connected || sessionId.isNullOrBlank()) {
+                syncInFlight = false
+                return
+            }
+            requestSessionSync(sessionId, incremental = true)
+            mainHandler.postDelayed(this, 1500L)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         bridgeUrl = loadBridgeUrl()
+        replaceConnectionHistory(loadConnectionHistory(bridgeUrl))
+        persistConnectionHistory()
         activeSessionId = prefs.getString(KEY_SESSION, null)
         selectedModel = prefs.getString(KEY_MODEL, "")?.trim().orEmpty()
 
@@ -147,6 +182,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        stopSessionSyncLoop()
         bridgeClient?.let {
             disconnectRequested = true
             it.close()
@@ -408,6 +444,41 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                if (connectionHistory.isNotEmpty()) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = c(0xFF111A2E)),
+                        shape = RoundedCornerShape(22.dp),
+                    ) {
+                        Column(modifier = Modifier.padding(18.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                SectionTitle("历史连接")
+                                OutlinedButton(onClick = { clearConnectionHistory() }) {
+                                    Text("清空")
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            BodyText("点卡片回填地址，点右侧按钮直接连接或切换。")
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                connectionHistory.forEach { entry ->
+                                    HistoryConnectionCard(
+                                        entry = entry,
+                                        active = currentBridgeUrl == entry.url,
+                                        onApply = { applyHistoryConnection(entry) },
+                                        onConnect = { connectToHistory(entry) },
+                                        onDelete = { removeConnectionHistory(entry.url) },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(containerColor = c(0xFF0F172A)),
@@ -417,6 +488,97 @@ class MainActivity : ComponentActivity() {
                         SectionTitle("连接状态")
                         Spacer(modifier = Modifier.height(8.dp))
                         BodyText(connectionDetail)
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun HistoryConnectionCard(
+        entry: BridgeHistoryEntry,
+        active: Boolean,
+        onApply: () -> Unit,
+        onConnect: () -> Unit,
+        onDelete: () -> Unit,
+    ) {
+        val connectLabel = when {
+            active && connected -> "当前"
+            connected -> "切换"
+            else -> "连接"
+        }
+
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onApply),
+            shape = RoundedCornerShape(18.dp),
+            color = if (active) c(0xFF123B57) else c(0xFF0F172A),
+            border = if (active) androidx.compose.foundation.BorderStroke(1.dp, c(0xFF38BDF8)) else null,
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = entry.title,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = entry.detailLine(),
+                            color = c(0xFF98A8C2),
+                            fontSize = 12.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "最近使用 ${entry.lastUsedLabel()}",
+                            color = c(0xFF64748B),
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+
+                    FilledTonalButton(
+                        onClick = onConnect,
+                        enabled = !(active && connected),
+                    ) {
+                        Text(connectLabel)
+                    }
+                }
+
+                Text(
+                    text = entry.maskedUrl,
+                    color = c(0xFF64748B),
+                    fontSize = 11.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(
+                        onClick = onApply,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("填入")
+                    }
+                    OutlinedButton(
+                        onClick = onDelete,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("移除")
                     }
                 }
             }
@@ -469,25 +631,41 @@ class MainActivity : ComponentActivity() {
                 colors = CardDefaults.cardColors(containerColor = c(0xFF111A2E)),
                 shape = RoundedCornerShape(22.dp),
             ) {
-                if (conversationItems.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(18.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        BodyText("选中一个会话后，消息和审批会在这里出现。")
+                Box(modifier = Modifier.fillMaxSize()) {
+                    if (conversationItems.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(18.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            BodyText("选中一个会话后，消息和审批会在这里出现。")
+                        }
+                    } else {
+                        ConversationHistoryWebView(
+                            items = conversationItems,
+                            sessionId = activeSessionId,
+                            followBottom = activeTurnId != null,
+                            onApprovalDecision = { requestId, decision, itemId ->
+                                sendApproval(requestId, decision, itemId)
+                            },
+                            restoreScrollY = chatRestoreScrollY,
+                            onScrollRestored = {
+                                chatRestoreScrollY = null
+                            },
+                            onOpenCodeBrowser = { itemId, scrollY ->
+                                openCodeBrowser(itemId, scrollY)
+                            },
+                            modifier = Modifier.fillMaxSize(),
+                        )
                     }
-                } else {
-                    ConversationHistoryWebView(
-                        items = conversationItems,
-                        sessionId = activeSessionId,
-                        followBottom = activeTurnId != null,
-                        onApprovalDecision = { requestId, decision, itemId ->
-                            sendApproval(requestId, decision, itemId)
-                        },
-                        modifier = Modifier.fillMaxSize(),
-                    )
+
+                    codeBrowserState?.let { state ->
+                        CodeBrowserPage(
+                            state = state,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
                 }
             }
 
@@ -570,6 +748,263 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    @Composable
+    private fun CodeBrowserPage(
+        state: CodeBrowserState,
+        modifier: Modifier = Modifier,
+    ) {
+        val selectedEntry = state.selectedEntry()
+
+        LaunchedEffect(state.conversationItemId, state.mode, state.selectedPath, state.fileReadState) {
+            if (state.mode == CodeBrowserMode.File && state.fileReadState is CodeBrowserFileReadState.Idle) {
+                loadCodeBrowserFileContent(state)
+            }
+        }
+
+        Box(
+            modifier = modifier
+                .background(c(0xFF111A2E))
+                .padding(14.dp),
+        ) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    color = c(0xFF0F172A),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        OutlinedButton(onClick = { closeCodeBrowser() }) {
+                            Text("返回对话")
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = state.title,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = when {
+                                    selectedEntry != null -> selectedEntry.displayPath()
+                                    state.diffEntries.isNotEmpty() -> "共 ${state.diffEntries.size} 个文件"
+                                    else -> "聚合 diff"
+                                },
+                                color = c(0xFF98A8C2),
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+
+                if (state.diffEntries.size > 1) {
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        state.diffEntries.forEach { entry ->
+                            CodeBrowserFileChip(
+                                label = entry.displayPath(),
+                                selected = state.selectedPath == entry.browsePath(),
+                                onClick = { selectCodeBrowserPath(entry.browsePath()) },
+                            )
+                        }
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    CodeBrowserModeButton(
+                        text = "Diff",
+                        selected = state.mode == CodeBrowserMode.Diff,
+                        modifier = Modifier.weight(1f),
+                        onClick = { setCodeBrowserMode(CodeBrowserMode.Diff) },
+                    )
+                    CodeBrowserModeButton(
+                        text = "文件",
+                        selected = state.mode == CodeBrowserMode.File,
+                        enabled = selectedEntry != null,
+                        modifier = Modifier.weight(1f),
+                        onClick = { setCodeBrowserMode(CodeBrowserMode.File) },
+                    )
+                }
+
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    shape = RoundedCornerShape(18.dp),
+                    color = c(0xFF0B1220),
+                ) {
+                    when (state.mode) {
+                        CodeBrowserMode.Diff -> {
+                            val diffText = selectedEntry?.diff ?: state.fallbackDiff.orEmpty()
+                            if (diffText.isBlank()) {
+                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    BodyText("这个条目暂时没有可展示的 diff。")
+                                }
+                            } else {
+                                CodeBrowserTextPane(
+                                    text = diffText,
+                                    mode = CodeTextMode.Diff,
+                                    pathHint = selectedEntry?.browsePath(),
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                            }
+                        }
+
+                        CodeBrowserMode.File -> {
+                            when (val fileState = state.fileReadState) {
+                                CodeBrowserFileReadState.Idle -> {
+                                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                        BodyText("正在准备读取文件内容…")
+                                    }
+                                }
+
+                                CodeBrowserFileReadState.Loading -> {
+                                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                        CircularProgressIndicator(color = c(0xFF38BDF8))
+                                    }
+                                }
+
+                                is CodeBrowserFileReadState.Error -> {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(18.dp),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        BodyText(fileState.message)
+                                    }
+                                }
+
+                                is CodeBrowserFileReadState.Loaded -> {
+                                    CodeBrowserTextPane(
+                                        text = fileState.content.content,
+                                        mode = CodeTextMode.File,
+                                        pathHint = fileState.content.resolvedPath,
+                                        modifier = Modifier.fillMaxSize(),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                when (val fileState = state.fileReadState) {
+                    is CodeBrowserFileReadState.Loaded ->
+                        if (state.mode == CodeBrowserMode.File) {
+                            Text(
+                                text = buildString {
+                                    append(fileState.content.resolvedPath)
+                                    if (fileState.content.truncated) {
+                                        append(" · 已截断到 ${fileState.content.bytes} bytes")
+                                    }
+                                },
+                                color = c(0xFF98A8C2),
+                                fontSize = 11.sp,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+
+                    else -> Unit
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun CodeBrowserModeButton(
+        text: String,
+        selected: Boolean,
+        modifier: Modifier = Modifier,
+        enabled: Boolean = true,
+        onClick: () -> Unit,
+    ) {
+        if (selected) {
+            Button(
+                onClick = onClick,
+                enabled = enabled,
+                modifier = modifier,
+                colors = ButtonDefaults.buttonColors(containerColor = c(0xFF0F6D99)),
+            ) {
+                Text(text)
+            }
+        } else {
+            OutlinedButton(
+                onClick = onClick,
+                enabled = enabled,
+                modifier = modifier,
+            ) {
+                Text(text)
+            }
+        }
+    }
+
+    @Composable
+    private fun CodeBrowserFileChip(
+        label: String,
+        selected: Boolean,
+        onClick: () -> Unit,
+    ) {
+        Surface(
+            shape = RoundedCornerShape(999.dp),
+            color = if (selected) c(0xFF123B57) else c(0xFF0F172A),
+            border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, c(0xFF38BDF8)) else null,
+            modifier = Modifier.clickable(onClick = onClick),
+        ) {
+            Text(
+                text = label,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                color = Color.White,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+
+    @Composable
+    private fun CodeBrowserTextPane(
+        text: String,
+        mode: CodeTextMode,
+        pathHint: String? = null,
+        modifier: Modifier = Modifier,
+    ) {
+        val verticalScroll = rememberScrollState()
+        val horizontalScroll = rememberScrollState()
+        val content = remember(text, mode, pathHint) { buildCodeBrowserAnnotatedText(text, mode, pathHint) }
+
+        SelectionContainer {
+            Box(
+                modifier = modifier
+                    .background(c(0xFF0B1220))
+                    .verticalScroll(verticalScroll)
+                    .horizontalScroll(horizontalScroll)
+                    .padding(14.dp),
+            ) {
+                Text(
+                    text = content,
+                    color = Color.White,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp,
+                )
             }
         }
     }
@@ -810,14 +1245,7 @@ class MainActivity : ComponentActivity() {
 
     private fun toggleConnection() {
         if (bridgeClient?.isOpen() == true) {
-            disconnectRequested = true
-            bridgeClient?.close()
-            bridgeClient = null
-            connected = false
-            activeTurnId = null
-            pendingRequests.clear()
-            selectedTab = AppTab.Connection
-            connectionDetail = "连接已关闭"
+            disconnectBridge(detail = "连接已关闭", switchToConnectionPage = true)
             return
         }
 
@@ -829,17 +1257,51 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        connectToBridge(url)
+    }
+
+    private fun disconnectBridge(
+        detail: String,
+        switchToConnectionPage: Boolean,
+    ) {
+        stopSessionSyncLoop()
+        disconnectRequested = true
+        bridgeClient?.close()
+        bridgeClient = null
+        connected = false
+        activeTurnId = null
+        pendingRequests.clear()
+        currentBridgeUrl = null
+        if (switchToConnectionPage) {
+            selectedTab = AppTab.Connection
+        }
+        connectionDetail = detail
+    }
+
+    private fun connectToBridge(url: String) {
+        if (bridgeClient?.isOpen() == true && currentBridgeUrl == url) {
+            selectedTab = AppTab.Chat
+            connectionDetail = "已连接到 ${BridgeHistoryEntry.fromUrl(url)?.title ?: url}"
+            return
+        }
+
+        if (bridgeClient != null) {
+            disconnectBridge(detail = "正在切换连接…", switchToConnectionPage = false)
+        }
+
         saveBridgeSettings(url)
         bridgeUrl = url
         disconnectRequested = false
         bootSyncRequested = false
         connected = false
+        currentBridgeUrl = url
         connectionDetail = "连接中: $url"
 
         bridgeClient = BridgeClient(URI.create(url), object : BridgeClient.Listener {
             override fun onOpen() {
                 mainHandler.post {
                     connected = true
+                    rememberConnectionHistory(url)
                     selectedTab = AppTab.Chat
                     connectionDetail = "已连接，等待 bridge hello..."
                 }
@@ -854,7 +1316,9 @@ class MainActivity : ComponentActivity() {
                     connected = false
                     activeTurnId = null
                     pendingRequests.clear()
+                    stopSessionSyncLoop()
                     bridgeClient = null
+                    currentBridgeUrl = null
                     selectedTab = AppTab.Connection
                     connectionDetail = reason + describeThrowable(error)
                     disconnectRequested = false
@@ -866,9 +1330,20 @@ class MainActivity : ComponentActivity() {
             bridgeClient?.connect()
         } catch (error: RuntimeException) {
             bridgeClient = null
+            currentBridgeUrl = null
             connectionDetail = "连接失败: ${error.message}"
             showNotice(connectionDetail)
         }
+    }
+
+    private fun applyHistoryConnection(entry: BridgeHistoryEntry) {
+        bridgeUrl = entry.url
+        connectionDetail = "已回填 ${entry.title}，点击连接即可"
+    }
+
+    private fun connectToHistory(entry: BridgeHistoryEntry) {
+        bridgeUrl = entry.url
+        connectToBridge(entry.url)
     }
 
     private fun handleIncoming(text: String) {
@@ -885,6 +1360,7 @@ class MainActivity : ComponentActivity() {
                 selectedTab = AppTab.Chat
                 requestSessionList()
                 requestModelList()
+                startSessionSyncLoop()
             }
 
             "event" -> handleEvent(message)
@@ -900,6 +1376,7 @@ class MainActivity : ComponentActivity() {
         if (callback != null) {
             if (!ok) {
                 val errorText = extractErrorText(message.optJSONObject("error")).ifBlank { formatJson(message.optJSONObject("error")) }
+                callback.onError(errorText)
                 appendSystemNote("请求失败: $errorText")
                 showNotice("请求失败: $errorText")
                 return
@@ -964,7 +1441,19 @@ class MainActivity : ComponentActivity() {
             "rawResponseItem/completed" -> {
                 handleRawResponseItem(message, payload)
             }
-            "item/commandExecution/requestApproval" -> handleApprovalRequest(message, payload)
+            "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval",
+            "item/permissions/requestApproval",
+            "applyPatchApproval",
+            "execCommandApproval" -> handleApprovalRequest(eventName, message, payload)
+            "item/fileChange/patchUpdated" -> {
+                updateLiveTurnStatus("Codex 正在修改文件…")
+                handleFileChangePatchUpdated(message, payload)
+            }
+            "turn/diff/updated" -> {
+                updateLiveTurnStatus("Codex 正在修改文件…")
+                handleTurnDiffUpdated(message, payload)
+            }
             "item/started", "item/completed" -> {
                 updateLiveTurnStatusFromItem(eventName, payload.optJSONObject("item"))
                 handleThreadItemEvent(eventName, payload)
@@ -1020,17 +1509,19 @@ class MainActivity : ComponentActivity() {
         appendAssistantDeltaBubble(turnKey, itemKey.ifBlank { "stream" }, delta)
     }
 
-    private fun handleApprovalRequest(message: JSONObject, payload: JSONObject) {
+    private fun handleApprovalRequest(eventName: String, message: JSONObject, payload: JSONObject) {
         val requestId = firstNonEmpty(message.optString("request_id", ""), message.optString("id", ""))
         if (requestId.isBlank() || approvalItemIds.containsKey(requestId)) return
 
         val decisions = payload.optJSONArray("availableDecisions").toDecisionList()
+        val presentation = buildApprovalPresentation(eventName, payload)
         val item = ConversationItem.Approval(
             id = "approval_${UUID.randomUUID()}",
             requestId = requestId,
-            title = "需要审批",
-            detail = buildApprovalSummary(payload),
+            title = presentation.title,
+            detail = presentation.detail,
             availableDecisions = decisions.ifEmpty { listOf("accept", "decline") },
+            diffEntries = presentation.diffEntries,
         )
         approvalItemIds[requestId] = item.id
         conversationItems.add(item)
@@ -1187,17 +1678,31 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestSessionSync(sessionId: String) {
+        requestSessionSync(sessionId, incremental = false)
+    }
+
+    private fun requestSessionSync(sessionId: String, incremental: Boolean) {
         if (sessionId.isBlank()) return
-        clearConversation()
+        if (!ensureConnected()) return
+        if (incremental && syncInFlight) return
+        if (!incremental) {
+            clearConversation()
+        }
+        syncInFlight = incremental
         val payload = JSONObject().apply {
             put("session_id", sessionId)
-            put("since_seq", 0)
+            put("since_seq", if (incremental) lastSyncedSeq else 0)
         }
 
         sendRequest("session.sync", payload) { response ->
-            val events = response.optJSONObject("payload")?.optJSONArray("events")
+            syncInFlight = false
+            val responsePayload = response.optJSONObject("payload")
+            lastSyncedSeq = maxOf(lastSyncedSeq, responsePayload?.optInt("last_seq", lastSyncedSeq) ?: lastSyncedSeq)
+            val events = responsePayload?.optJSONArray("events")
             if (events == null || events.length() == 0) {
-                appendSystemNote("这个会话暂时没有本地同步消息")
+                if (!incremental) {
+                    appendSystemNote("这个会话暂时没有本地同步消息")
+                }
                 return@sendRequest
             }
             for (i in 0 until events.length()) {
@@ -1213,6 +1718,12 @@ class MainActivity : ComponentActivity() {
             "item/agentMessage/delta",
             "rawResponseItem/completed",
             "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval",
+            "item/permissions/requestApproval",
+            "applyPatchApproval",
+            "execCommandApproval",
+            "item/fileChange/patchUpdated",
+            "turn/diff/updated",
             "turn/completed",
             "thread/started",
             "item/started",
@@ -1234,6 +1745,7 @@ class MainActivity : ComponentActivity() {
         if (syncHistory) {
             requestSessionSync(sessionId)
         }
+        startSessionSyncLoop()
     }
 
     private fun replaceSessions(newSessions: List<SessionInfo>) {
@@ -1250,8 +1762,17 @@ class MainActivity : ComponentActivity() {
         conversationItems.clear()
         assistantItemIds.clear()
         approvalItemIds.clear()
+        toolItemIds.clear()
+        fileChangeItemIds.clear()
+        fileChangeTurnIds.clear()
+        turnDiffItemIds.clear()
+        turnDiffs.clear()
         renderedEventKeys.clear()
         activeTurnId = null
+        chatRestoreScrollY = null
+        codeBrowserState = null
+        lastSyncedSeq = 0
+        syncInFlight = false
     }
 
     private fun appendSystemNote(text: String) {
@@ -1287,6 +1808,159 @@ class MainActivity : ComponentActivity() {
         if (index >= 0) {
             conversationItems.removeAt(index)
         }
+        if (codeBrowserState?.conversationItemId == itemId) {
+            codeBrowserState = null
+        }
+    }
+
+    private fun openCodeBrowser(itemId: String, scrollY: Int) {
+        val sessionId = activeSessionId
+        val item = conversationItems.firstOrNull { it.id == itemId }
+        val state =
+            when (item) {
+                is ConversationItem.FileChange ->
+                    CodeBrowserState(
+                        conversationItemId = item.id,
+                        sessionId = sessionId,
+                        title = item.title,
+                        diffEntries = item.diffEntries,
+                        fallbackDiff = item.fallbackDiff,
+                        selectedPath = item.diffEntries.firstOrNull()?.browsePath(),
+                    )
+
+                is ConversationItem.Approval ->
+                    CodeBrowserState(
+                        conversationItemId = item.id,
+                        sessionId = sessionId,
+                        title = item.title,
+                        diffEntries = item.diffEntries,
+                        fallbackDiff = null,
+                        selectedPath = item.diffEntries.firstOrNull()?.browsePath(),
+                    )
+
+                else -> null
+            }
+
+        if (state == null || (state.diffEntries.isEmpty() && state.fallbackDiff.isNullOrBlank())) {
+            showNotice("这个条目暂时没有可浏览的代码内容")
+            return
+        }
+        chatRestoreScrollY = scrollY.coerceAtLeast(0)
+        codeBrowserState = state
+    }
+
+    private fun closeCodeBrowser() {
+        codeBrowserState = null
+    }
+
+    private fun selectCodeBrowserPath(path: String) {
+        val state = codeBrowserState ?: return
+        if (state.selectedPath == path) return
+        codeBrowserState = state.copy(
+            selectedPath = path,
+            fileReadState = CodeBrowserFileReadState.Idle,
+        )
+    }
+
+    private fun setCodeBrowserMode(mode: CodeBrowserMode) {
+        val state = codeBrowserState ?: return
+        if (state.mode == mode) return
+        codeBrowserState = state.copy(
+            mode = mode,
+            fileReadState = when {
+                mode == CodeBrowserMode.File -> CodeBrowserFileReadState.Idle
+                else -> state.fileReadState
+            },
+        )
+    }
+
+    private fun loadCodeBrowserFileContent(state: CodeBrowserState) {
+        val entry = state.selectedEntry()
+        val sessionId = state.sessionId ?: activeSessionId
+        if (entry == null || sessionId.isNullOrBlank()) {
+            codeBrowserState = state.copy(fileReadState = CodeBrowserFileReadState.Error("没有可读取的文件内容"))
+            return
+        }
+        if (entry.kind.trim() == "delete" && entry.movePath.isNullOrBlank()) {
+            codeBrowserState = state.copy(fileReadState = CodeBrowserFileReadState.Error("该文件已经被删除，当前内容无法读取"))
+            return
+        }
+
+        val candidatePaths = entry.browseCandidates()
+        if (candidatePaths.isEmpty()) {
+            codeBrowserState = state.copy(fileReadState = CodeBrowserFileReadState.Error("没有可读取的文件路径"))
+            return
+        }
+        val browsePath = candidatePaths.first()
+        codeBrowserState = state.copy(fileReadState = CodeBrowserFileReadState.Loading)
+
+        fun requestAt(index: Int) {
+            val requestedPath = candidatePaths.getOrNull(index)
+            if (requestedPath.isNullOrBlank()) {
+                val current = codeBrowserState ?: return
+                if (current.conversationItemId == state.conversationItemId && current.selectedPath == browsePath) {
+                    codeBrowserState = current.copy(fileReadState = CodeBrowserFileReadState.Error("文件读取失败，候选路径都不可用"))
+                }
+                return
+            }
+
+            val payload = JSONObject().apply {
+                put("session_id", sessionId)
+                put("path", requestedPath)
+                put("max_bytes", 200000)
+            }
+
+            val sent = sendRequest("file.read", payload, object : ResponseHandler {
+                override fun onResponse(response: JSONObject) {
+                    val current = codeBrowserState ?: return
+                    if (current.conversationItemId != state.conversationItemId || current.selectedPath != browsePath) return
+
+                    val result = response.optJSONObject("payload") ?: JSONObject()
+                    codeBrowserState = current.copy(
+                        fileReadState = CodeBrowserFileReadState.Loaded(
+                            CodeBrowserFileContent(
+                                requestedPath = requestedPath,
+                                resolvedPath = result.optString("resolved_path", requestedPath),
+                                content = result.optString("content", ""),
+                                truncated = result.optBoolean("truncated", false),
+                                bytes = result.optInt("bytes", 0),
+                            ),
+                        ),
+                    )
+                }
+
+                override fun onError(errorText: String) {
+                    if (index + 1 < candidatePaths.size) {
+                        requestAt(index + 1)
+                        return
+                    }
+                    val current = codeBrowserState ?: return
+                    if (current.conversationItemId != state.conversationItemId || current.selectedPath != browsePath) return
+                    codeBrowserState = current.copy(
+                        fileReadState = CodeBrowserFileReadState.Error(
+                            buildString {
+                                append(if (errorText.isBlank()) "文件读取失败" else errorText)
+                                append("\n候选路径: ")
+                                append(candidatePaths.joinToString(" | "))
+                            },
+                        ),
+                    )
+                }
+            })
+
+            if (!sent) {
+                if (index + 1 < candidatePaths.size) {
+                    requestAt(index + 1)
+                    return
+                }
+                val current = codeBrowserState ?: return
+                if (current.conversationItemId == state.conversationItemId && current.selectedPath == browsePath) {
+                    codeBrowserState = current.copy(fileReadState = CodeBrowserFileReadState.Error("文件读取请求发送失败"))
+                }
+            }
+        }
+
+        requestAt(0)
     }
 
     private fun buildBridgeUrl(): String {
@@ -1333,6 +2007,74 @@ class MainActivity : ComponentActivity() {
         if (uri.port >= 0) {
             prefs.edit().putString(KEY_PORT, uri.port.toString()).apply()
         }
+    }
+
+    private fun rememberConnectionHistory(url: String) {
+        val entry = BridgeHistoryEntry.fromUrl(url, System.currentTimeMillis()) ?: return
+        replaceConnectionHistory(
+            listOf(entry) + connectionHistory.filterNot { it.url == entry.url },
+        )
+        persistConnectionHistory()
+    }
+
+    private fun removeConnectionHistory(url: String) {
+        replaceConnectionHistory(connectionHistory.filterNot { it.url == url })
+        persistConnectionHistory()
+    }
+
+    private fun clearConnectionHistory() {
+        connectionHistory.clear()
+        persistConnectionHistory()
+    }
+
+    private fun replaceConnectionHistory(entries: List<BridgeHistoryEntry>) {
+        val normalized = entries
+            .sortedByDescending { it.lastUsedAt }
+            .distinctBy { it.url }
+            .take(MAX_CONNECTION_HISTORY)
+        connectionHistory.clear()
+        connectionHistory.addAll(normalized)
+    }
+
+    private fun loadConnectionHistory(fallbackUrl: String): List<BridgeHistoryEntry> {
+        val raw = prefs.getString(KEY_CONNECTION_HISTORY, "")?.trim().orEmpty()
+        val parsed = mutableListOf<BridgeHistoryEntry>()
+        if (raw.isNotBlank()) {
+            try {
+                val array = JSONArray(raw)
+                for (i in 0 until array.length()) {
+                    val item = array.optJSONObject(i) ?: continue
+                    val url = item.optString("url", "").trim()
+                    if (url.isBlank()) continue
+                    BridgeHistoryEntry.fromUrl(
+                        url = url,
+                        lastUsedAt = item.optLong("lastUsedAt", 0L).takeIf { it > 0L } ?: System.currentTimeMillis(),
+                    )?.let(parsed::add)
+                }
+            } catch (_: JSONException) {
+                parsed.clear()
+            }
+        }
+        if (parsed.isNotEmpty()) {
+            return parsed
+        }
+        return fallbackUrl.takeIf { it.isNotBlank() }
+            ?.let { BridgeHistoryEntry.fromUrl(it, System.currentTimeMillis()) }
+            ?.let(::listOf)
+            .orEmpty()
+    }
+
+    private fun persistConnectionHistory() {
+        val array = JSONArray()
+        connectionHistory.take(MAX_CONNECTION_HISTORY).forEach { entry ->
+            array.put(
+                JSONObject().apply {
+                    put("url", entry.url)
+                    put("lastUsedAt", entry.lastUsedAt)
+                },
+            )
+        }
+        prefs.edit().putString(KEY_CONNECTION_HISTORY, array.toString()).apply()
     }
 
     private fun extractTokenFromUrl(url: String): String? {
@@ -1478,20 +2220,29 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun buildApprovalSummary(payload: JSONObject): String {
+    private fun buildApprovalPresentation(eventName: String, payload: JSONObject): ApprovalPresentation {
         val lines = mutableListOf<String>()
+        val diffEntries = payload.optJSONObject("fileChanges").toApprovalDiffEntries()
         val reason = payload.optString("reason", "")
         val command = payload.optString("command", "")
         val cwd = payload.optString("cwd", "")
-        val itemId = payload.optString("itemId", "")
-        val requestId = payload.optString("requestId", "")
-        if (reason.isNotBlank()) lines.add("原因: $reason")
+        val grantRoot = payload.optString("grantRoot", "")
+        if (reason.isNotBlank()) lines.add(reason)
         if (command.isNotBlank()) lines.add("命令: $command")
         if (cwd.isNotBlank()) lines.add("目录: $cwd")
-        if (itemId.isNotBlank()) lines.add("Item: $itemId")
-        if (requestId.isNotBlank()) lines.add("Request: $requestId")
+        if (grantRoot.isNotBlank()) lines.add("授权目录: $grantRoot")
+        if (diffEntries.isNotEmpty()) lines.add("变更文件: ${diffEntries.size} 个")
         if (lines.isEmpty()) lines.add(safeJson(payload))
-        return lines.joinToString("\n")
+        return ApprovalPresentation(
+            title = when (eventName) {
+                "item/fileChange/requestApproval", "applyPatchApproval" -> "文件修改需要审批"
+                "item/permissions/requestApproval" -> "权限提升需要审批"
+                "execCommandApproval", "item/commandExecution/requestApproval" -> "命令执行需要审批"
+                else -> "需要审批"
+            },
+            detail = lines.joinToString("\n"),
+            diffEntries = diffEntries,
+        )
     }
 
     private fun handleThreadItemEvent(eventName: String, payload: JSONObject) {
@@ -1505,7 +2256,49 @@ class MainActivity : ComponentActivity() {
                     finalizeAssistantBubble(turnKey, itemKey, text.ifBlank { formatJson(item) })
                 }
             }
+            "fileChange" -> handleFileChangeItem(turnKey, item)
+            "commandExecution",
+            "mcpToolCall",
+            "dynamicToolCall",
+            "collabAgentToolCall",
+            "plan",
+            "reasoning",
+            "contextCompaction" -> handleToolItem(eventName, item)
             else -> Unit
+        }
+    }
+
+    private fun handleToolItem(eventName: String, item: JSONObject) {
+        val itemId = item.optString("id", "").trim()
+        if (itemId.isBlank()) return
+        val title = if (eventName == "item/started") {
+            "${labelThreadItem(item)} 开始"
+        } else {
+            labelThreadItem(item)
+        }
+        val detail = when (item.optString("type", "")) {
+            "plan", "reasoning" -> formatThreadItemDetails(item)
+            else -> formatToolItemDetails(item, eventName)
+        }.trim()
+        val text = if (detail.isBlank()) title else "$title\n$detail"
+        val existingId = toolItemIds[itemId]
+        if (existingId == null) {
+            val created = ConversationItem.SystemNote(
+                id = "tool_${UUID.randomUUID()}",
+                text = text,
+                itemKey = itemId,
+            )
+            toolItemIds[itemId] = created.id
+            conversationItems.add(created)
+            return
+        }
+
+        replaceConversationItem(existingId) { current ->
+            if (current is ConversationItem.SystemNote) {
+                current.copy(text = text, itemKey = itemId)
+            } else {
+                current
+            }
         }
     }
 
@@ -1613,18 +2406,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            "fileChange" -> {
-                if (eventName == "item/started") {
-                    item.optString("status", "").takeIf { it.isNotBlank() }?.let { lines.add("状态: $it") }
-                } else {
-                    item.optString("status", "").takeIf { it.isNotBlank() }?.let { lines.add("状态: $it") }
-                    item.optJSONArray("changes")?.let { changes ->
-                        lines.add("变更: ${changes.length()} 项")
-                        lines.add(changes.toString(2))
-                    }
-                }
-            }
-
             "mcpToolCall" -> {
                 item.optString("server", "").takeIf { it.isNotBlank() }?.let { lines.add("服务: $it") }
                 item.optString("tool", "").takeIf { it.isNotBlank() }?.let { lines.add("工具: $it") }
@@ -1661,6 +2442,227 @@ class MainActivity : ComponentActivity() {
             }
         }
         return if (lines.isEmpty()) formatJson(item) else lines.joinToString("\n")
+    }
+
+    private fun handleFileChangeItem(turnKey: String, item: JSONObject) {
+        val itemId = item.optString("id", "").trim()
+        if (itemId.isBlank()) return
+        val changes = item.optJSONArray("changes").toConversationDiffEntries()
+        val status = item.optString("status", "").trim()
+        upsertFileChangeConversationItem(
+            itemId = itemId,
+            turnKey = turnKey,
+            status = status,
+            diffEntries = changes,
+            fallbackDiff = turnDiffs[turnKey],
+        )
+    }
+
+    private fun handleFileChangePatchUpdated(message: JSONObject, payload: JSONObject) {
+        val itemId = extractAssistantItemKey(message = message, payload = payload)
+        if (itemId.isBlank()) return
+        val turnKey = extractTurnKey(message, payload)
+        val changes = payload.optJSONArray("changes").toConversationDiffEntries()
+        upsertFileChangeConversationItem(
+            itemId = itemId,
+            turnKey = turnKey,
+            status = "inProgress",
+            diffEntries = changes,
+            fallbackDiff = turnDiffs[turnKey],
+        )
+    }
+
+    private fun handleTurnDiffUpdated(message: JSONObject, payload: JSONObject) {
+        val turnKey = extractTurnKey(message, payload)
+        val diff = payload.optString("diff", "").trim()
+        if (turnKey.isBlank() || diff.isBlank()) return
+        turnDiffs[turnKey] = diff
+
+        val existingFileChangeItemId = fileChangeTurnIds.entries.firstOrNull { it.value == turnKey }?.key
+        if (existingFileChangeItemId != null) {
+            val conversationItemId = fileChangeItemIds[existingFileChangeItemId]
+            if (conversationItemId != null) {
+                replaceConversationItem(conversationItemId) { current ->
+                    if (current is ConversationItem.FileChange) {
+                        current.copy(
+                            summary = buildFileChangeSummary(
+                                status = current.status,
+                                diffEntries = current.diffEntries,
+                                fallbackDiff = diff,
+                            ),
+                            fallbackDiff = diff,
+                        )
+                    } else {
+                        current
+                    }
+                }
+                return
+            }
+        }
+
+        upsertTurnDiffConversationItem(turnKey, diff)
+    }
+
+    private fun upsertFileChangeConversationItem(
+        itemId: String,
+        turnKey: String,
+        status: String,
+        diffEntries: List<ConversationDiffEntry>,
+        fallbackDiff: String?,
+    ) {
+        if (itemId.isBlank() || turnKey.isBlank()) return
+        fileChangeTurnIds[itemId] = turnKey
+        turnDiffItemIds.remove(turnKey)?.let(::removeConversationItem)
+
+        val summary = buildFileChangeSummary(status, diffEntries, fallbackDiff)
+        val existingId = fileChangeItemIds[itemId]
+        if (existingId == null) {
+            val created = ConversationItem.FileChange(
+                id = "file_change_${UUID.randomUUID()}",
+                title = "文件修改",
+                summary = summary,
+                status = status,
+                diffEntries = diffEntries,
+                fallbackDiff = fallbackDiff,
+            )
+            fileChangeItemIds[itemId] = created.id
+            conversationItems.add(created)
+            return
+        }
+
+        replaceConversationItem(existingId) { current ->
+            if (current is ConversationItem.FileChange) {
+                current.copy(
+                    title = "文件修改",
+                    summary = summary,
+                    status = status,
+                    diffEntries = diffEntries,
+                    fallbackDiff = fallbackDiff,
+                )
+            } else {
+                current
+            }
+        }
+    }
+
+    private fun upsertTurnDiffConversationItem(turnKey: String, diff: String) {
+        val summary = buildFileChangeSummary(status = "inProgress", diffEntries = emptyList(), fallbackDiff = diff)
+        val existingId = turnDiffItemIds[turnKey]
+        if (existingId == null) {
+            val created = ConversationItem.FileChange(
+                id = "turn_diff_${UUID.randomUUID()}",
+                title = "文件修改中",
+                summary = summary,
+                status = "inProgress",
+                diffEntries = emptyList(),
+                fallbackDiff = diff,
+            )
+            turnDiffItemIds[turnKey] = created.id
+            conversationItems.add(created)
+            return
+        }
+
+        replaceConversationItem(existingId) { current ->
+            if (current is ConversationItem.FileChange) {
+                current.copy(
+                    title = "文件修改中",
+                    summary = summary,
+                    status = "inProgress",
+                    fallbackDiff = diff,
+                )
+            } else {
+                current
+            }
+        }
+    }
+
+    private fun buildFileChangeSummary(
+        status: String,
+        diffEntries: List<ConversationDiffEntry>,
+        fallbackDiff: String?,
+    ): String {
+        val parts = mutableListOf<String>()
+        labelPatchStatus(status).takeIf { it.isNotBlank() }?.let(parts::add)
+
+        if (diffEntries.isNotEmpty()) {
+            val paths = diffEntries.map { it.summaryPath() }.distinct()
+            parts.add("${paths.size} 个文件")
+            val preview = paths.take(2).joinToString("、")
+            if (preview.isNotBlank()) {
+                parts.add(if (paths.size > 2) "$preview 等" else preview)
+            }
+        } else if (!fallbackDiff.isNullOrBlank()) {
+            parts.add("点击查看 diff")
+        }
+
+        return if (parts.isEmpty()) "点击查看详情" else parts.joinToString(" · ")
+    }
+
+    private fun labelPatchStatus(status: String): String {
+        return when (status.trim()) {
+            "inProgress" -> "进行中"
+            "completed" -> "已完成"
+            "failed" -> "失败"
+            "declined" -> "已拒绝"
+            else -> status.trim()
+        }
+    }
+
+    private fun JSONArray?.toConversationDiffEntries(): List<ConversationDiffEntry> {
+        if (this == null) return emptyList()
+        return buildList {
+            for (i in 0 until length()) {
+                optJSONObject(i)?.toConversationDiffEntry()?.let(::add)
+            }
+        }
+    }
+
+    private fun JSONObject.toConversationDiffEntry(): ConversationDiffEntry? {
+        val path = normalizeNullablePath(opt("path")).orEmpty()
+        if (path.isBlank()) return null
+        val kindObject = optJSONObject("kind")
+        val kindType = firstNonEmpty(
+            kindObject?.optString("type", "") ?: "",
+            optString("type", ""),
+            "update",
+        )
+        val movePath = firstNonEmpty(
+            normalizeNullablePath(kindObject?.opt("move_path")).orEmpty(),
+            normalizeNullablePath(opt("move_path")).orEmpty(),
+        ).ifBlank { null }
+        return ConversationDiffEntry(
+            path = path,
+            kind = kindType,
+            diff = optString("diff", "").trim(),
+            movePath = movePath,
+        )
+    }
+
+    private fun JSONObject?.toApprovalDiffEntries(): List<ConversationDiffEntry> {
+        if (this == null) return emptyList()
+        val changes = mutableListOf<ConversationDiffEntry>()
+        val keys = keys()
+        while (keys.hasNext()) {
+            val path = normalizeNullablePath(keys.next()).orEmpty()
+            if (path.isBlank()) continue
+            val change = optJSONObject(path) ?: continue
+            val kind = change.optString("type", "").trim().ifBlank { "update" }
+            val diff = when (kind) {
+                "update" -> change.optString("unified_diff", "").trim()
+                "add" -> change.optString("content", "").trim()
+                "delete" -> change.optString("content", "").trim()
+                else -> safeJson(change)
+            }
+            changes.add(
+                ConversationDiffEntry(
+                    path = path,
+                    kind = kind,
+                    diff = diff,
+                    movePath = normalizeNullablePath(change.opt("move_path")),
+                ),
+            )
+        }
+        return changes
     }
 
     private fun appendAssistantDeltaBubble(turnKey: String, itemKey: String, delta: String) {
@@ -1968,6 +2970,17 @@ class MainActivity : ComponentActivity() {
         transientNonce += 1
     }
 
+    private fun startSessionSyncLoop() {
+        stopSessionSyncLoop()
+        if (!connected || activeSessionId.isNullOrBlank()) return
+        mainHandler.postDelayed(syncRunnable, 1500L)
+    }
+
+    private fun stopSessionSyncLoop() {
+        mainHandler.removeCallbacks(syncRunnable)
+        syncInFlight = false
+    }
+
     @Composable
     private fun SectionTitle(text: String) {
         Text(text = text, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = Color.White)
@@ -1983,6 +2996,341 @@ class MainActivity : ComponentActivity() {
         Text(text = text, fontSize = 13.sp, color = c(0xFF98A8C2), lineHeight = 20.sp)
     }
 
+    private fun buildCodeBrowserAnnotatedText(
+        text: String,
+        mode: CodeTextMode,
+        pathHint: String? = null,
+    ): AnnotatedString {
+        val normalized = text.replace("\r\n", "\n")
+        val language = detectCodeLanguage(pathHint)
+        return when (mode) {
+            CodeTextMode.Diff -> buildDiffAnnotatedText(normalized, language)
+            CodeTextMode.File -> buildFileAnnotatedText(normalized, language)
+        }
+    }
+
+    private fun buildDiffAnnotatedText(text: String, language: CodeLanguage): AnnotatedString {
+        val lines = text.split('\n')
+        val addBackground = SpanStyle(background = c(0x1E16351F))
+        val deleteBackground = SpanStyle(background = c(0x1E3F1616))
+
+        return buildAnnotatedString {
+            lines.forEachIndexed { index, line ->
+                when (classifyDiffLine(line)) {
+                    DiffLineKind.Added -> withStyle(addBackground) { append(buildAnnotatedDiffLine(line, language)) }
+                    DiffLineKind.Deleted -> withStyle(deleteBackground) { append(buildAnnotatedDiffLine(line, language)) }
+                    else -> append(buildAnnotatedDiffLine(line, language))
+                }
+                if (index < lines.lastIndex) append('\n')
+            }
+        }
+    }
+
+    private fun buildAnnotatedDiffLine(line: String, language: CodeLanguage): AnnotatedString {
+        val metaStyle = SpanStyle(color = c(0xFF94A3B8))
+        val hunkStyle = SpanStyle(color = c(0xFF7DD3FC), fontWeight = FontWeight.Bold)
+        val addPrefixStyle = SpanStyle(color = c(0xFF86EFAC), fontWeight = FontWeight.Bold)
+        val deletePrefixStyle = SpanStyle(color = c(0xFFFCA5A5), fontWeight = FontWeight.Bold)
+        val contextPrefixStyle = SpanStyle(color = c(0xFF64748B))
+
+        return when (classifyDiffLine(line)) {
+            DiffLineKind.Meta ->
+                buildAnnotatedString {
+                    withStyle(metaStyle) { append(line) }
+                }
+
+            DiffLineKind.Hunk ->
+                buildAnnotatedString {
+                    withStyle(hunkStyle) { append(line) }
+                }
+
+            DiffLineKind.Added ->
+                buildAnnotatedString {
+                    withStyle(addPrefixStyle) { append("+") }
+                    append(buildSyntaxHighlightedLine(line.drop(1), language))
+                }
+
+            DiffLineKind.Deleted ->
+                buildAnnotatedString {
+                    withStyle(deletePrefixStyle) { append("-") }
+                    append(buildSyntaxHighlightedLine(line.drop(1), language))
+                }
+
+            DiffLineKind.Context ->
+                buildAnnotatedString {
+                    if (line.startsWith(" ")) {
+                        withStyle(contextPrefixStyle) { append(" ") }
+                        append(buildSyntaxHighlightedLine(line.drop(1), language))
+                    } else {
+                        append(buildSyntaxHighlightedLine(line, language))
+                    }
+                }
+        }
+    }
+
+    private fun buildFileAnnotatedText(text: String, language: CodeLanguage): AnnotatedString {
+        val lines = text.split('\n')
+        val lineNumberWidth = maxOf(2, lines.size.toString().length)
+        val lineNumberStyle = SpanStyle(color = c(0xFF64748B))
+
+        return buildAnnotatedString {
+            lines.forEachIndexed { index, line ->
+                withStyle(lineNumberStyle) {
+                    append((index + 1).toString().padStart(lineNumberWidth, ' '))
+                    append(" | ")
+                }
+                append(buildSyntaxHighlightedLine(line, language))
+                if (index < lines.lastIndex) append('\n')
+            }
+        }
+    }
+
+    private fun buildSyntaxHighlightedLine(line: String, language: CodeLanguage): AnnotatedString {
+        if (line.isEmpty()) return AnnotatedString("")
+
+        if (language == CodeLanguage.Markdown) {
+            return buildMarkdownAnnotatedLine(line)
+        }
+        if (language == CodeLanguage.Xml) {
+            return buildXmlAnnotatedLine(line)
+        }
+
+        val palette = syntaxPalette()
+        val spec = language.syntaxSpec()
+
+        return buildAnnotatedString {
+            var index = 0
+            while (index < line.length) {
+                val commentPrefix = spec.lineCommentPrefixes.firstOrNull { prefix -> line.startsWith(prefix, index) }
+                if (commentPrefix != null) {
+                    withStyle(palette.comment) { append(line.substring(index)) }
+                    break
+                }
+
+                if (spec.blockCommentStart != null && spec.blockCommentEnd != null && line.startsWith(spec.blockCommentStart, index)) {
+                    val end = line.indexOf(spec.blockCommentEnd, startIndex = index + spec.blockCommentStart.length)
+                    val blockEnd = if (end >= 0) end + spec.blockCommentEnd.length else line.length
+                    withStyle(palette.comment) { append(line.substring(index, blockEnd)) }
+                    index = blockEnd
+                    continue
+                }
+
+                if (spec.supportsTripleQuotes) {
+                    val triple = when {
+                        line.startsWith("\"\"\"", index) -> "\"\"\""
+                        line.startsWith("'''", index) -> "'''"
+                        else -> null
+                    }
+                    if (triple != null) {
+                        val end = line.indexOf(triple, startIndex = index + triple.length)
+                        val blockEnd = if (end >= 0) end + triple.length else line.length
+                        withStyle(palette.string) { append(line.substring(index, blockEnd)) }
+                        index = blockEnd
+                        continue
+                    }
+                }
+
+                val ch = line[index]
+                when {
+                    spec.supportsAnnotationPrefix && ch == '@' -> {
+                        val end = readIdentifierEnd(line, index + 1)
+                        if (end > index + 1) {
+                            withStyle(palette.annotation) { append(line.substring(index, end)) }
+                            index = end
+                        } else {
+                            append(ch)
+                            index += 1
+                        }
+                    }
+
+                    isStringStart(ch, spec) -> {
+                        val end = readStringEnd(line, index, ch)
+                        withStyle(palette.string) { append(line.substring(index, end)) }
+                        index = end
+                    }
+
+                    ch.isDigit() -> {
+                        val end = readNumberEnd(line, index)
+                        withStyle(palette.number) { append(line.substring(index, end)) }
+                        index = end
+                    }
+
+                    isIdentifierStart(ch) -> {
+                        val end = readIdentifierEnd(line, index)
+                        val token = line.substring(index, end)
+                        val style =
+                            when {
+                                token in spec.keywords -> palette.keyword
+                                token in spec.literals -> palette.literal
+                                token.firstOrNull()?.isUpperCase() == true && token.length > 1 -> palette.type
+                                else -> null
+                            }
+                        if (style != null) {
+                            withStyle(style) { append(token) }
+                        } else {
+                            append(token)
+                        }
+                        index = end
+                    }
+
+                    else -> {
+                        append(ch)
+                        index += 1
+                    }
+                }
+            }
+        }
+    }
+
+    private fun buildMarkdownAnnotatedLine(line: String): AnnotatedString {
+        val palette = syntaxPalette()
+        return buildAnnotatedString {
+            when {
+                line.startsWith("```") -> withStyle(palette.keyword) { append(line) }
+                line.startsWith("#") -> withStyle(palette.type) { append(line) }
+                line.startsWith(">") -> withStyle(palette.comment) { append(line) }
+                line.startsWith("- ") || line.startsWith("* ") || line.startsWith("+ ") -> {
+                    withStyle(palette.keyword) { append(line.take(2)) }
+                    append(buildInlineCodeSegments(line.drop(2), palette))
+                }
+                else -> append(buildInlineCodeSegments(line, palette))
+            }
+        }
+    }
+
+    private fun buildXmlAnnotatedLine(line: String): AnnotatedString {
+        val palette = syntaxPalette()
+        return buildAnnotatedString {
+            var index = 0
+            while (index < line.length) {
+                when {
+                    line.startsWith("<!--", index) -> {
+                        val end = line.indexOf("-->", startIndex = index + 4).let { if (it >= 0) it + 3 else line.length }
+                        withStyle(palette.comment) { append(line.substring(index, end)) }
+                        index = end
+                    }
+                    line[index] == '<' -> {
+                        val end = line.indexOf('>', startIndex = index + 1).let { if (it >= 0) it + 1 else line.length }
+                        val tag = line.substring(index, end)
+                        withStyle(palette.keyword) { append(tag) }
+                        index = end
+                    }
+                    else -> {
+                        append(line[index])
+                        index += 1
+                    }
+                }
+            }
+        }
+    }
+
+    private fun buildInlineCodeSegments(text: String, palette: CodeSyntaxPalette): AnnotatedString {
+        return buildAnnotatedString {
+            var index = 0
+            while (index < text.length) {
+                if (text[index] == '`') {
+                    val end = text.indexOf('`', startIndex = index + 1)
+                    if (end > index) {
+                        withStyle(palette.string) { append(text.substring(index, end + 1)) }
+                        index = end + 1
+                        continue
+                    }
+                }
+                append(text[index])
+                index += 1
+            }
+        }
+    }
+
+    private fun detectCodeLanguage(pathHint: String?): CodeLanguage {
+        val path = pathHint?.trim().orEmpty().lowercase(Locale.getDefault())
+        return when {
+            path.endsWith(".kt") || path.endsWith(".kts") -> CodeLanguage.Kotlin
+            path.endsWith(".java") -> CodeLanguage.Java
+            path.endsWith(".ts") || path.endsWith(".tsx") || path.endsWith(".mts") || path.endsWith(".cts") -> CodeLanguage.TypeScript
+            path.endsWith(".js") || path.endsWith(".jsx") || path.endsWith(".mjs") || path.endsWith(".cjs") -> CodeLanguage.JavaScript
+            path.endsWith(".py") -> CodeLanguage.Python
+            path.endsWith(".sh") || path.endsWith(".bash") || path.endsWith(".zsh") || path.endsWith(".env") || path.endsWith("dockerfile") -> CodeLanguage.Shell
+            path.endsWith(".go") -> CodeLanguage.Go
+            path.endsWith(".rs") -> CodeLanguage.Rust
+            path.endsWith(".json") || path.endsWith(".jsonc") || path.endsWith(".json5") -> CodeLanguage.Json
+            path.endsWith(".yml") || path.endsWith(".yaml") -> CodeLanguage.Yaml
+            path.endsWith(".xml") || path.endsWith(".html") || path.endsWith(".htm") || path.endsWith(".svg") -> CodeLanguage.Xml
+            path.endsWith(".md") || path.endsWith(".markdown") -> CodeLanguage.Markdown
+            path.endsWith(".sql") -> CodeLanguage.Sql
+            path.endsWith(".css") || path.endsWith(".scss") -> CodeLanguage.Css
+            else -> CodeLanguage.Plain
+        }
+    }
+
+    private fun classifyDiffLine(line: String): DiffLineKind {
+        return when {
+            line.startsWith("@@") -> DiffLineKind.Hunk
+            line.startsWith("diff --git") || line.startsWith("index ") || line.startsWith("--- ") || line.startsWith("+++ ") -> DiffLineKind.Meta
+            line.startsWith("+") && !line.startsWith("+++") -> DiffLineKind.Added
+            line.startsWith("-") && !line.startsWith("---") -> DiffLineKind.Deleted
+            else -> DiffLineKind.Context
+        }
+    }
+
+    private fun syntaxPalette(): CodeSyntaxPalette {
+        return CodeSyntaxPalette(
+            keyword = SpanStyle(color = c(0xFF7DD3FC), fontWeight = FontWeight.SemiBold),
+            literal = SpanStyle(color = c(0xFF38BDF8), fontWeight = FontWeight.SemiBold),
+            string = SpanStyle(color = c(0xFFF9A66C)),
+            number = SpanStyle(color = c(0xFFC084FC)),
+            comment = SpanStyle(color = c(0xFF64748B)),
+            type = SpanStyle(color = c(0xFFFDE68A)),
+            annotation = SpanStyle(color = c(0xFFF472B6)),
+        )
+    }
+
+    private fun isStringStart(ch: Char, spec: CodeLanguageSpec): Boolean {
+        return ch == '"' || ch == '\'' || (spec.supportsBackticks && ch == '`')
+    }
+
+    private fun readStringEnd(line: String, start: Int, delimiter: Char): Int {
+        var index = start + 1
+        var escaped = false
+        while (index < line.length) {
+            val current = line[index]
+            if (escaped) {
+                escaped = false
+            } else if (current == '\\') {
+                escaped = true
+            } else if (current == delimiter) {
+                return index + 1
+            }
+            index += 1
+        }
+        return line.length
+    }
+
+    private fun readNumberEnd(line: String, start: Int): Int {
+        var index = start
+        while (index < line.length) {
+            val ch = line[index]
+            if (ch.isDigit() || ch in listOf('.', '_', 'x', 'X', 'o', 'O', 'b', 'B', 'a', 'A', 'c', 'C', 'd', 'D', 'e', 'E', 'f', 'F')) {
+                index += 1
+            } else {
+                break
+            }
+        }
+        return index
+    }
+
+    private fun readIdentifierEnd(line: String, start: Int): Int {
+        var index = start
+        while (index < line.length && isIdentifierPart(line[index])) {
+            index += 1
+        }
+        return index
+    }
+
+    private fun isIdentifierStart(ch: Char): Boolean = ch == '_' || ch == '$' || ch.isLetter()
+
+    private fun isIdentifierPart(ch: Char): Boolean = isIdentifierStart(ch) || ch.isDigit()
+
     private fun c(argb: Int): Color = Color(argb)
 
     private fun c(argb: Long): Color = Color(argb.toInt())
@@ -1995,6 +3343,21 @@ class MainActivity : ComponentActivity() {
     private fun firstNonEmpty(vararg values: String): String {
         values.forEach { if (it.trim().isNotEmpty()) return it }
         return ""
+    }
+
+    private fun normalizeNullablePath(value: Any?): String? {
+        val text =
+            when (value) {
+                null, JSONObject.NULL -> return null
+                is String -> value.trim()
+                else -> value.toString().trim()
+            }
+        return when {
+            text.isBlank() -> null
+            text.equals("null", ignoreCase = true) -> null
+            text.equals("undefined", ignoreCase = true) -> null
+            else -> text
+        }
     }
 
     private fun formatJson(objectValue: JSONObject?): String = objectValue?.toString(2) ?: "{}"
@@ -2040,6 +3403,7 @@ sealed interface ConversationItem {
     data class SystemNote(
         override val id: String,
         val text: String,
+        val itemKey: String? = null,
     ) : ConversationItem
 
     data class Approval(
@@ -2048,8 +3412,364 @@ sealed interface ConversationItem {
         val title: String,
         val detail: String,
         val availableDecisions: List<String>,
+        val diffEntries: List<ConversationDiffEntry> = emptyList(),
+    ) : ConversationItem
+
+    data class FileChange(
+        override val id: String,
+        val title: String,
+        val summary: String,
+        val status: String,
+        val diffEntries: List<ConversationDiffEntry>,
+        val fallbackDiff: String? = null,
     ) : ConversationItem
 }
+
+data class ConversationDiffEntry(
+    val path: String,
+    val kind: String,
+    val diff: String,
+    val movePath: String? = null,
+) {
+    fun summaryPath(): String = normalizedMovePath()?.let { "${normalizedPath()} → $it" } ?: normalizedPath()
+
+    fun browseCandidates(): List<String> {
+        return listOfNotNull(
+            normalizedPath().takeIf { it.isNotBlank() },
+            normalizedMovePath(),
+        ).distinct()
+    }
+
+    fun browsePath(): String = browseCandidates().firstOrNull().orEmpty()
+
+    fun displayPath(): String = normalizedMovePath()?.let { "${normalizedPath()} → $it" } ?: normalizedPath()
+
+    private fun normalizedPath(): String = sanitizeDiffPath(path).orEmpty()
+
+    private fun normalizedMovePath(): String? = sanitizeDiffPath(movePath)
+}
+
+private fun sanitizeDiffPath(value: String?): String? {
+    val text = value?.trim().orEmpty()
+    return when {
+        text.isBlank() -> null
+        text.equals("null", ignoreCase = true) -> null
+        text.equals("undefined", ignoreCase = true) -> null
+        else -> text
+    }
+}
+
+private data class ApprovalPresentation(
+    val title: String,
+    val detail: String,
+    val diffEntries: List<ConversationDiffEntry>,
+)
+
+private data class BridgeHistoryEntry(
+    val url: String,
+    val title: String,
+    val pathLabel: String,
+    val maskedToken: String?,
+    val maskedUrl: String,
+    val lastUsedAt: Long,
+) {
+    fun detailLine(): String {
+        val parts = mutableListOf(pathLabel)
+        maskedToken?.takeIf { it.isNotBlank() }?.let { parts.add("token $it") }
+        return parts.joinToString(" · ")
+    }
+
+    fun lastUsedLabel(): String {
+        if (lastUsedAt <= 0L) return "刚刚"
+        return android.text.format.DateFormat.format("MM-dd HH:mm", lastUsedAt).toString()
+    }
+
+    companion object {
+        fun fromUrl(url: String, lastUsedAt: Long = System.currentTimeMillis()): BridgeHistoryEntry? {
+            return try {
+                val uri = URI.create(url)
+                val scheme = uri.scheme?.takeIf { it.isNotBlank() } ?: "ws"
+                val host = uri.host?.takeIf { it.isNotBlank() } ?: return null
+                val port = if (uri.port >= 0) uri.port else 8787
+                val path = uri.rawPath?.takeIf { it.isNotBlank() } ?: "/"
+                val token = (uri.rawQuery ?: "")
+                    .split('&')
+                    .mapNotNull { segment ->
+                        val parts = segment.split('=', limit = 2)
+                        if (parts.size == 2 && parts[0] == "token") parts[1] else null
+                    }
+                    .firstOrNull()
+                val maskedToken = token?.let(::maskToken)
+                val title = buildString {
+                    append(host)
+                    append(':')
+                    append(port)
+                    if (path != "/") {
+                        append(path)
+                    }
+                }
+                val maskedUrl = if (token.isNullOrBlank()) {
+                    url
+                } else {
+                    url.replace(token, maskedToken ?: "****")
+                }
+                BridgeHistoryEntry(
+                    url = url,
+                    title = title,
+                    pathLabel = if (path == "/") scheme else "$scheme $path",
+                    maskedToken = maskedToken,
+                    maskedUrl = maskedUrl,
+                    lastUsedAt = lastUsedAt,
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        private fun maskToken(token: String): String {
+            if (token.isBlank()) return "****"
+            if (token.length <= 6) return "****"
+            return "${token.take(3)}...${token.takeLast(2)}"
+        }
+    }
+}
+
+private data class CodeBrowserState(
+    val conversationItemId: String,
+    val sessionId: String?,
+    val title: String,
+    val diffEntries: List<ConversationDiffEntry>,
+    val fallbackDiff: String?,
+    val selectedPath: String?,
+    val mode: CodeBrowserMode = CodeBrowserMode.Diff,
+    val fileReadState: CodeBrowserFileReadState = CodeBrowserFileReadState.Idle,
+) {
+    fun selectedEntry(): ConversationDiffEntry? {
+        if (diffEntries.isEmpty()) return null
+        return diffEntries.firstOrNull { it.browsePath() == selectedPath } ?: diffEntries.first()
+    }
+}
+
+private enum class CodeBrowserMode {
+    Diff,
+    File,
+}
+
+private enum class CodeTextMode {
+    Diff,
+    File,
+}
+
+private enum class CodeLanguage {
+    Plain,
+    Kotlin,
+    Java,
+    TypeScript,
+    JavaScript,
+    Python,
+    Shell,
+    Go,
+    Rust,
+    Json,
+    Yaml,
+    Xml,
+    Markdown,
+    Sql,
+    Css,
+}
+
+private enum class DiffLineKind {
+    Meta,
+    Hunk,
+    Added,
+    Deleted,
+    Context,
+}
+
+private data class CodeSyntaxPalette(
+    val keyword: SpanStyle,
+    val literal: SpanStyle,
+    val string: SpanStyle,
+    val number: SpanStyle,
+    val comment: SpanStyle,
+    val type: SpanStyle,
+    val annotation: SpanStyle,
+)
+
+private data class CodeLanguageSpec(
+    val lineCommentPrefixes: List<String>,
+    val blockCommentStart: String? = null,
+    val blockCommentEnd: String? = null,
+    val supportsBackticks: Boolean = false,
+    val supportsTripleQuotes: Boolean = false,
+    val supportsAnnotationPrefix: Boolean = false,
+    val keywords: Set<String> = emptySet(),
+    val literals: Set<String> = emptySet(),
+)
+
+private fun CodeLanguage.syntaxSpec(): CodeLanguageSpec {
+    return when (this) {
+        CodeLanguage.Kotlin -> CodeLanguageSpec(
+            lineCommentPrefixes = listOf("//"),
+            blockCommentStart = "/*",
+            blockCommentEnd = "*/",
+            supportsTripleQuotes = true,
+            supportsAnnotationPrefix = true,
+            keywords = setOf(
+                "package", "import", "class", "interface", "object", "fun", "val", "var", "when", "if", "else",
+                "for", "while", "do", "return", "break", "continue", "try", "catch", "finally", "throw",
+                "private", "protected", "public", "internal", "open", "override", "suspend", "inline", "reified",
+                "operator", "infix", "tailrec", "data", "sealed", "enum", "annotation", "companion", "init",
+                "constructor", "this", "super", "in", "is", "as", "by", "where", "typealias", "get", "set",
+            ),
+            literals = setOf("true", "false", "null"),
+        )
+
+        CodeLanguage.Java -> CodeLanguageSpec(
+            lineCommentPrefixes = listOf("//"),
+            blockCommentStart = "/*",
+            blockCommentEnd = "*/",
+            supportsAnnotationPrefix = true,
+            keywords = setOf(
+                "package", "import", "class", "interface", "enum", "record", "public", "private", "protected",
+                "static", "final", "abstract", "volatile", "synchronized", "transient", "native", "strictfp",
+                "void", "new", "return", "if", "else", "switch", "case", "default", "for", "while", "do",
+                "break", "continue", "try", "catch", "finally", "throw", "throws", "extends", "implements",
+                "instanceof", "this", "super",
+            ),
+            literals = setOf("true", "false", "null"),
+        )
+
+        CodeLanguage.TypeScript -> CodeLanguageSpec(
+            lineCommentPrefixes = listOf("//"),
+            blockCommentStart = "/*",
+            blockCommentEnd = "*/",
+            supportsBackticks = true,
+            keywords = setOf(
+                "import", "export", "from", "as", "type", "interface", "namespace", "declare", "module", "class",
+                "extends", "implements", "new", "function", "const", "let", "var", "return", "if", "else",
+                "switch", "case", "default", "for", "while", "do", "break", "continue", "try", "catch",
+                "finally", "throw", "async", "await", "yield", "in", "of", "instanceof", "typeof", "keyof",
+                "readonly", "public", "private", "protected", "abstract", "override",
+            ),
+            literals = setOf("true", "false", "null", "undefined"),
+        )
+
+        CodeLanguage.JavaScript -> CodeLanguageSpec(
+            lineCommentPrefixes = listOf("//"),
+            blockCommentStart = "/*",
+            blockCommentEnd = "*/",
+            supportsBackticks = true,
+            keywords = setOf(
+                "import", "export", "from", "class", "extends", "new", "function", "const", "let", "var",
+                "return", "if", "else", "switch", "case", "default", "for", "while", "do", "break", "continue",
+                "try", "catch", "finally", "throw", "async", "await", "yield", "in", "of", "instanceof", "typeof",
+                "this", "super",
+            ),
+            literals = setOf("true", "false", "null", "undefined"),
+        )
+
+        CodeLanguage.Python -> CodeLanguageSpec(
+            lineCommentPrefixes = listOf("#"),
+            supportsTripleQuotes = true,
+            keywords = setOf(
+                "def", "class", "if", "elif", "else", "for", "while", "try", "except", "finally", "return",
+                "yield", "lambda", "with", "as", "from", "import", "pass", "break", "continue", "match", "case",
+                "async", "await", "raise", "global", "nonlocal", "assert", "del", "in", "is", "not", "and", "or",
+            ),
+            literals = setOf("True", "False", "None"),
+        )
+
+        CodeLanguage.Shell -> CodeLanguageSpec(
+            lineCommentPrefixes = listOf("#"),
+            keywords = setOf(
+                "if", "then", "else", "elif", "fi", "for", "in", "do", "done", "case", "esac", "while", "until",
+                "function", "select", "time", "coproc", "local", "readonly", "export", "source",
+            ),
+            literals = setOf("true", "false"),
+        )
+
+        CodeLanguage.Go -> CodeLanguageSpec(
+            lineCommentPrefixes = listOf("//"),
+            blockCommentStart = "/*",
+            blockCommentEnd = "*/",
+            keywords = setOf(
+                "package", "import", "func", "type", "struct", "interface", "map", "chan", "var", "const",
+                "return", "if", "else", "switch", "case", "default", "for", "range", "go", "defer", "select",
+                "break", "continue", "fallthrough",
+            ),
+            literals = setOf("true", "false", "nil"),
+        )
+
+        CodeLanguage.Rust -> CodeLanguageSpec(
+            lineCommentPrefixes = listOf("//"),
+            blockCommentStart = "/*",
+            blockCommentEnd = "*/",
+            keywords = setOf(
+                "use", "mod", "pub", "crate", "super", "self", "fn", "let", "mut", "struct", "enum", "trait",
+                "impl", "match", "if", "else", "loop", "while", "for", "in", "return", "break", "continue",
+                "async", "await", "where", "const", "static", "type", "unsafe", "move", "dyn", "ref", "as",
+            ),
+            literals = setOf("true", "false", "None", "Some"),
+        )
+
+        CodeLanguage.Json -> CodeLanguageSpec(
+            lineCommentPrefixes = emptyList(),
+            literals = setOf("true", "false", "null"),
+        )
+
+        CodeLanguage.Yaml -> CodeLanguageSpec(
+            lineCommentPrefixes = listOf("#"),
+            literals = setOf("true", "false", "null", "yes", "no", "on", "off"),
+        )
+
+        CodeLanguage.Sql -> CodeLanguageSpec(
+            lineCommentPrefixes = listOf("--"),
+            blockCommentStart = "/*",
+            blockCommentEnd = "*/",
+            keywords = setOf(
+                "select", "from", "where", "group", "order", "by", "join", "left", "right", "inner", "outer",
+                "on", "insert", "into", "values", "update", "delete", "create", "table", "alter", "drop", "union",
+                "limit", "offset", "having", "distinct", "case", "when", "then", "else", "end", "and", "or", "not",
+            ),
+            literals = setOf("true", "false", "null"),
+        )
+
+        CodeLanguage.Css -> CodeLanguageSpec(
+            lineCommentPrefixes = emptyList(),
+            blockCommentStart = "/*",
+            blockCommentEnd = "*/",
+            literals = setOf("true", "false", "null"),
+        )
+
+        else -> CodeLanguageSpec(
+            lineCommentPrefixes = emptyList(),
+            literals = setOf("true", "false", "null"),
+        )
+    }
+}
+
+private sealed interface CodeBrowserFileReadState {
+    data object Idle : CodeBrowserFileReadState
+
+    data object Loading : CodeBrowserFileReadState
+
+    data class Loaded(
+        val content: CodeBrowserFileContent,
+    ) : CodeBrowserFileReadState
+
+    data class Error(
+        val message: String,
+    ) : CodeBrowserFileReadState
+}
+
+private data class CodeBrowserFileContent(
+    val requestedPath: String,
+    val resolvedPath: String,
+    val content: String,
+    val truncated: Boolean,
+    val bytes: Int,
+)
 
 private data class ModelInfo(
     val id: String,
@@ -2160,6 +3880,8 @@ private data class SessionInfo(
 
 private fun interface ResponseHandler {
     fun onResponse(response: JSONObject)
+
+    fun onError(errorText: String) {}
 }
 
 private fun ClipData.firstText(): String? {
