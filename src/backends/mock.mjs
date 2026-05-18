@@ -123,6 +123,30 @@ export class MockBackend extends EventEmitter {
     return structuredClone(thread);
   }
 
+  async readThread(threadId) {
+    const thread = this.threads.get(threadId);
+    if (!thread) {
+      throw new Error(`unknown thread: ${threadId}`);
+    }
+    return { thread: structuredClone(thread) };
+  }
+
+  async listTurnItems(threadId, turnId) {
+    const thread = this.threads.get(threadId);
+    if (!thread) {
+      throw new Error(`unknown thread: ${threadId}`);
+    }
+    const turn = thread.turns.find((entry) => entry.id === turnId);
+    if (!turn) {
+      throw new Error(`unknown turn: ${turnId}`);
+    }
+    return {
+      data: structuredClone(turn.items ?? []),
+      nextCursor: null,
+      backwardsCursor: null,
+    };
+  }
+
   async startTurn(threadId, params = {}) {
     const thread = this.threads.get(threadId);
     if (!thread) throw new Error(`unknown thread: ${threadId}`);

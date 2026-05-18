@@ -136,6 +136,23 @@ export class CodexBackend extends EventEmitter {
     });
   }
 
+  async readThread(threadId, params = {}) {
+    return this.#request('thread/read', {
+      threadId,
+      includeTurns: params.includeTurns ?? true,
+    });
+  }
+
+  async listTurnItems(threadId, turnId, params = {}) {
+    return this.#request('thread/turns/items/list', {
+      threadId,
+      turnId,
+      cursor: params.cursor ?? null,
+      limit: params.limit ?? null,
+      sortDirection: params.sortDirection ?? null,
+    });
+  }
+
   async startTurn(threadId, params = {}) {
     const inputText = params.text ?? '';
     return this.#request('turn/start', {

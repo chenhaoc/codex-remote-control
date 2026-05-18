@@ -54,6 +54,10 @@ export class StateStore {
     return session ? clone(session) : null;
   }
 
+  getLastSeq(sessionId) {
+    return this.state.sessions[sessionId]?.lastSeq ?? 0;
+  }
+
   async upsertSession(session) {
     const current = this.state.sessions[session.session_id] ?? {
       session_id: session.session_id,

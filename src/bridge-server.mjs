@@ -1,5 +1,6 @@
 import http from 'node:http';
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -350,36 +351,34 @@ export class BridgeServer extends EventEmitter {
       case 'session.sync': {
         const sessionId = payload.session_id ?? payload.thread_id;
         const sinceSeq = payload.since_seq ?? 0;
-        let events = this.store.syncEvents(sessionId, sinceSeq);
-        if (sinceSeq === 0) {
-          const hydrated = await this.#hydrateSessionHistory(sessionId);
-          if (hydrated.length > 0) {
-            if (events.length === 0) {
-              events = hydrated;
-            } else {
-              const storedTurnIds = new Set(
-                events
-                  .map((event) => event?.turn_id ?? event?.payload?.turn_id ?? event?.payload?.turn?.id ?? null)
-                  .filter(Boolean),
-              );
-              const seen = new Set(events.map((event) => this.#eventSignature(event)));
-              const merged = [...events];
-              for (const event of hydrated) {
-                const turnId = event?.turn_id ?? event?.payload?.turn_id ?? event?.payload?.turn?.id ?? null;
-                if (turnId && storedTurnIds.has(turnId)) {
-                  continue;
-                }
-                const signature = this.#eventSignature(event);
-                if (!seen.has(signature)) {
-                  seen.add(signature);
-                  merged.push(event);
-                }
-              }
-              events = merged;
-            }
-          }
+        const refreshed = await this.#refreshSessionHistory(sessionId);
+        const events = sinceSeq === 0
+          ? refreshed.events
+          : this.store.syncEvents(sessionId, sinceSeq);
+        ws.send(JSON.stringify(createResponse(id, {
+          session_id: sessionId,
+          events,
+          last_seq: refreshed.lastSeq,
+        })));
+        return;
+      }
+      case 'file.read': {
+        const sessionId = payload.session_id ?? payload.thread_id;
+        const requestedPath = String(payload.path ?? '').trim();
+        const maxBytes = clampMaxBytes(payload.max_bytes);
+        if (!requestedPath) {
+          ws.send(JSON.stringify(createError(id, 'invalid_path', 'path is required')));
+          return;
         }
-        ws.send(JSON.stringify(createResponse(id, { session_id: sessionId, events })));
+        const result = await this.#readSessionFile(sessionId, requestedPath, maxBytes);
+        ws.send(JSON.stringify(createResponse(id, {
+          session_id: sessionId,
+          path: requestedPath,
+          resolved_path: result.resolvedPath,
+          content: result.content,
+          truncated: result.truncated,
+          bytes: result.bytes,
+        })));
         return;
       }
       default:
@@ -516,11 +515,55 @@ export class BridgeServer extends EventEmitter {
     return { session: normalized, resumed };
   }
 
+  async #refreshSessionHistory(sessionId) {
+    const session = this.store.getSession(sessionId);
+    if (!session) {
+      return { events: [], lastSeq: 0 };
+    }
+
+    const storedEvents = this.store.syncEvents(sessionId, 0);
+    try {
+      const hydratedEvents = await this.#hydrateSessionHistory(sessionId);
+      const effectiveHydratedEvents = this.#pruneHydratedEvents(hydratedEvents, storedEvents);
+      if (effectiveHydratedEvents.length === 0) {
+        return {
+          events: storedEvents,
+          lastSeq: this.store.getLastSeq(sessionId),
+        };
+      }
+
+      const seen = new Set(storedEvents.map((event) => this.#eventSignature(event)));
+      for (const event of effectiveHydratedEvents) {
+        const signature = this.#eventSignature(event);
+        if (seen.has(signature)) continue;
+        const stored = await this.store.appendEvent(sessionId, event);
+        storedEvents.push(stored);
+        seen.add(signature);
+      }
+
+      return {
+        events: this.#mergeInitialSessionEvents(effectiveHydratedEvents, storedEvents),
+        lastSeq: this.store.getLastSeq(sessionId),
+      };
+    } catch {
+      return {
+        events: storedEvents,
+        lastSeq: this.store.getLastSeq(sessionId),
+      };
+    }
+  }
+
   async #hydrateSessionHistory(sessionId) {
     const session = this.store.getSession(sessionId);
     if (!session) return [];
 
     try {
+      const thread = await this.#loadHydrationThread(sessionId, session);
+      const hydratedEvents = await this.#buildEventsFromThread(sessionId, thread);
+      if (hydratedEvents.length > 0) {
+        return hydratedEvents;
+      }
+
       if (session.thread?.path) {
         const fromRollout = await this.#buildEventsFromRolloutFile(sessionId, session.thread.path, session.thread_id ?? sessionId);
         if (fromRollout.length > 0) {
@@ -528,9 +571,7 @@ export class BridgeServer extends EventEmitter {
         }
       }
 
-      const thread = await this.#loadHydrationThread(sessionId, session);
-      const hydratedEvents = await this.#buildEventsFromThread(sessionId, thread);
-      return hydratedEvents.length > 0 ? hydratedEvents : clone(session.events ?? []);
+      return clone(session.events ?? []);
     } catch {
       return clone(session.events ?? []);
     }
@@ -580,15 +621,18 @@ export class BridgeServer extends EventEmitter {
           case 'agent_message': {
             const text = String(payload.message ?? '').trim();
             if (text) {
-              events.push(createEvent('item/agentMessage/delta', {
+              events.push(createEvent('item/completed', {
                 session_id: sessionId,
                 thread_id: threadId,
                 turn_id: currentTurnId,
                 payload: {
-                  itemId: currentTurnId ? `rollout_${currentTurnId}_${String(++currentItemSeq).padStart(4, '0')}` : `rollout_${sessionId}_${String(++currentItemSeq).padStart(4, '0')}`,
-                  delta: text,
-                  text,
-                  message: text,
+                  item: {
+                    type: 'agentMessage',
+                    id: currentTurnId ? `rollout_${currentTurnId}_${String(++currentItemSeq).padStart(4, '0')}` : `rollout_${sessionId}_${String(++currentItemSeq).padStart(4, '0')}`,
+                    text,
+                    phase: null,
+                    memoryCitation: null,
+                  },
                 },
               }));
             }
@@ -623,6 +667,22 @@ export class BridgeServer extends EventEmitter {
   }
 
   async #loadHydrationThread(sessionId, session) {
+    if (typeof this.backend.readThread === 'function') {
+      try {
+        const read = await this.backend.readThread(session.thread_id ?? sessionId, {
+          includeTurns: true,
+        });
+        const thread = read?.thread ?? read ?? null;
+        if (thread) {
+          const normalized = normalizeThreadSummary(thread, this.backend.constructor.name.replace('Backend', '').toLowerCase() || 'mock');
+          if (normalized) {
+            await this.store.upsertSession(normalized);
+          }
+          return thread;
+        }
+      } catch {}
+    }
+
     const thread = session.thread ?? null;
     const status = getThreadStatusType(thread);
     if (thread && status !== 'notLoaded') {
@@ -672,16 +732,17 @@ export class BridgeServer extends EventEmitter {
           continue;
         }
 
-        if (item?.type === 'agentMessage' && typeof item.text === 'string' && item.text.trim()) {
-          events.push(createEvent('item/agentMessage/delta', {
+        if (item?.type) {
+          const itemId = item.id ?? `turn_${turn.id}_item_${String(++turnItemSeq).padStart(4, '0')}`;
+          events.push(createEvent('item/completed', {
             session_id: sessionId,
             thread_id: threadId,
             turn_id: turn.id,
             payload: {
-              itemId: item.id ?? `turn_${turn.id}_agent_${String(++turnItemSeq).padStart(4, '0')}`,
-              delta: item.text,
-              text: item.text,
-              message: item.text,
+              item: {
+                ...item,
+                id: itemId,
+              },
             },
           }));
         }
@@ -734,11 +795,121 @@ export class BridgeServer extends EventEmitter {
     }
   }
 
+  async #readSessionFile(sessionId, requestedPath, maxBytes) {
+    const session = sessionId ? this.store.getSession(sessionId) : null;
+    const cwd = session?.cwd || session?.thread?.cwd || null;
+    const resolvedPath = path.isAbsolute(requestedPath)
+      ? requestedPath
+      : cwd
+        ? path.resolve(cwd, requestedPath)
+        : null;
+    if (!resolvedPath) {
+      throw new Error(`cannot resolve relative path without session cwd: ${requestedPath}`);
+    }
+
+    const raw = await fs.readFile(resolvedPath);
+    const truncated = raw.byteLength > maxBytes;
+    const bytes = truncated ? raw.subarray(0, maxBytes) : raw;
+    return {
+      resolvedPath,
+      content: bytes.toString('utf8'),
+      truncated,
+      bytes: bytes.byteLength,
+    };
+  }
+
+  #mergeInitialSessionEvents(hydratedEvents, storedEvents) {
+    if (hydratedEvents.length === 0) {
+      return clone(storedEvents);
+    }
+
+    const merged = [];
+    const seen = new Set();
+    const finalizedAssistantItems = new Set(
+      hydratedEvents
+        .filter((event) => event?.event === 'item/completed' && event?.payload?.item?.type === 'agentMessage')
+        .map((event) => `${event?.turn_id ?? ''}|${event?.payload?.item?.id ?? ''}`),
+    );
+
+    for (const event of hydratedEvents) {
+      const signature = this.#eventSignature(event);
+      if (seen.has(signature)) continue;
+      seen.add(signature);
+      merged.push(event);
+    }
+
+    for (const event of storedEvents) {
+      const signature = this.#eventSignature(event);
+      if (seen.has(signature)) continue;
+      if (event?.event === 'item/agentMessage/delta') {
+        const itemId = event?.payload?.itemId ?? event?.payload?.item_id ?? '';
+        const key = `${event?.turn_id ?? ''}|${itemId}`;
+        if (itemId && finalizedAssistantItems.has(key)) {
+          continue;
+        }
+      }
+      seen.add(signature);
+      merged.push(event);
+    }
+
+    return merged;
+  }
+
+  #pruneHydratedEvents(hydratedEvents, storedEvents) {
+    if (hydratedEvents.length === 0) {
+      return [];
+    }
+
+    const storedAssistantDeltaTurns = new Set(
+      storedEvents
+        .filter((event) => event?.event === 'item/agentMessage/delta')
+        .map((event) => event?.turn_id ?? '')
+        .filter(Boolean),
+    );
+    const hydratedAssistantCounts = new Map();
+    for (const event of hydratedEvents) {
+      if (event?.event !== 'item/completed' || event?.payload?.item?.type !== 'agentMessage') {
+        continue;
+      }
+      const turnId = event?.turn_id ?? '';
+      if (!turnId) continue;
+      hydratedAssistantCounts.set(turnId, (hydratedAssistantCounts.get(turnId) ?? 0) + 1);
+    }
+
+    return hydratedEvents.filter((event) => {
+      if (event?.event !== 'item/completed' || event?.payload?.item?.type !== 'agentMessage') {
+        return true;
+      }
+      const turnId = event?.turn_id ?? '';
+      if (!turnId || !storedAssistantDeltaTurns.has(turnId)) {
+        return true;
+      }
+      return (hydratedAssistantCounts.get(turnId) ?? 0) > 1;
+    });
+  }
+
   #eventSignature(event) {
     const payload = event?.payload ?? {};
+    if (event?.event === 'item/completed' || event?.event === 'item/started') {
+      return [
+        event?.event ?? '',
+        event?.turn_id ?? '',
+        payload?.item?.id ?? '',
+        JSON.stringify(payload?.item ?? {}),
+      ].join('|');
+    }
+    if (event?.event === 'item/commandExecution/requestApproval') {
+      return [
+        event?.event ?? '',
+        event?.turn_id ?? '',
+        event?.request_id ?? '',
+        payload?.itemId ?? '',
+      ].join('|');
+    }
     return [
       event?.event ?? '',
       event?.turn_id ?? '',
+      payload?.itemId ?? '',
       payload?.text ?? '',
       payload?.delta ?? '',
       payload?.status ?? '',
@@ -756,4 +927,10 @@ function safeJson(text) {
   } catch (error) {
     return { ok: false, error };
   }
+}
+
+function clampMaxBytes(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 200_000;
+  return Math.max(8_192, Math.min(500_000, Math.trunc(parsed)));
 }
