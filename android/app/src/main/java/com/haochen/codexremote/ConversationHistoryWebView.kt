@@ -138,7 +138,7 @@ internal fun ConversationHistoryWebView(
         update = { view ->
             if (lastLoadedHtml == pageHtml) return@AndroidView
             val sessionChanged = lastLoadedHtml == null
-            val wasAtBottom = !view.canScrollVertically(1)
+            val wasAtBottom = isConversationNearBottom(view)
             pendingScrollMode =
                 when {
                     restoreScrollY != null && sessionChanged -> ConversationScrollMode.Restore(restoreScrollY)
@@ -158,6 +158,14 @@ internal fun ConversationHistoryWebView(
             )
         },
     )
+}
+
+private fun isConversationNearBottom(webView: WebView): Boolean {
+    val scaledContentHeight = (webView.contentHeight * webView.scale).toInt()
+    if (scaledContentHeight <= 0) return true
+    val viewportBottom = webView.scrollY + webView.height
+    val distanceToBottom = scaledContentHeight - viewportBottom
+    return distanceToBottom <= 96
 }
 
 private fun buildConversationWebView(
@@ -357,11 +365,13 @@ private fun ConversationItem.Approval.toHtml(): String {
 }
 
 private fun ConversationItem.FileChange.toHtml(): String {
+    val diffStats = buildConversationDiffStatsLine(diffEntries, fallbackDiff)
     return """
         <div class="cr-message assistant">
             <div class="cr-bubble file-change">
                 <div class="cr-file-change-title">${escapeConversationHtml(title)}</div>
                 <div class="cr-file-change-summary">${buildPlainTextHtml(summary)}</div>
+                ${diffStats?.let { "<div class=\"cr-file-change-stats\">${escapeConversationHtml(it)}</div>" }.orEmpty()}
                 ${buildConversationDiffDetailsHtml(diffEntries, fallbackDiff, defaultLabel = "点击查看 diff", browserItemId = id)}
             </div>
         </div>
@@ -384,7 +394,7 @@ private fun buildConversationDiffDetailsHtml(
                 }
             }
         } else {
-            "<pre><code>${escapeConversationHtml(fallbackDiff.orEmpty())}</code></pre>"
+            "<pre><code>${buildConversationDiffCodeHtml(fallbackDiff.orEmpty())}</code></pre>"
         }
 
     val browserAction =
@@ -398,10 +408,7 @@ private fun buildConversationDiffDetailsHtml(
 
     return """
         $browserAction
-        <details class="cr-diff-details">
-            <summary>${escapeConversationHtml(defaultLabel)}</summary>
-            <div class="cr-diff-body">$body</div>
-        </details>
+        <div class="cr-inline-diff">$body</div>
     """.trimIndent()
 }
 
@@ -421,9 +428,96 @@ private fun ConversationDiffEntry.toHtml(): String {
                 <span class="cr-diff-kind ${escapeConversationHtmlAttribute(kind.trim())}">${escapeConversationHtml(kindLabel)}</span>
                 <span class="cr-diff-path">${escapeConversationHtml(path + extraPath)}</span>
             </summary>
-            <pre><code>${escapeConversationHtml(diffText)}</code></pre>
+            <pre><code>${buildConversationDiffCodeHtml(diffText)}</code></pre>
         </details>
     """.trimIndent()
+}
+
+private fun buildConversationDiffCodeHtml(diffText: String): String =
+    diffText.replace("\r\n", "\n")
+        .split('\n')
+        .joinToString("<br />") { line ->
+            when (classifyConversationDiffLine(line)) {
+                ConversationDiffLineKind.Added ->
+                    """
+                    <span class="cr-diff-line add">
+                        <span class="cr-diff-prefix add">+</span><span class="cr-diff-content">${escapeConversationHtml(line.drop(1))}</span>
+                    </span>
+                    """.trimIndent()
+
+                ConversationDiffLineKind.Deleted ->
+                    """
+                    <span class="cr-diff-line delete">
+                        <span class="cr-diff-prefix delete">-</span><span class="cr-diff-content">${escapeConversationHtml(line.drop(1))}</span>
+                    </span>
+                    """.trimIndent()
+
+                ConversationDiffLineKind.Hunk ->
+                    """<span class="cr-diff-line hunk">${escapeConversationHtml(line)}</span>"""
+
+                ConversationDiffLineKind.Meta ->
+                    """<span class="cr-diff-line meta">${escapeConversationHtml(line)}</span>"""
+
+                ConversationDiffLineKind.Context ->
+                    if (line.startsWith(" ")) {
+                        """
+                        <span class="cr-diff-line">
+                            <span class="cr-diff-prefix context"> </span><span class="cr-diff-content">${escapeConversationHtml(line.drop(1))}</span>
+                        </span>
+                        """.trimIndent()
+                    } else {
+                        """<span class="cr-diff-line">${escapeConversationHtml(line)}</span>"""
+                    }
+            }
+        }
+
+private enum class ConversationDiffLineKind {
+    Added,
+    Deleted,
+    Hunk,
+    Meta,
+    Context,
+}
+
+private fun classifyConversationDiffLine(line: String): ConversationDiffLineKind {
+    return when {
+        line.startsWith("+") && !line.startsWith("+++") -> ConversationDiffLineKind.Added
+        line.startsWith("-") && !line.startsWith("---") -> ConversationDiffLineKind.Deleted
+        line.startsWith("@@") -> ConversationDiffLineKind.Hunk
+        line.startsWith("diff --git") ||
+            line.startsWith("index ") ||
+            line.startsWith("+++ ") ||
+            line.startsWith("--- ") ||
+            line.startsWith("rename from ") ||
+            line.startsWith("rename to ") ||
+            line.startsWith("new file mode ") ||
+            line.startsWith("deleted file mode ") ||
+            line.startsWith("similarity index ") -> ConversationDiffLineKind.Meta
+        else -> ConversationDiffLineKind.Context
+    }
+}
+
+private fun buildConversationDiffStatsLine(
+    diffEntries: List<ConversationDiffEntry>,
+    fallbackDiff: String?,
+): String? {
+    val source =
+        if (diffEntries.isNotEmpty()) {
+            diffEntries.joinToString("\n") { it.diff }
+        } else {
+            fallbackDiff.orEmpty()
+        }
+    if (source.isBlank()) return null
+    var additions = 0
+    var deletions = 0
+    source.replace("\r\n", "\n").lineSequence().forEach { line ->
+        when {
+            line.startsWith("+") && !line.startsWith("+++") -> additions += 1
+            line.startsWith("-") && !line.startsWith("---") -> deletions += 1
+        }
+    }
+    if (additions == 0 && deletions == 0) return null
+    return "+$additions / -$deletions"
 }
 
 private fun buildConversationMarkdownHtml(markdown: String): String {
@@ -453,7 +547,7 @@ private fun buildConversationCss(): String =
         margin: 0 !important;
         padding: 0 !important;
         background: transparent !important;
-        color: #FFFFFF !important;
+        color: #173326 !important;
     }
 
     body {
@@ -495,23 +589,26 @@ private fun buildConversationCss(): String =
     }
 
     .cr-bubble.user {
-        background: #0EA5E9 !important;
+        background: #1A8F55 !important;
         color: #FFFFFF !important;
     }
 
     .cr-bubble.assistant {
-        background: #172033 !important;
-        color: #FFFFFF !important;
+        background: #F1F8F2 !important;
+        color: #173326 !important;
+        border: 1px solid #CFE2D3;
     }
 
     .cr-bubble.approval {
-        background: #2E245C !important;
-        color: #FFFFFF !important;
+        background: #E9F5EC !important;
+        color: #173326 !important;
+        border: 1px solid #BFD9C5;
     }
 
     .cr-bubble.file-change {
-        background: #10263A !important;
-        color: #FFFFFF !important;
+        background: #F6FBF7 !important;
+        color: #173326 !important;
+        border: 1px solid #D8E8DB;
     }
 
     .cr-note-row {
@@ -521,8 +618,8 @@ private fun buildConversationCss(): String =
     }
 
     .cr-note {
-        background: #0F172A !important;
-        color: #98A8C2 !important;
+        background: #ECF7EF !important;
+        color: #5F7F69 !important;
         border-radius: 14px;
         padding: 10px 12px;
         font-size: 12px !important;
@@ -555,7 +652,7 @@ private fun buildConversationCss(): String =
         min-width: 72px;
         padding: 9px 12px;
         border-radius: 12px;
-        background: #0F6D99 !important;
+        background: #1A8F55 !important;
         color: #FFFFFF !important;
         text-decoration: none !important;
         font-weight: 600 !important;
@@ -569,7 +666,15 @@ private fun buildConversationCss(): String =
     .cr-file-change-summary {
         font-size: 13px !important;
         line-height: 1.46 !important;
-        color: #C7D8EA !important;
+        color: #5F7F69 !important;
+        margin-bottom: 10px;
+    }
+
+    .cr-file-change-stats {
+        font-size: 12px !important;
+        line-height: 1.35 !important;
+        color: #5F7F69 !important;
+        font-weight: 600 !important;
         margin-bottom: 10px;
     }
 
@@ -584,57 +689,40 @@ private fun buildConversationCss(): String =
         min-width: 84px;
         padding: 8px 12px;
         border-radius: 12px;
-        background: rgba(15, 109, 153, 0.92) !important;
+        background: #1A8F55 !important;
         color: #FFFFFF !important;
         text-decoration: none !important;
         font-weight: 600 !important;
     }
 
-    .cr-diff-details {
+    .cr-inline-diff {
         margin-top: 10px;
-        border: 1px solid rgba(125, 211, 252, 0.18);
-        border-radius: 12px;
-        background: rgba(255, 255, 255, 0.04);
-        overflow: hidden;
     }
 
-    .cr-diff-details > summary {
-        cursor: pointer;
-        list-style: none;
-        padding: 10px 12px;
-        color: #7DD3FC !important;
-        font-weight: 600 !important;
-    }
-
-    .cr-diff-details > summary::-webkit-details-marker {
-        display: none;
-    }
-
-    .cr-diff-body {
-        padding: 0 10px 10px;
-    }
-
-    .cr-diff-body > pre {
+    .cr-inline-diff > pre {
         margin: 0;
         padding: 10px 12px 12px;
         border-radius: 10px;
-        background: rgba(2, 6, 23, 0.72) !important;
-        overflow-x: auto;
+        background: #F6FBF7 !important;
+        overflow-x: hidden;
+        border: 1px solid #CFE2D3;
     }
 
-    .cr-diff-body > pre code {
-        color: #E2E8F0 !important;
+    .cr-inline-diff > pre code {
+        color: #173326 !important;
         background: transparent !important;
         padding: 0 !important;
-        white-space: pre !important;
+        white-space: pre-wrap !important;
+        word-break: break-word;
+        overflow-wrap: anywhere;
     }
 
     .cr-diff-file {
         margin-top: 8px;
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 10px;
-        overflow: hidden;
-        background: rgba(15, 23, 42, 0.88);
+        border: 0;
+        border-radius: 0;
+        overflow: visible;
+        background: transparent;
     }
 
     .cr-diff-file > summary {
@@ -643,8 +731,8 @@ private fun buildConversationCss(): String =
         display: flex;
         gap: 8px;
         align-items: center;
-        padding: 9px 10px;
-        color: #FFFFFF !important;
+        padding: 0 0 8px;
+        color: #173326 !important;
         font-size: 13px !important;
     }
 
@@ -660,25 +748,25 @@ private fun buildConversationCss(): String =
         min-width: 52px;
         padding: 2px 8px;
         border-radius: 999px;
-        background: rgba(125, 211, 252, 0.16);
-        color: #7DD3FC !important;
+        background: #E9F5EC;
+        color: #1A8F55 !important;
         font-size: 11px !important;
         font-weight: 700 !important;
     }
 
     .cr-diff-kind.add {
-        background: rgba(34, 197, 94, 0.18);
-        color: #86EFAC !important;
+        background: #DDF3E4;
+        color: #1A8F55 !important;
     }
 
     .cr-diff-kind.delete {
-        background: rgba(239, 68, 68, 0.18);
-        color: #FCA5A5 !important;
+        background: #F4E7E7;
+        color: #B65757 !important;
     }
 
     .cr-diff-kind.update {
-        background: rgba(59, 130, 246, 0.18);
-        color: #93C5FD !important;
+        background: #EDF6EE;
+        color: #5F7F69 !important;
     }
 
     .cr-diff-path {
@@ -692,15 +780,77 @@ private fun buildConversationCss(): String =
     .cr-diff-file pre {
         margin: 0;
         padding: 10px 12px 12px;
-        background: rgba(2, 6, 23, 0.72) !important;
-        overflow-x: auto;
+        background: #F6FBF7 !important;
+        overflow-x: hidden;
+        border-radius: 10px;
+        border: 1px solid #CFE2D3;
     }
 
     .cr-diff-file code {
-        color: #E2E8F0 !important;
+        color: #173326 !important;
         background: transparent !important;
         padding: 0 !important;
-        white-space: pre !important;
+        white-space: pre-wrap !important;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+    }
+
+    .cr-diff-line {
+        display: flex;
+        width: 100%;
+        align-items: flex-start;
+        gap: 0;
+        white-space: pre-wrap !important;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+        border-radius: 8px;
+        padding: 1px 4px;
+        margin: 1px 0;
+        box-sizing: border-box;
+    }
+
+    .cr-diff-content {
+        flex: 1 1 auto;
+        min-width: 0;
+        white-space: pre-wrap !important;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+    }
+
+    .cr-diff-prefix {
+        flex: 0 0 auto;
+        width: 12px;
+        font-weight: 700 !important;
+        white-space: pre;
+    }
+
+    .cr-diff-prefix.add {
+        color: #1A8F55 !important;
+    }
+
+    .cr-diff-prefix.delete {
+        color: #DC2626 !important;
+    }
+
+    .cr-diff-prefix.context {
+        color: #6D8876 !important;
+    }
+
+    .cr-diff-line.add {
+        background: rgba(39, 165, 90, 0.20) !important;
+    }
+
+    .cr-diff-line.delete {
+        background: rgba(220, 38, 38, 0.20) !important;
+    }
+
+    .cr-diff-line.meta {
+        color: #6D8876 !important;
+    }
+
+    .cr-diff-line.hunk {
+        color: #0F766E !important;
+        font-weight: 600 !important;
     }
 
     .cr-md, .cr-md * {
@@ -745,7 +895,7 @@ private fun buildConversationCss(): String =
     .cr-md h4, .cr-md h5, .cr-md h6 { font-size: 1.05em !important; margin: 0.55em 0 0.28em !important; }
 
     .cr-md a {
-        color: #7DD3FC !important;
+        color: #1A8F55 !important;
         text-decoration: none !important;
     }
 
@@ -758,7 +908,7 @@ private fun buildConversationCss(): String =
     }
 
     .cr-md mark {
-        background-color: rgba(125, 211, 252, 0.22) !important;
+        background-color: rgba(26, 143, 85, 0.16) !important;
         color: inherit !important;
         padding: 0 2px;
         border-radius: 3px;
@@ -769,17 +919,19 @@ private fun buildConversationCss(): String =
     }
 
     .cr-md code {
-        color: #7DD3FC !important;
-        background: rgba(255, 255, 255, 0.08) !important;
-        border-radius: 6px;
-        padding: 0.1em 0.35em;
+        color: #145A36 !important;
+        background: #DDF3E4 !important;
+        border: 1px solid #B9DCC1;
+        border-radius: 8px;
+        padding: 0.14em 0.42em;
         font-family: "SFMono-Regular", "JetBrains Mono", "Fira Code", monospace;
         font-size: 0.92em !important;
         white-space: pre-wrap !important;
     }
 
     .cr-md pre {
-        background: rgba(255, 255, 255, 0.08) !important;
+        background: #ECF7EF !important;
+        border: 1px solid #CFE2D3;
         border-radius: 12px;
         padding: 10px 12px !important;
         overflow-x: auto !important;
@@ -798,7 +950,7 @@ private fun buildConversationCss(): String =
     .cr-md blockquote {
         margin: 0.45em 0 !important;
         padding: 0.1em 0 0.1em 0.85em !important;
-        border-left: 3px solid rgba(125, 211, 252, 0.72) !important;
+        border-left: 3px solid #1A8F55 !important;
         opacity: 0.95;
     }
 
@@ -828,7 +980,7 @@ private fun buildConversationCss(): String =
         width: 100%;
         overflow-x: auto;
         margin: 0.45em 0 !important;
-        border: 1px solid rgba(255, 255, 255, 0.18);
+        border: 1px solid #CFE2D3;
         border-radius: 10px;
     }
 
@@ -846,7 +998,7 @@ private fun buildConversationCss(): String =
         min-width: 88px;
         padding: 8px 10px !important;
         font-size: 0.92em !important;
-        border: 1px solid rgba(255, 255, 255, 0.18) !important;
+        border: 1px solid #CFE2D3 !important;
         vertical-align: top !important;
         text-align: left !important;
         white-space: pre-wrap !important;
@@ -854,17 +1006,17 @@ private fun buildConversationCss(): String =
     }
 
     .cr-md-table-wrap th {
-        background-color: rgba(255, 255, 255, 0.08) !important;
+        background-color: #E9F5EC !important;
         font-weight: 600 !important;
     }
 
     .cr-md-table-wrap tbody tr:nth-child(even) td {
-        background-color: rgba(255, 255, 255, 0.04) !important;
+        background-color: #F6FBF7 !important;
     }
 
     .cr-md-code-language {
         margin: 0 0 6px !important;
-        color: #7DD3FC !important;
+        color: #1A8F55 !important;
         font-size: 0.8em !important;
         font-weight: 600 !important;
         letter-spacing: 0.02em !important;

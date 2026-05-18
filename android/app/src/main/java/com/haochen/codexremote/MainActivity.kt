@@ -11,6 +11,7 @@ import android.os.Looper
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -32,12 +33,14 @@ import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -49,9 +52,15 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DividerDefaults
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -60,13 +69,18 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -91,8 +105,12 @@ import androidx.core.view.WindowInsetsControllerCompat
 import java.io.IOException
 import java.net.URI
 import java.net.URLEncoder
+import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -108,7 +126,24 @@ class MainActivity : ComponentActivity() {
         private const val KEY_SESSION = "session"
         private const val KEY_MODEL = "model"
         private const val MAX_CONNECTION_HISTORY = 8
+    private const val CODE_BROWSER_FILE_CACHE_SIZE = 24
+    private const val CODE_BROWSER_RENDER_CACHE_SIZE = 16
+    private const val CODE_BROWSER_FULL_HIGHLIGHT_MAX_CHARS = 60000
+    private const val CODE_BROWSER_FULL_HIGHLIGHT_MAX_LINES = 1200
     }
+
+    private val uiBackground = Color(0xFFF6FBF7)
+    private val uiSurface = Color(0xFFFFFFFF)
+    private val uiSurfaceAlt = Color(0xFFF1F8F2)
+    private val uiSurfaceSoft = Color(0xFFE5F2E8)
+    private val uiPrimary = Color(0xFF1A8F55)
+    private val uiPrimarySoft = Color(0xFFDDF3E4)
+    private val uiText = Color(0xFF183326)
+    private val uiMuted = Color(0xFF6D8876)
+    private val uiBorder = Color(0xFFCFE2D3)
+    private val uiOnline = Color(0xFF27A55A)
+    private val uiOffline = Color(0xFFB7C7BB)
+    private val uiScrim = Color(0x551A8F55)
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val pendingRequests = mutableMapOf<String, ResponseHandler>()
@@ -124,11 +159,24 @@ class MainActivity : ComponentActivity() {
     private val turnDiffItemIds = mutableMapOf<String, String>()
     private val turnDiffs = mutableMapOf<String, String>()
     private val connectionHistory = mutableStateListOf<BridgeHistoryEntry>()
+    private val codeBrowserFileCache =
+        object : LinkedHashMap<String, CodeBrowserFileContent>(CODE_BROWSER_FILE_CACHE_SIZE, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CodeBrowserFileContent>?): Boolean {
+                return size > CODE_BROWSER_FILE_CACHE_SIZE
+            }
+        }
+    private val codeBrowserRenderCache =
+        object : LinkedHashMap<String, CodeBrowserRenderedContent>(CODE_BROWSER_RENDER_CACHE_SIZE, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CodeBrowserRenderedContent>?): Boolean {
+                return size > CODE_BROWSER_RENDER_CACHE_SIZE
+            }
+        }
 
     private lateinit var prefs: SharedPreferences
     private var bridgeClient: BridgeClient? = null
     private var connected by mutableStateOf(false)
-    private var selectedTab by mutableStateOf(AppTab.Connection)
+    private var selectedTab by mutableStateOf(AppTab.Chat)
+    private var selectedWorkspace by mutableStateOf<String?>(null)
     private var activeSessionId by mutableStateOf<String?>(null)
     private var activeTurnId by mutableStateOf<String?>(null)
     private var bridgeUrl by mutableStateOf("")
@@ -136,6 +184,7 @@ class MainActivity : ComponentActivity() {
     private var connectionDetail by mutableStateOf("未连接")
     private var currentBridgeUrl by mutableStateOf<String?>(null)
     private var composerText by mutableStateOf("")
+    private var newChatDraft by mutableStateOf<NewChatDraft?>(null)
     private var liveTurnStatus by mutableStateOf<String?>(null)
     private var chatRestoreScrollY by mutableStateOf<Int?>(null)
     private var codeBrowserState by mutableStateOf<CodeBrowserState?>(null)
@@ -190,9 +239,13 @@ class MainActivity : ComponentActivity() {
         bridgeClient = null
     }
 
+    @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun RemoteApp() {
         val snackbarHostState = remember { SnackbarHostState() }
+        val drawerState = androidx.compose.material3.rememberDrawerState(initialValue = DrawerValue.Closed)
+        val codeBrowserSheetState = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val scope = rememberCoroutineScope()
 
         LaunchedEffect(transientNonce) {
             val message = transientNotice ?: return@LaunchedEffect
@@ -200,52 +253,343 @@ class MainActivity : ComponentActivity() {
             transientNotice = null
         }
 
-        val scheme = darkColorScheme(
-            primary = c(0xFF38BDF8),
-            secondary = c(0xFF94A3B8),
-            tertiary = c(0xFF7C3AED),
-            background = c(0xFF0B1220),
-            surface = c(0xFF111A2E),
-            surfaceVariant = c(0xFF1D2A3D),
+        BackHandler(enabled = drawerState.isOpen) {
+            scope.launch {
+                drawerState.close()
+            }
+        }
+
+        val scheme = lightColorScheme(
+            primary = uiPrimary,
+            secondary = uiMuted,
+            tertiary = uiPrimarySoft,
+            background = uiBackground,
+            surface = uiSurface,
+            surfaceVariant = uiSurfaceAlt,
             onPrimary = Color.White,
-            onSecondary = Color.White,
-            onTertiary = Color.White,
-            onBackground = Color.White,
-            onSurface = Color.White,
-            onSurfaceVariant = Color.White,
+            onSecondary = uiText,
+            onTertiary = uiText,
+            onBackground = uiText,
+            onSurface = uiText,
+            onSurfaceVariant = uiMuted,
         )
 
         MaterialTheme(colorScheme = scheme) {
-            Scaffold(
-                modifier = Modifier.fillMaxSize(),
-                containerColor = Color.Transparent,
-                contentWindowInsets = WindowInsets(0, 0, 0, 0),
-                snackbarHost = { SnackbarHost(snackbarHostState) },
-            ) { scaffoldPadding ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(scaffoldPadding)
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(c(0xFF0B1220), c(0xFF101A2B), c(0xFF0B1220)),
-                            ),
-                        ),
+            ModalNavigationDrawer(
+                drawerState = drawerState,
+                gesturesEnabled = false,
+                scrimColor = uiScrim,
+                drawerContent = {
+                    ModalDrawerSheet(
+                        modifier = Modifier.fillMaxWidth(0.9f),
+                        drawerContainerColor = uiSurface,
+                        drawerContentColor = uiText,
+                    ) {
+                        AppDrawerContent(
+                            onCloseDrawer = {
+                                scope.launch {
+                                    drawerState.close()
+                                }
+                            },
+                        )
+                    }
+                },
+            ) {
+                Scaffold(
+                    modifier = Modifier.fillMaxSize(),
+                    containerColor = uiBackground,
+                    contentWindowInsets = WindowInsets(0, 0, 0, 0),
+                    snackbarHost = { SnackbarHost(snackbarHostState) },
+                    topBar = {
+                        AppTopBar(
+                            onOpenDrawer = {
+                                scope.launch {
+                                    drawerState.open()
+                                }
+                            },
+                        )
+                    },
+                ) { scaffoldPadding ->
+                    val horizontalPadding = if (selectedTab == AppTab.Chat) 8.dp else 16.dp
+                    val verticalPadding = if (selectedTab == AppTab.Chat) 8.dp else 12.dp
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(scaffoldPadding)
+                            .background(uiBackground),
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = horizontalPadding, vertical = verticalPadding),
+                        ) {
+                            when (selectedTab) {
+                                AppTab.Connection -> ConnectionPage()
+                                AppTab.Sessions -> SessionPage()
+                                AppTab.Chat -> ChatPage()
+                            }
+                        }
+                    }
+                }
+            }
+
+            codeBrowserState?.let { state ->
+                ModalBottomSheet(
+                    onDismissRequest = { closeCodeBrowser() },
+                    sheetState = codeBrowserSheetState,
+                    containerColor = uiSurface,
+                    contentColor = uiText,
+                ) {
+                    CodeBrowserPage(
+                        state = state,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 360.dp, max = 760.dp)
+                            .navigationBarsPadding(),
+                    )
+                }
+            }
+
+            newChatDraft?.let { draft ->
+                ModalBottomSheet(
+                    onDismissRequest = { newChatDraft = null },
+                    containerColor = uiSurface,
+                    contentColor = uiText,
+                    dragHandle = null,
+                ) {
+                    NewChatSheet(
+                        draft = draft,
+                        onDismiss = { newChatDraft = null },
+                        onModelChange = { model -> newChatDraft = draft.copy(model = model) },
+                        onApprovalPolicyChange = { policy -> newChatDraft = draft.copy(approvalPolicy = policy) },
+                        onConfirm = {
+                            startNewSession(
+                                projectPath = draft.projectPath,
+                                model = draft.model,
+                                approvalPolicy = draft.approvalPolicy,
+                            )
+                            newChatDraft = null
+                        },
+                    )
+                }
+            }
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun AppTopBar(onOpenDrawer: () -> Unit) {
+        val title =
+            when (selectedTab) {
+                AppTab.Chat -> activeSession()?.titleLine() ?: "Codex Remote"
+                AppTab.Connection -> "连接设置"
+                AppTab.Sessions -> selectedWorkspace?.let { workspaceDisplayName(it, fallback = it) } ?: "会话历史"
+            }
+
+        TopAppBar(
+            title = {
+                Text(
+                    text = title,
+                    color = uiText,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            },
+            navigationIcon = {
+                TextButton(onClick = onOpenDrawer) {
+                    Text("☰")
+                }
+            },
+            colors = TopAppBarDefaults.topAppBarColors(
+                containerColor = uiSurface,
+                titleContentColor = uiText,
+                actionIconContentColor = uiText,
+                navigationIconContentColor = uiText,
+            ),
+            actions = {
+                StatusDot(active = connected)
+            },
+        )
+    }
+
+    @Composable
+    private fun AppDrawerContent(onCloseDrawer: () -> Unit) {
+        val projectGroups = projectBuckets()
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = uiSurface),
+                    shape = RoundedCornerShape(24.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
                 ) {
                     Column(
                         modifier = Modifier
-                            .fillMaxSize()
-                            .statusBarsPadding()
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                            .fillMaxWidth()
+                            .padding(18.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        Header()
-                        Spacer(modifier = Modifier.height(12.dp))
-                        TabSwitcher()
-                        Spacer(modifier = Modifier.height(12.dp))
-                        when (selectedTab) {
-                            AppTab.Connection -> ConnectionPage()
-                            AppTab.Sessions -> SessionPage()
-                            AppTab.Chat -> ChatPage()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "连接设置",
+                                    color = uiText,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 18.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    text = connectionDetail,
+                                    color = uiMuted,
+                                    fontSize = 12.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            StatusDot(active = connected)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                            OutlinedButton(
+                                onClick = {
+                                    selectedTab = AppTab.Connection
+                                    onCloseDrawer()
+                                },
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text("连接设置")
+                            }
+                            Button(
+                                onClick = { openNewChatDialog(currentWorkspacePath()) },
+                                enabled = connected,
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(containerColor = uiPrimary),
+                            ) {
+                                Text("新对话")
+                            }
+                        }
+                    }
+                }
+            }
+
+            item {
+                SectionTitle("项目")
+            }
+
+            if (projectGroups.isEmpty()) {
+                item {
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = uiSurface,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
+                    ) {
+                        BodyText(
+                            text = if (connected) "连接后，项目和历史会话会显示在这里。" else "先连接 bridge，再来创建新对话。",
+                            modifier = Modifier.padding(14.dp),
+                        )
+                    }
+                }
+            } else {
+                items(items = projectGroups, key = { it.key() }) { group ->
+                    ProjectGroupCard(
+                        group = group,
+                        onOpenProject = {
+                            selectedWorkspace = group.path
+                            selectedTab = AppTab.Chat
+                            onCloseDrawer()
+                        },
+                        onNewChat = {
+                            openNewChatDialog(group.path)
+                            onCloseDrawer()
+                        },
+                        onSelectSession = { session ->
+                            selectSession(session.sessionId, true)
+                            selectedWorkspace = group.path
+                            selectedTab = AppTab.Chat
+                            onCloseDrawer()
+                        },
+                    )
+                }
+            }
+
+            item {
+                Spacer(modifier = Modifier.height(4.dp))
+            }
+        }
+    }
+
+    @Composable
+    private fun ProjectGroupCard(
+        group: ProjectGroup,
+        onOpenProject: () -> Unit,
+        onNewChat: () -> Unit,
+        onSelectSession: (SessionInfo) -> Unit,
+    ) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = uiSurface),
+            shape = RoundedCornerShape(22.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onOpenProject),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = group.displayName,
+                            color = uiText,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = group.path ?: "未分类历史",
+                            color = uiMuted,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "${group.sessions.size}",
+                            color = uiMuted,
+                            fontSize = 12.sp,
+                        )
+                        TextButton(onClick = onNewChat) {
+                            Text("＋")
+                        }
+                    }
+                }
+
+                if (group.sessions.isEmpty()) {
+                    BodyText("这个项目暂时还没有历史会话。")
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        group.sessions.forEach { session ->
+                            SessionCard(
+                                session = session,
+                                selected = session.sessionId == activeSessionId,
+                                onClick = { onSelectSession(session) },
+                            )
                         }
                     }
                 }
@@ -254,98 +598,158 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun Header() {
-        val pillColor = if (connected) c(0xFF22C55E) else c(0xFF334155)
-        val pillText = if (connected) "在线" else "离线"
-        val statusLine = buildStatusLine()
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
+    private fun DrawerWorkspaceChip(
+        label: String,
+        selected: Boolean,
+        onClick: () -> Unit,
+    ) {
+        Surface(
+            shape = RoundedCornerShape(999.dp),
+            color = if (selected) uiPrimary else uiSurfaceAlt,
+            border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, uiPrimary) else androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
+            modifier = Modifier.clickable(onClick = onClick),
         ) {
-            Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = label,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+                color = if (selected) Color.White else uiText,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+
+    @Composable
+    private fun StatusDot(active: Boolean) {
+        Box(
+            modifier = Modifier
+                .size(10.dp)
+                .background(color = if (active) uiOnline else uiOffline, shape = CircleShape),
+        )
+    }
+
+    @Composable
+    private fun NewChatSheet(
+        draft: NewChatDraft,
+        onDismiss: () -> Unit,
+        onModelChange: (String) -> Unit,
+        onApprovalPolicyChange: (String) -> Unit,
+        onConfirm: () -> Unit,
+    ) {
+        val modelOptions = availableModels.ifEmpty {
+            listOfNotNull(
+                selectedModel.takeIf { it.isNotBlank() }?.let {
+                    ModelInfo(
+                        id = it,
+                        model = it,
+                        displayName = it,
+                        description = "",
+                        hidden = false,
+                        isDefault = true,
+                    )
+                },
+            )
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                    text = "Codex Remote",
-                    fontSize = 28.sp,
+                    text = "新对话",
+                    color = uiText,
+                    fontSize = 18.sp,
                     fontWeight = FontWeight.Bold,
-                    color = Color.White,
                 )
-                Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = statusLine,
-                    color = c(0xFF98A8C2),
-                    fontSize = 13.sp,
-                    maxLines = 1,
+                    text = draft.projectPath ?: "先选项目，再选模型和权限。",
+                    color = uiMuted,
+                    fontSize = 12.sp,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
 
-            Surface(
-                shape = RoundedCornerShape(999.dp),
-                color = pillColor,
-                contentColor = c(0xFF0B1220),
-            ) {
-                Text(
-                    text = pillText,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Label("模型")
+                if (modelOptions.isEmpty()) {
+                    BodyText("模型列表还没加载完成。")
+                } else {
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        modelOptions.forEach { model ->
+                            SelectablePill(
+                                label = model.displayName,
+                                selected = draft.model == model.model || (draft.model.isBlank() && model.isDefault),
+                                onClick = { onModelChange(model.model) },
+                            )
+                        }
+                    }
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Label("权限")
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    listOf(
+                        "on-request" to "保守",
+                        "on-failure" to "平衡",
+                        "never" to "自动",
+                    ).forEach { (policy, label) ->
+                        SelectablePill(
+                            label = label,
+                            selected = draft.approvalPolicy == policy,
+                            onClick = { onApprovalPolicyChange(policy) },
+                        )
+                    }
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f)) {
+                    Text("取消")
+                }
+                Button(
+                    onClick = onConfirm,
+                    enabled = draft.model.isNotBlank(),
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = uiPrimary),
+                ) {
+                    Text("确定")
+                }
             }
         }
     }
 
     @Composable
-    private fun TabSwitcher() {
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            TabButton(
-                text = "连接",
-                selected = selectedTab == AppTab.Connection,
-                modifier = Modifier.weight(1f),
-                onClick = { selectedTab = AppTab.Connection },
-            )
-            TabButton(
-                text = "会话",
-                selected = selectedTab == AppTab.Sessions,
-                modifier = Modifier.weight(1f),
-                onClick = { selectedTab = AppTab.Sessions },
-            )
-            TabButton(
-                text = "对话",
-                selected = selectedTab == AppTab.Chat,
-                modifier = Modifier.weight(1f),
-                onClick = { selectedTab = AppTab.Chat },
-            )
-        }
-    }
-
-    @Composable
-    private fun TabButton(
-        text: String,
+    private fun SelectablePill(
+        label: String,
         selected: Boolean,
-        modifier: Modifier = Modifier,
         onClick: () -> Unit,
     ) {
-        val color = if (selected) c(0xFF0F6D99) else c(0xFF1D2A3D)
         Surface(
-            modifier = modifier.height(44.dp),
-            shape = RoundedCornerShape(16.dp),
-            color = color,
-            tonalElevation = 0.dp,
+            shape = RoundedCornerShape(999.dp),
+            color = if (selected) uiPrimary else uiSurfaceAlt,
+            border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) uiPrimary else uiBorder),
+            modifier = Modifier.clickable(onClick = onClick),
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clickable(onClick = onClick),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = text,
-                    color = Color.White,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
+            Text(
+                text = label,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                color = if (selected) Color.White else uiText,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 
@@ -374,8 +778,9 @@ class MainActivity : ComponentActivity() {
             ) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = c(0xFF111A2E)),
+                    colors = CardDefaults.cardColors(containerColor = uiSurface),
                     shape = RoundedCornerShape(22.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
                 ) {
                     Column(modifier = Modifier.padding(18.dp)) {
                         SectionTitle("连接 Linux Bridge")
@@ -386,8 +791,9 @@ class MainActivity : ComponentActivity() {
 
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = c(0xFF111A2E)),
+                    colors = CardDefaults.cardColors(containerColor = uiSurface),
                     shape = RoundedCornerShape(22.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
                 ) {
                     Column(modifier = Modifier.padding(18.dp)) {
                         Label("Bridge URL")
@@ -411,11 +817,11 @@ class MainActivity : ComponentActivity() {
                                 },
                             ),
                             colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = c(0xFF38BDF8),
-                                unfocusedBorderColor = c(0xFF334155),
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White,
-                                cursorColor = c(0xFF38BDF8),
+                                focusedBorderColor = uiPrimary,
+                                unfocusedBorderColor = uiBorder,
+                                focusedTextColor = uiText,
+                                unfocusedTextColor = uiText,
+                                cursorColor = uiPrimary,
                             ),
                         )
 
@@ -436,7 +842,7 @@ class MainActivity : ComponentActivity() {
                                     toggleConnection()
                                 },
                                 modifier = Modifier.weight(1.4f),
-                                colors = ButtonDefaults.buttonColors(containerColor = c(0xFF0F6D99)),
+                                colors = ButtonDefaults.buttonColors(containerColor = uiPrimary),
                             ) {
                                 Text(if (connected) "断开连接" else "连接")
                             }
@@ -447,8 +853,9 @@ class MainActivity : ComponentActivity() {
                 if (connectionHistory.isNotEmpty()) {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = c(0xFF111A2E)),
+                        colors = CardDefaults.cardColors(containerColor = uiSurface),
                         shape = RoundedCornerShape(22.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
                     ) {
                         Column(modifier = Modifier.padding(18.dp)) {
                             Row(
@@ -481,8 +888,9 @@ class MainActivity : ComponentActivity() {
 
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = c(0xFF0F172A)),
+                    colors = CardDefaults.cardColors(containerColor = uiSurface),
                     shape = RoundedCornerShape(22.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
                 ) {
                     Column(modifier = Modifier.padding(18.dp)) {
                         SectionTitle("连接状态")
@@ -513,8 +921,8 @@ class MainActivity : ComponentActivity() {
                 .fillMaxWidth()
                 .clickable(onClick = onApply),
             shape = RoundedCornerShape(18.dp),
-            color = if (active) c(0xFF123B57) else c(0xFF0F172A),
-            border = if (active) androidx.compose.foundation.BorderStroke(1.dp, c(0xFF38BDF8)) else null,
+            color = if (active) uiPrimarySoft else uiSurfaceAlt,
+            border = if (active) androidx.compose.foundation.BorderStroke(1.dp, uiPrimary) else androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
         ) {
             Column(
                 modifier = Modifier.padding(14.dp),
@@ -528,7 +936,7 @@ class MainActivity : ComponentActivity() {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = entry.title,
-                            color = Color.White,
+                            color = uiText,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -536,7 +944,7 @@ class MainActivity : ComponentActivity() {
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = entry.detailLine(),
-                            color = c(0xFF98A8C2),
+                            color = uiMuted,
                             fontSize = 12.sp,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
@@ -544,7 +952,7 @@ class MainActivity : ComponentActivity() {
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = "最近使用 ${entry.lastUsedLabel()}",
-                            color = c(0xFF64748B),
+                            color = uiMuted,
                             fontSize = 11.sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -561,7 +969,7 @@ class MainActivity : ComponentActivity() {
 
                 Text(
                     text = entry.maskedUrl,
-                    color = c(0xFF64748B),
+                    color = uiMuted,
                     fontSize = 11.sp,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
@@ -587,166 +995,108 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun ChatPage() {
-        val density = LocalDensity.current
-        val imeVisible = WindowInsets.ime.getBottom(density) > 0
+        val activeSession = activeSession()
 
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .background(Color.White)
                 .imePadding()
                 .navigationBarsPadding(),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(18.dp),
-                color = c(0xFF111A2E),
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = currentSessionLabel(),
-                        color = c(0xFF98A8C2),
-                        fontSize = 13.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    FilledTonalButton(onClick = { selectedTab = AppTab.Sessions }) {
-                        Text("切换会话")
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Card(
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
-                colors = CardDefaults.cardColors(containerColor = c(0xFF111A2E)),
-                shape = RoundedCornerShape(22.dp),
             ) {
-                Box(modifier = Modifier.fillMaxSize()) {
-                    if (conversationItems.isEmpty()) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(18.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            BodyText("选中一个会话后，消息和审批会在这里出现。")
-                        }
-                    } else {
-                        ConversationHistoryWebView(
-                            items = conversationItems,
-                            sessionId = activeSessionId,
-                            followBottom = activeTurnId != null,
-                            onApprovalDecision = { requestId, decision, itemId ->
-                                sendApproval(requestId, decision, itemId)
-                            },
-                            restoreScrollY = chatRestoreScrollY,
-                            onScrollRestored = {
-                                chatRestoreScrollY = null
-                            },
-                            onOpenCodeBrowser = { itemId, scrollY ->
-                                openCodeBrowser(itemId, scrollY)
-                            },
-                            modifier = Modifier.fillMaxSize(),
+                if (conversationItems.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 12.dp, vertical = 18.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        BodyText(
+                            text = if (activeSession == null) "先新建或选择一个项目里的会话，再开始聊天。" else "这里会显示当前会话的消息流。",
+                            modifier = Modifier.fillMaxWidth(0.8f),
                         )
                     }
-
-                    codeBrowserState?.let { state ->
-                        CodeBrowserPage(
-                            state = state,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    }
+                } else {
+                    ConversationHistoryWebView(
+                        items = conversationItems,
+                        sessionId = activeSessionId,
+                        followBottom = activeTurnId != null,
+                        onApprovalDecision = { requestId, decision, itemId ->
+                            sendApproval(requestId, decision, itemId)
+                        },
+                        restoreScrollY = chatRestoreScrollY,
+                        onScrollRestored = {
+                            chatRestoreScrollY = null
+                        },
+                        onOpenCodeBrowser = { itemId, scrollY ->
+                            openCodeBrowser(itemId, scrollY)
+                        },
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.White),
+                    )
                 }
             }
-
-            Spacer(modifier = Modifier.height(10.dp))
 
             liveTurnStatus?.takeIf { it.isNotBlank() }?.let { status ->
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    color = c(0xFF0F172A),
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = "\u25cf",
-                            color = c(0xFF38BDF8),
-                            fontSize = 10.sp,
-                        )
-                        Text(
-                            text = status,
-                            color = c(0xFF98A8C2),
-                            fontSize = 12.sp,
-                            lineHeight = 18.sp,
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = status,
+                    color = uiMuted,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                    modifier = Modifier.padding(start = 4.dp, end = 4.dp),
+                )
             }
 
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = c(0xFF111A2E)),
-                shape = RoundedCornerShape(22.dp),
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 2.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.Bottom,
             ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    OutlinedTextField(
-                        value = composerText,
-                        onValueChange = { composerText = it },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = if (imeVisible) 72.dp else 110.dp),
-                        placeholder = { Text("输入给 Codex 的消息") },
-                        minLines = if (imeVisible) 1 else 3,
-                        maxLines = if (imeVisible) 3 else 6,
-                        shape = RoundedCornerShape(18.dp),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                        keyboardActions = KeyboardActions(onSend = { sendComposerText() }),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = c(0xFF38BDF8),
-                            unfocusedBorderColor = c(0xFF334155),
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White,
-                            cursorColor = c(0xFF38BDF8),
-                        ),
+                OutlinedTextField(
+                    value = composerText,
+                    onValueChange = { composerText = it },
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp),
+                    singleLine = false,
+                    minLines = 1,
+                    maxLines = 5,
+                    shape = RoundedCornerShape(18.dp),
+                    placeholder = { Text("输入消息") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = { sendComposerText() }),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = uiPrimary,
+                        unfocusedBorderColor = uiBorder,
+                        focusedTextColor = uiText,
+                        unfocusedTextColor = uiText,
+                        cursorColor = uiPrimary,
+                    ),
+                )
+
+                Button(
+                    onClick = { sendComposerText() },
+                    enabled = connected && activeSessionId != null,
+                    modifier = Modifier.size(44.dp),
+                    shape = CircleShape,
+                    contentPadding = PaddingValues(0.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = uiPrimary),
+                ) {
+                    Text(
+                        text = "↑",
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
                     )
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(
-                            onClick = { sendComposerText() },
-                            enabled = connected && activeSessionId != null,
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = c(0xFF0F6D99)),
-                        ) {
-                            Text("发送")
-                        }
-                        OutlinedButton(
-                            onClick = { interruptCurrentTurn() },
-                            enabled = connected && activeTurnId != null,
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Text("中断")
-                        }
-                    }
                 }
             }
         }
@@ -758,16 +1108,17 @@ class MainActivity : ComponentActivity() {
         modifier: Modifier = Modifier,
     ) {
         val selectedEntry = state.selectedEntry()
+        val diffStats = buildDiffStatsLine(diffEntries = state.diffEntries, fallbackDiff = state.fallbackDiff)
 
         LaunchedEffect(state.conversationItemId, state.mode, state.selectedPath, state.fileReadState) {
-            if (state.mode == CodeBrowserMode.File && state.fileReadState is CodeBrowserFileReadState.Idle) {
+            if (state.mode == CodeBrowserMode.File && selectedEntry != null && state.fileReadState is CodeBrowserFileReadState.Idle) {
                 loadCodeBrowserFileContent(state)
             }
         }
 
         Box(
             modifier = modifier
-                .background(c(0xFF111A2E))
+                .background(uiBackground)
                 .padding(14.dp),
         ) {
             Column(
@@ -777,22 +1128,20 @@ class MainActivity : ComponentActivity() {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
-                    color = c(0xFF0F172A),
+                    color = uiSurface,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
                 ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 12.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        OutlinedButton(onClick = { closeCodeBrowser() }) {
-                            Text("返回对话")
-                        }
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = state.title,
-                                color = Color.White,
+                                color = uiText,
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -803,10 +1152,18 @@ class MainActivity : ComponentActivity() {
                                     state.diffEntries.isNotEmpty() -> "共 ${state.diffEntries.size} 个文件"
                                     else -> "聚合 diff"
                                 },
-                                color = c(0xFF98A8C2),
+                                color = uiMuted,
                                 fontSize = 12.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        diffStats?.let {
+                            Text(
+                                text = it,
+                                color = uiMuted,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
                             )
                         }
                     }
@@ -848,7 +1205,8 @@ class MainActivity : ComponentActivity() {
                         .fillMaxWidth()
                         .weight(1f),
                     shape = RoundedCornerShape(18.dp),
-                    color = c(0xFF0B1220),
+                    color = uiSurfaceAlt,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
                 ) {
                     when (state.mode) {
                         CodeBrowserMode.Diff -> {
@@ -877,7 +1235,7 @@ class MainActivity : ComponentActivity() {
 
                                 CodeBrowserFileReadState.Loading -> {
                                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                        CircularProgressIndicator(color = c(0xFF38BDF8))
+                                        CircularProgressIndicator(color = uiPrimary)
                                     }
                                 }
 
@@ -915,7 +1273,7 @@ class MainActivity : ComponentActivity() {
                                         append(" · 已截断到 ${fileState.content.bytes} bytes")
                                     }
                                 },
-                                color = c(0xFF98A8C2),
+                                color = uiMuted,
                                 fontSize = 11.sp,
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
@@ -941,7 +1299,7 @@ class MainActivity : ComponentActivity() {
                 onClick = onClick,
                 enabled = enabled,
                 modifier = modifier,
-                colors = ButtonDefaults.buttonColors(containerColor = c(0xFF0F6D99)),
+                colors = ButtonDefaults.buttonColors(containerColor = uiPrimary),
             ) {
                 Text(text)
             }
@@ -964,14 +1322,14 @@ class MainActivity : ComponentActivity() {
     ) {
         Surface(
             shape = RoundedCornerShape(999.dp),
-            color = if (selected) c(0xFF123B57) else c(0xFF0F172A),
-            border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, c(0xFF38BDF8)) else null,
+            color = if (selected) uiPrimary else uiSurfaceAlt,
+            border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, uiPrimary) else androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
             modifier = Modifier.clickable(onClick = onClick),
         ) {
             Text(
                 text = label,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                color = Color.White,
+                color = if (selected) Color.White else uiText,
                 fontSize = 12.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -987,24 +1345,85 @@ class MainActivity : ComponentActivity() {
         modifier: Modifier = Modifier,
     ) {
         val verticalScroll = rememberScrollState()
-        val horizontalScroll = rememberScrollState()
-        val content = remember(text, mode, pathHint) { buildCodeBrowserAnnotatedText(text, mode, pathHint) }
+        val cacheKey = remember(mode, pathHint, text.length, text.hashCode()) {
+            buildCodeBrowserRenderCacheKey(text, mode, pathHint)
+        }
+        val rendered by produceState<CodeBrowserRenderedContent?>(
+            initialValue = codeBrowserRenderCache[cacheKey],
+            key1 = cacheKey,
+        ) {
+            codeBrowserRenderCache[cacheKey]?.let { cached ->
+                value = cached
+                return@produceState
+            }
+            value = null
+            val computed =
+                withContext(Dispatchers.Default) {
+                    buildCodeBrowserRenderedContent(text, mode, pathHint)
+                }
+            codeBrowserRenderCache[cacheKey] = computed
+            value = computed
+        }
+
+        if (rendered == null) {
+            Box(
+                modifier = modifier
+                    .background(uiSurfaceAlt),
+                contentAlignment = Alignment.Center,
+            ) {
+                CircularProgressIndicator(color = uiPrimary)
+            }
+            return
+        }
 
         SelectionContainer {
             Box(
                 modifier = modifier
-                    .background(c(0xFF0B1220))
+                    .background(uiSurfaceAlt)
                     .verticalScroll(verticalScroll)
-                    .horizontalScroll(horizontalScroll)
                     .padding(14.dp),
             ) {
-                Text(
-                    text = content,
-                    color = Color.White,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                    lineHeight = 18.sp,
-                )
+                val renderedContent = rendered
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (renderedContent?.lightweight == true) {
+                        Text(
+                            text = "大文件已切换到轻量渲染，优先保证打开速度。",
+                            color = uiMuted,
+                            fontSize = 11.sp,
+                        )
+                    }
+                    if (mode == CodeTextMode.Diff && !renderedContent?.lines.isNullOrEmpty()) {
+                        Column(verticalArrangement = Arrangement.spacedBy(1.dp), modifier = Modifier.fillMaxWidth()) {
+                            renderedContent?.lines.orEmpty().forEach { line ->
+                                val lineBackground =
+                                    when (line.kind) {
+                                        DiffLineKind.Added -> c(0x3427A55A)
+                                        DiffLineKind.Deleted -> c(0x34DC2626)
+                                        else -> Color.Transparent
+                                    }
+                                Text(
+                                    text = line.text,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(lineBackground, RoundedCornerShape(6.dp))
+                                        .padding(horizontal = 4.dp, vertical = 1.dp),
+                                    color = uiText,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 12.sp,
+                                    lineHeight = 18.sp,
+                                )
+                            }
+                        }
+                    } else {
+                        Text(
+                            text = rendered?.text ?: AnnotatedString(""),
+                            color = uiText,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                            lineHeight = 18.sp,
+                        )
+                    }
+                }
             }
         }
     }
@@ -1013,6 +1432,7 @@ class MainActivity : ComponentActivity() {
     private fun SessionPage() {
         val sessionListState = rememberLazyListState()
         var modelPickerExpanded by remember { mutableStateOf(false) }
+        val filteredSessions = sessionsForSelectedWorkspace()
 
         Column(
             modifier = Modifier
@@ -1022,8 +1442,9 @@ class MainActivity : ComponentActivity() {
         ) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = c(0xFF111A2E)),
+                colors = CardDefaults.cardColors(containerColor = uiSurface),
                 shape = RoundedCornerShape(22.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
             ) {
                 Column(modifier = Modifier.padding(18.dp)) {
                     Row(
@@ -1053,11 +1474,11 @@ class MainActivity : ComponentActivity() {
                         shape = RoundedCornerShape(18.dp),
                         placeholder = { Text("例如 gpt-5.1") },
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = c(0xFF38BDF8),
-                            unfocusedBorderColor = c(0xFF334155),
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White,
-                            cursorColor = c(0xFF38BDF8),
+                            focusedBorderColor = uiPrimary,
+                            unfocusedBorderColor = uiBorder,
+                            focusedTextColor = uiText,
+                            unfocusedTextColor = uiText,
+                            cursorColor = uiPrimary,
                         ),
                     )
                     Spacer(modifier = Modifier.height(10.dp))
@@ -1070,10 +1491,10 @@ class MainActivity : ComponentActivity() {
                             Text("刷新模型")
                         }
                         Button(
-                            onClick = { startNewSession() },
+                            onClick = { openNewChatDialog(currentWorkspacePath()) },
                             enabled = connected,
                             modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = c(0xFF0F6D99)),
+                            colors = ButtonDefaults.buttonColors(containerColor = uiPrimary),
                         ) {
                             Text("新会话")
                         }
@@ -1105,7 +1526,16 @@ class MainActivity : ComponentActivity() {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                SectionTitle("会话历史")
+                Column {
+                    SectionTitle("会话历史")
+                    selectedWorkspace?.let {
+                        Text(
+                            text = workspaceDisplayName(it, fallback = it),
+                            color = uiMuted,
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
                 FilledTonalButton(onClick = { requestSessionList() }, enabled = connected) {
                     Text("刷新")
                 }
@@ -1115,17 +1545,24 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
-                colors = CardDefaults.cardColors(containerColor = c(0xFF111A2E)),
+                colors = CardDefaults.cardColors(containerColor = uiSurface),
                 shape = RoundedCornerShape(22.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
             ) {
-                if (sessions.isEmpty()) {
+                if (filteredSessions.isEmpty()) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(18.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        BodyText(if (connected) "暂无会话，先创建一个新的吧。" else "连接后这里会显示会话列表。")
+                        BodyText(
+                            if (connected) {
+                                if (selectedWorkspace == null) "暂无会话，先创建一个新的吧。" else "这个 workspace 暂无会话。"
+                            } else {
+                                "连接后这里会显示会话列表。"
+                            },
+                        )
                     }
                 } else {
                     LazyColumn(
@@ -1134,7 +1571,7 @@ class MainActivity : ComponentActivity() {
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                         contentPadding = PaddingValues(12.dp),
                     ) {
-                        items(items = sessions, key = { it.sessionId }) { session ->
+                        items(items = filteredSessions, key = { it.sessionId }) { session ->
                             SessionCard(
                                 session = session,
                                 selected = session.sessionId == activeSessionId,
@@ -1161,13 +1598,13 @@ class MainActivity : ComponentActivity() {
                 .fillMaxWidth()
                 .clickable(onClick = onClick),
             shape = RoundedCornerShape(18.dp),
-            color = if (selected) c(0xFF123B57) else c(0xFF0F172A),
-            border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, c(0xFF38BDF8)) else null,
+            color = if (selected) uiPrimarySoft else uiSurfaceAlt,
+            border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, uiPrimary) else androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
         ) {
             Column(modifier = Modifier.padding(14.dp)) {
                 Text(
                     text = session.titleLine(),
-                    color = Color.White,
+                    color = uiText,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -1175,7 +1612,7 @@ class MainActivity : ComponentActivity() {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = session.previewLine(),
-                    color = c(0xFF98A8C2),
+                    color = uiMuted,
                     fontSize = 12.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -1183,7 +1620,7 @@ class MainActivity : ComponentActivity() {
                 Spacer(modifier = Modifier.height(5.dp))
                 Text(
                     text = session.metaLine(),
-                    color = c(0xFF98A8C2),
+                    color = uiMuted,
                     fontSize = 11.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -1203,8 +1640,8 @@ class MainActivity : ComponentActivity() {
                 .fillMaxWidth()
                 .clickable(onClick = onClick),
             shape = RoundedCornerShape(18.dp),
-            color = if (selected) c(0xFF123B57) else c(0xFF0F172A),
-            border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, c(0xFF38BDF8)) else null,
+            color = if (selected) uiPrimarySoft else uiSurfaceAlt,
+            border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, uiPrimary) else androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
         ) {
             Column(modifier = Modifier.padding(14.dp)) {
                 Row(
@@ -1214,7 +1651,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     Text(
                         text = model.displayName,
-                        color = Color.White,
+                        color = uiText,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -1223,7 +1660,7 @@ class MainActivity : ComponentActivity() {
                     Spacer(modifier = Modifier.widthIn(min = 8.dp))
                     Text(
                         text = if (model.isDefault) "默认" else model.model,
-                        color = c(0xFF98A8C2),
+                        color = uiMuted,
                         fontSize = 11.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -1233,7 +1670,7 @@ class MainActivity : ComponentActivity() {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = model.description,
-                        color = c(0xFF98A8C2),
+                        color = uiMuted,
                         fontSize = 12.sp,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
@@ -1272,6 +1709,7 @@ class MainActivity : ComponentActivity() {
         activeTurnId = null
         pendingRequests.clear()
         currentBridgeUrl = null
+        selectedWorkspace = null
         if (switchToConnectionPage) {
             selectedTab = AppTab.Connection
         }
@@ -1319,6 +1757,7 @@ class MainActivity : ComponentActivity() {
                     stopSessionSyncLoop()
                     bridgeClient = null
                     currentBridgeUrl = null
+                    selectedWorkspace = null
                     selectedTab = AppTab.Connection
                     connectionDetail = reason + describeThrowable(error)
                     disconnectRequested = false
@@ -1422,7 +1861,7 @@ class MainActivity : ComponentActivity() {
             "turn/input" -> {
                 val text = payload.optString("text", "").trim()
                 if (text.isNotEmpty()) {
-                    appendBubble(text, right = true, backgroundColor = 0xFF0EA5E9.toInt(), textColor = AndroidColor.WHITE)
+                    appendBubble(text, right = true, backgroundColor = 0xFF1A8F55.toInt(), textColor = AndroidColor.WHITE)
                 }
             }
 
@@ -1599,19 +2038,26 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun startNewSession() {
+    private fun startNewSession(
+        projectPath: String?,
+        model: String,
+        approvalPolicy: String,
+    ) {
         if (!ensureConnected()) return
-        val model = resolveModelForSend()
         if (model.isBlank()) {
             showNotice("请先选择一个模型")
             return
         }
 
         val payload = JSONObject().apply {
-            put("title", "Android 手机")
+            put("title", workspaceDisplayName(projectPath, fallback = "新对话"))
+            if (!projectPath.isNullOrBlank()) {
+                put("cwd", projectPath)
+            }
             put("sessionStartSource", "startup")
             put("threadSource", "user")
             put("model", model)
+            put("approvalPolicy", approvalPolicy)
         }
 
         sendRequest("session.start", payload) { response ->
@@ -1620,6 +2066,7 @@ class MainActivity : ComponentActivity() {
                 upsertSession(info)
                 selectSession(info.sessionId, syncHistory = false)
                 selectedTab = AppTab.Chat
+                selectedWorkspace = info.cwd.takeIf { it.isNotBlank() } ?: projectPath
                 if (info.model.isNotBlank()) {
                     selectModel(info.model)
                 }
@@ -1751,6 +2198,9 @@ class MainActivity : ComponentActivity() {
     private fun replaceSessions(newSessions: List<SessionInfo>) {
         sessions.clear()
         sessions.addAll(newSessions.sortedByDescending { it.updatedAt })
+        if (selectedWorkspace != null && sessions.none { it.cwd == selectedWorkspace }) {
+            selectedWorkspace = null
+        }
     }
 
     private fun upsertSession(info: SessionInfo) {
@@ -1891,6 +2341,10 @@ class MainActivity : ComponentActivity() {
             codeBrowserState = state.copy(fileReadState = CodeBrowserFileReadState.Error("没有可读取的文件路径"))
             return
         }
+        findCachedCodeBrowserFileContent(sessionId, candidatePaths)?.let { cached ->
+            codeBrowserState = state.copy(fileReadState = CodeBrowserFileReadState.Loaded(cached))
+            return
+        }
         val browsePath = candidatePaths.first()
         codeBrowserState = state.copy(fileReadState = CodeBrowserFileReadState.Loading)
 
@@ -1916,15 +2370,18 @@ class MainActivity : ComponentActivity() {
                     if (current.conversationItemId != state.conversationItemId || current.selectedPath != browsePath) return
 
                     val result = response.optJSONObject("payload") ?: JSONObject()
+                    val content =
+                        CodeBrowserFileContent(
+                            requestedPath = requestedPath,
+                            resolvedPath = result.optString("resolved_path", requestedPath),
+                            content = result.optString("content", ""),
+                            truncated = result.optBoolean("truncated", false),
+                            bytes = result.optInt("bytes", 0),
+                        )
+                    rememberCodeBrowserFileContent(sessionId, content)
                     codeBrowserState = current.copy(
                         fileReadState = CodeBrowserFileReadState.Loaded(
-                            CodeBrowserFileContent(
-                                requestedPath = requestedPath,
-                                resolvedPath = result.optString("resolved_path", requestedPath),
-                                content = result.optString("content", ""),
-                                truncated = result.optBoolean("truncated", false),
-                                bytes = result.optInt("bytes", 0),
-                            ),
+                            content,
                         ),
                     )
                 }
@@ -2581,21 +3038,42 @@ class MainActivity : ComponentActivity() {
         diffEntries: List<ConversationDiffEntry>,
         fallbackDiff: String?,
     ): String {
-        val parts = mutableListOf<String>()
-        labelPatchStatus(status).takeIf { it.isNotBlank() }?.let(parts::add)
+        val lines = mutableListOf<String>()
+        labelPatchStatus(status).takeIf { it.isNotBlank() }?.let(lines::add)
 
         if (diffEntries.isNotEmpty()) {
             val paths = diffEntries.map { it.summaryPath() }.distinct()
-            parts.add("${paths.size} 个文件")
-            val preview = paths.take(2).joinToString("、")
-            if (preview.isNotBlank()) {
-                parts.add(if (paths.size > 2) "$preview 等" else preview)
-            }
+            lines.add("${paths.size} 个文件")
+            buildDiffStatsLine(diffEntries = diffEntries, fallbackDiff = fallbackDiff)?.let(lines::add)
+            lines.addAll(paths)
         } else if (!fallbackDiff.isNullOrBlank()) {
-            parts.add("点击查看 diff")
+            buildDiffStatsLine(diffEntries = emptyList(), fallbackDiff = fallbackDiff)?.let(lines::add)
         }
 
-        return if (parts.isEmpty()) "点击查看详情" else parts.joinToString(" · ")
+        return if (lines.isEmpty()) "点击查看详情" else lines.joinToString("\n")
+    }
+
+    private fun buildDiffStatsLine(
+        diffEntries: List<ConversationDiffEntry>,
+        fallbackDiff: String?,
+    ): String? {
+        val source =
+            if (diffEntries.isNotEmpty()) {
+                diffEntries.joinToString("\n") { it.diff }
+            } else {
+                fallbackDiff.orEmpty()
+            }
+        if (source.isBlank()) return null
+        var additions = 0
+        var deletions = 0
+        source.replace("\r\n", "\n").lineSequence().forEach { line ->
+            when {
+                line.startsWith("+") && !line.startsWith("+++") -> additions += 1
+                line.startsWith("-") && !line.startsWith("---") -> deletions += 1
+            }
+        }
+        if (additions == 0 && deletions == 0) return null
+        return "+$additions / -$deletions"
     }
 
     private fun labelPatchStatus(status: String): String {
@@ -2722,8 +3200,8 @@ class MainActivity : ComponentActivity() {
             id = "assistant_${UUID.randomUUID()}",
             right = false,
             text = text,
-            backgroundColor = 0xFF172033.toInt(),
-            textColor = AndroidColor.WHITE,
+            backgroundColor = 0xFFF1F8F2.toInt(),
+            textColor = 0xFF183326.toInt(),
             turnKey = turnKey,
             assistantKey = assistantKey,
         )
@@ -2965,6 +3443,72 @@ class MainActivity : ComponentActivity() {
         return parts.joinToString(" · ")
     }
 
+    private fun activeSession(): SessionInfo? = activeSessionId?.let { sessionId -> sessions.firstOrNull { it.sessionId == sessionId } }
+
+    private fun currentWorkspacePath(): String? {
+        return selectedWorkspace
+            ?: activeSession()?.cwd?.takeIf { it.isNotBlank() }
+            ?: sessions.firstOrNull { it.cwd.isNotBlank() }?.cwd
+    }
+
+    private fun workspacePaths(): List<String> {
+        return sessions.mapNotNull { it.cwd.takeIf(String::isNotBlank) }.distinct().sorted()
+    }
+
+    private fun sessionsForSelectedWorkspace(): List<SessionInfo> {
+        val workspace = selectedWorkspace
+        return if (workspace.isNullOrBlank()) {
+            sessions.sortedByDescending { it.updatedAt }
+        } else {
+            sessions.filter { it.cwd == workspace }.sortedByDescending { it.updatedAt }
+        }
+    }
+
+    private fun workspaceDisplayName(path: String?, fallback: String): String {
+        val normalized = path?.trim().orEmpty()
+        if (normalized.isBlank()) return fallback
+        return normalized.substringAfterLast('/').ifBlank { normalized }
+    }
+
+    private fun projectBuckets(): List<ProjectGroup> {
+        val groups =
+            workspacePaths().map { path ->
+                ProjectGroup(
+                    path = path,
+                    sessions = sessions.filter { it.cwd == path }.sortedByDescending { it.updatedAt },
+                )
+            }
+        val uncategorized = sessions.filter { it.cwd.isBlank() }.sortedByDescending { it.updatedAt }
+        return buildList {
+            addAll(groups.sortedByDescending { it.sessions.firstOrNull()?.updatedAt.orEmpty() })
+            if (uncategorized.isNotEmpty()) {
+                add(
+                    ProjectGroup(
+                        path = null,
+                        sessions = uncategorized,
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun openNewChatDialog(projectPath: String?) {
+        if (!connected) {
+            showNotice("请先连接 Linux Bridge")
+            return
+        }
+        val defaultModel =
+            resolveModelForSend().ifBlank {
+                availableModels.firstOrNull()?.model.orEmpty()
+            }
+        newChatDraft =
+            NewChatDraft(
+                projectPath = projectPath?.takeIf { it.isNotBlank() },
+                model = defaultModel,
+                approvalPolicy = "on-request",
+            )
+    }
+
     private fun showNotice(message: String) {
         transientNotice = message
         transientNonce += 1
@@ -2983,55 +3527,104 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun SectionTitle(text: String) {
-        Text(text = text, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = Color.White)
+        Text(text = text, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = uiText)
     }
 
     @Composable
     private fun Label(text: String) {
-        Text(text = text, fontSize = 12.sp, color = c(0xFF98A8C2))
+        Text(text = text, fontSize = 12.sp, color = uiMuted)
     }
 
     @Composable
-    private fun BodyText(text: String) {
-        Text(text = text, fontSize = 13.sp, color = c(0xFF98A8C2), lineHeight = 20.sp)
+    private fun BodyText(
+        text: String,
+        modifier: Modifier = Modifier,
+    ) {
+        Text(text = text, modifier = modifier, fontSize = 13.sp, color = uiMuted, lineHeight = 20.sp)
     }
 
     private fun buildCodeBrowserAnnotatedText(
         text: String,
         mode: CodeTextMode,
         pathHint: String? = null,
-    ): AnnotatedString {
+    ): CodeBrowserRenderedContent {
         val normalized = text.replace("\r\n", "\n")
         val language = detectCodeLanguage(pathHint)
+        val lightweight =
+            normalized.length > CODE_BROWSER_FULL_HIGHLIGHT_MAX_CHARS ||
+                countCodeBrowserLines(normalized) > CODE_BROWSER_FULL_HIGHLIGHT_MAX_LINES
         return when (mode) {
-            CodeTextMode.Diff -> buildDiffAnnotatedText(normalized, language)
-            CodeTextMode.File -> buildFileAnnotatedText(normalized, language)
-        }
-    }
-
-    private fun buildDiffAnnotatedText(text: String, language: CodeLanguage): AnnotatedString {
-        val lines = text.split('\n')
-        val addBackground = SpanStyle(background = c(0x1E16351F))
-        val deleteBackground = SpanStyle(background = c(0x1E3F1616))
-
-        return buildAnnotatedString {
-            lines.forEachIndexed { index, line ->
-                when (classifyDiffLine(line)) {
-                    DiffLineKind.Added -> withStyle(addBackground) { append(buildAnnotatedDiffLine(line, language)) }
-                    DiffLineKind.Deleted -> withStyle(deleteBackground) { append(buildAnnotatedDiffLine(line, language)) }
-                    else -> append(buildAnnotatedDiffLine(line, language))
-                }
-                if (index < lines.lastIndex) append('\n')
+            CodeTextMode.Diff -> buildDiffRenderedContent(normalized, language, syntaxHighlight = !lightweight, lightweight = lightweight)
+            CodeTextMode.File -> {
+                val renderedText = buildFileAnnotatedText(normalized, language, syntaxHighlight = !lightweight)
+                CodeBrowserRenderedContent(text = renderedText, lightweight = lightweight)
             }
         }
     }
 
-    private fun buildAnnotatedDiffLine(line: String, language: CodeLanguage): AnnotatedString {
+    private fun buildCodeBrowserRenderedContent(
+        text: String,
+        mode: CodeTextMode,
+        pathHint: String? = null,
+    ): CodeBrowserRenderedContent {
+        return buildCodeBrowserAnnotatedText(text, mode, pathHint)
+    }
+
+    private fun buildCodeBrowserRenderCacheKey(
+        text: String,
+        mode: CodeTextMode,
+        pathHint: String?,
+    ): String {
+        return "${mode.name}|${pathHint.orEmpty()}|${text.length}|${text.hashCode()}"
+    }
+
+    private fun countCodeBrowserLines(text: String): Int {
+        if (text.isEmpty()) return 1
+        var lines = 1
+        text.forEach { ch ->
+            if (ch == '\n') lines += 1
+        }
+        return lines
+    }
+
+    private fun buildDiffRenderedContent(
+        text: String,
+        language: CodeLanguage,
+        syntaxHighlight: Boolean,
+        lightweight: Boolean,
+    ): CodeBrowserRenderedContent {
+        val lines = text.split('\n')
+        val renderedLines =
+            lines.map { line ->
+                CodeBrowserRenderedLine(
+                    text = buildAnnotatedDiffLine(line, language, syntaxHighlight),
+                    kind = classifyDiffLine(line),
+                )
+            }
+        val renderedText =
+            buildAnnotatedString {
+                renderedLines.forEachIndexed { index, renderedLine ->
+                    append(renderedLine.text)
+                    if (index < renderedLines.lastIndex) append('\n')
+                }
+            }
+        return CodeBrowserRenderedContent(
+            text = renderedText,
+            lines = renderedLines,
+            lightweight = lightweight,
+        )
+    }
+
+    private fun buildAnnotatedDiffLine(
+        line: String,
+        language: CodeLanguage,
+        syntaxHighlight: Boolean,
+    ): AnnotatedString {
         val metaStyle = SpanStyle(color = c(0xFF94A3B8))
         val hunkStyle = SpanStyle(color = c(0xFF7DD3FC), fontWeight = FontWeight.Bold)
         val addPrefixStyle = SpanStyle(color = c(0xFF86EFAC), fontWeight = FontWeight.Bold)
         val deletePrefixStyle = SpanStyle(color = c(0xFFFCA5A5), fontWeight = FontWeight.Bold)
-        val contextPrefixStyle = SpanStyle(color = c(0xFF64748B))
+        val contextPrefixStyle = SpanStyle(color = uiMuted)
 
         return when (classifyDiffLine(line)) {
             DiffLineKind.Meta ->
@@ -3047,31 +3640,35 @@ class MainActivity : ComponentActivity() {
             DiffLineKind.Added ->
                 buildAnnotatedString {
                     withStyle(addPrefixStyle) { append("+") }
-                    append(buildSyntaxHighlightedLine(line.drop(1), language))
+                    append(renderCodeBrowserLine(line.drop(1), language, syntaxHighlight))
                 }
 
             DiffLineKind.Deleted ->
                 buildAnnotatedString {
                     withStyle(deletePrefixStyle) { append("-") }
-                    append(buildSyntaxHighlightedLine(line.drop(1), language))
+                    append(renderCodeBrowserLine(line.drop(1), language, syntaxHighlight))
                 }
 
             DiffLineKind.Context ->
                 buildAnnotatedString {
                     if (line.startsWith(" ")) {
                         withStyle(contextPrefixStyle) { append(" ") }
-                        append(buildSyntaxHighlightedLine(line.drop(1), language))
+                        append(renderCodeBrowserLine(line.drop(1), language, syntaxHighlight))
                     } else {
-                        append(buildSyntaxHighlightedLine(line, language))
+                        append(renderCodeBrowserLine(line, language, syntaxHighlight))
                     }
                 }
         }
     }
 
-    private fun buildFileAnnotatedText(text: String, language: CodeLanguage): AnnotatedString {
+    private fun buildFileAnnotatedText(
+        text: String,
+        language: CodeLanguage,
+        syntaxHighlight: Boolean,
+    ): AnnotatedString {
         val lines = text.split('\n')
         val lineNumberWidth = maxOf(2, lines.size.toString().length)
-        val lineNumberStyle = SpanStyle(color = c(0xFF64748B))
+        val lineNumberStyle = SpanStyle(color = uiMuted)
 
         return buildAnnotatedString {
             lines.forEachIndexed { index, line ->
@@ -3079,10 +3676,46 @@ class MainActivity : ComponentActivity() {
                     append((index + 1).toString().padStart(lineNumberWidth, ' '))
                     append(" | ")
                 }
-                append(buildSyntaxHighlightedLine(line, language))
+                append(renderCodeBrowserLine(line, language, syntaxHighlight))
                 if (index < lines.lastIndex) append('\n')
             }
         }
+    }
+
+    private fun renderCodeBrowserLine(
+        line: String,
+        language: CodeLanguage,
+        syntaxHighlight: Boolean,
+    ): AnnotatedString {
+        return if (syntaxHighlight) {
+            buildSyntaxHighlightedLine(line, language)
+        } else {
+            AnnotatedString(line)
+        }
+    }
+
+    private fun buildCodeBrowserFileCacheKey(
+        sessionId: String,
+        path: String,
+    ): String {
+        return "$sessionId::$path"
+    }
+
+    private fun findCachedCodeBrowserFileContent(
+        sessionId: String,
+        candidatePaths: List<String>,
+    ): CodeBrowserFileContent? {
+        return candidatePaths.firstNotNullOfOrNull { path ->
+            codeBrowserFileCache[buildCodeBrowserFileCacheKey(sessionId, path)]
+        }
+    }
+
+    private fun rememberCodeBrowserFileContent(
+        sessionId: String,
+        content: CodeBrowserFileContent,
+    ) {
+        codeBrowserFileCache[buildCodeBrowserFileCacheKey(sessionId, content.requestedPath)] = content
+        codeBrowserFileCache[buildCodeBrowserFileCacheKey(sessionId, content.resolvedPath)] = content
     }
 
     private fun buildSyntaxHighlightedLine(line: String, language: CodeLanguage): AnnotatedString {
@@ -3276,10 +3909,10 @@ class MainActivity : ComponentActivity() {
     private fun syntaxPalette(): CodeSyntaxPalette {
         return CodeSyntaxPalette(
             keyword = SpanStyle(color = c(0xFF7DD3FC), fontWeight = FontWeight.SemiBold),
-            literal = SpanStyle(color = c(0xFF38BDF8), fontWeight = FontWeight.SemiBold),
+            literal = SpanStyle(color = uiPrimary, fontWeight = FontWeight.SemiBold),
             string = SpanStyle(color = c(0xFFF9A66C)),
             number = SpanStyle(color = c(0xFFC084FC)),
-            comment = SpanStyle(color = c(0xFF64748B)),
+            comment = SpanStyle(color = uiMuted),
             type = SpanStyle(color = c(0xFFFDE68A)),
             annotation = SpanStyle(color = c(0xFFF472B6)),
         )
@@ -3769,6 +4402,33 @@ private data class CodeBrowserFileContent(
     val content: String,
     val truncated: Boolean,
     val bytes: Int,
+)
+
+private data class CodeBrowserRenderedContent(
+    val text: AnnotatedString,
+    val lines: List<CodeBrowserRenderedLine> = emptyList(),
+    val lightweight: Boolean,
+)
+
+private data class CodeBrowserRenderedLine(
+    val text: AnnotatedString,
+    val kind: DiffLineKind?,
+)
+
+private data class ProjectGroup(
+    val path: String?,
+    val sessions: List<SessionInfo>,
+) {
+    val displayName: String
+        get() = path?.let { it.substringAfterLast('/').ifBlank { it } } ?: "未分类历史"
+
+    fun key(): String = path ?: "__uncategorized__"
+}
+
+private data class NewChatDraft(
+    val projectPath: String?,
+    val model: String,
+    val approvalPolicy: String,
 )
 
 private data class ModelInfo(
