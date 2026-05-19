@@ -10,10 +10,29 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function normalizePermissionSelection(activePermissionProfile) {
+  if (!activePermissionProfile || typeof activePermissionProfile !== 'object') return null;
+  const id = typeof activePermissionProfile.id === 'string' ? activePermissionProfile.id.trim() : '';
+  if (!id) return null;
+  const modifications = Array.isArray(activePermissionProfile.modifications)
+    ? activePermissionProfile.modifications.filter(Boolean)
+    : [];
+  return {
+    type: 'profile',
+    id,
+    ...(modifications.length > 0 ? { modifications: clone(modifications) } : {}),
+  };
+}
+
 function normalizeThreadSummary(thread, backend = 'mock') {
   if (!thread) return null;
-  const raw = thread.thread ?? thread;
+  const envelope = thread ?? {};
+  const raw = envelope.thread ?? envelope;
   const id = raw.id ?? raw.threadId ?? raw.sessionId;
+  const approvalPolicy = envelope.approvalPolicy ?? raw.approvalPolicy;
+  const permissions = normalizePermissionSelection(envelope.activePermissionProfile ?? raw.activePermissionProfile);
+  const sandbox = envelope.sandbox ?? raw.sandbox ?? raw.sandboxPolicy;
+  const tokenUsage = envelope.tokenUsage ?? raw.tokenUsage ?? null;
   return {
     session_id: id,
     thread_id: id,
@@ -25,6 +44,12 @@ function normalizeThreadSummary(thread, backend = 'mock') {
     backend,
     createdAt: raw.createdAt ? new Date(raw.createdAt * 1000).toISOString() : nowIso(),
     updatedAt: raw.updatedAt ? new Date(raw.updatedAt * 1000).toISOString() : nowIso(),
+    ...(approvalPolicy != null ? { approvalPolicy } : {}),
+    ...(permissions != null ? { permissions } : {}),
+    ...(sandbox != null ? { sandbox: clone(sandbox) } : {}),
+    ...(tokenUsage?.modelContextWindow != null ? { contextWindow: tokenUsage.modelContextWindow } : {}),
+    ...(tokenUsage?.last ? { lastTokenUsage: clone(tokenUsage.last) } : {}),
+    ...(tokenUsage?.total ? { totalTokenUsage: clone(tokenUsage.total) } : {}),
     thread: clone(raw),
   };
 }
@@ -267,7 +292,7 @@ export class BridgeServer extends EventEmitter {
             input: payload.input ?? null,
           },
         });
-        const session = this.store.getSession(sessionId);
+        let session = this.store.getSession(sessionId);
         if (!session) {
           await this.store.upsertSession({
             session_id: sessionId,
@@ -279,6 +304,7 @@ export class BridgeServer extends EventEmitter {
             preview: payload.text ?? '',
             active: true,
           });
+          session = this.store.getSession(sessionId);
         }
         const storedInputEvent = await this.store.appendEvent(sessionId, inputEvent);
         this.#broadcast(storedInputEvent);
@@ -288,10 +314,10 @@ export class BridgeServer extends EventEmitter {
           responsesapiClientMetadata: payload.responsesapiClientMetadata ?? null,
           environments: payload.environments ?? null,
           cwd: payload.cwd ?? null,
-          approvalPolicy: payload.approvalPolicy ?? null,
+          approvalPolicy: payload.approvalPolicy ?? session?.approvalPolicy ?? null,
           approvalsReviewer: payload.approvalsReviewer ?? null,
-          sandboxPolicy: payload.sandboxPolicy ?? null,
-          permissions: payload.permissions ?? null,
+          sandboxPolicy: payload.sandboxPolicy ?? session?.sandbox ?? null,
+          permissions: payload.permissions ?? session?.permissions ?? null,
           model: payload.model ?? null,
           serviceTier: payload.serviceTier ?? null,
           effort: payload.effort ?? null,
@@ -301,12 +327,27 @@ export class BridgeServer extends EventEmitter {
           collaborationMode: payload.collaborationMode ?? null,
           turnId: payload.turn_id ?? null,
         };
+        if (session && (!session.approvalPolicy || !session.permissions || !session.sandbox)) {
+          const hydrated = await this.#resumeStoredSession(sessionId, {
+            path: session.thread?.path ?? null,
+            model: turnParams.model,
+            cwd: turnParams.cwd,
+            approvalPolicy: payload.approvalPolicy ?? null,
+            approvalsReviewer: turnParams.approvalsReviewer,
+            sandbox: payload.sandboxPolicy ?? null,
+            permissions: payload.permissions ?? null,
+            personality: turnParams.personality,
+            excludeTurns: true,
+          });
+          session = hydrated?.session ?? session;
+        }
         let ensured = await this.#ensureSessionLoaded(sessionId, {
           path: session?.thread?.path ?? null,
           model: turnParams.model,
           cwd: turnParams.cwd,
           approvalPolicy: turnParams.approvalPolicy,
           approvalsReviewer: turnParams.approvalsReviewer,
+          sandbox: turnParams.sandboxPolicy,
           permissions: turnParams.permissions,
           personality: turnParams.personality,
           excludeTurns: true,
@@ -417,8 +458,16 @@ export class BridgeServer extends EventEmitter {
       });
       let broadcastEvent = event;
       if (sessionId) {
-        const session = this.store.getSession(sessionId);
+        let session = this.store.getSession(sessionId);
         if (session) {
+          if (message.method === 'thread/tokenUsage/updated' && payload.tokenUsage) {
+            session = await this.store.upsertSession({
+              ...session,
+              contextWindow: payload.tokenUsage.modelContextWindow ?? session.contextWindow,
+              lastTokenUsage: payload.tokenUsage.last ?? session.lastTokenUsage ?? null,
+              totalTokenUsage: payload.tokenUsage.total ?? session.totalTokenUsage ?? null,
+            });
+          }
           broadcastEvent = await this.store.appendEvent(sessionId, event);
         } else {
           await this.store.upsertSession({
@@ -555,13 +604,14 @@ export class BridgeServer extends EventEmitter {
       threadId: session.thread_id ?? sessionId,
       path: params.path ?? session.thread?.path ?? null,
       model: params.model ?? session.model ?? null,
-      cwd: params.cwd ?? session.cwd ?? null,
-      approvalPolicy: params.approvalPolicy ?? null,
-      approvalsReviewer: params.approvalsReviewer ?? null,
-      permissions: params.permissions ?? null,
-      personality: params.personality ?? null,
-      excludeTurns: params.excludeTurns ?? null,
-      persistExtendedHistory: false,
+          cwd: params.cwd ?? session.cwd ?? null,
+          approvalPolicy: params.approvalPolicy ?? session.approvalPolicy ?? null,
+          approvalsReviewer: params.approvalsReviewer ?? null,
+          sandbox: params.sandbox ?? session.sandbox ?? null,
+          permissions: params.permissions ?? session.permissions ?? null,
+          personality: params.personality ?? null,
+          excludeTurns: params.excludeTurns ?? null,
+          persistExtendedHistory: false,
     });
     const normalized = normalizeThreadSummary(resumed, this.backend.constructor.name.replace('Backend', '').toLowerCase() || 'mock');
     await this.store.upsertSession(normalized);
