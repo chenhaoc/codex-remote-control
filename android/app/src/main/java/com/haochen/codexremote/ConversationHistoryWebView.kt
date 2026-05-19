@@ -14,6 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
@@ -88,15 +89,16 @@ private sealed interface ConversationScrollMode {
 internal fun ConversationHistoryWebView(
     items: List<ConversationItem>,
     sessionId: String?,
+    displayBasePath: String?,
     followBottom: Boolean,
     restoreScrollY: Int? = null,
     onScrollRestored: () -> Unit = {},
-    onOpenCodeBrowser: (itemId: String, scrollY: Int) -> Unit,
+    onOpenCodeBrowser: (itemId: String, path: String?, scrollY: Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
-    val pageHtml = buildConversationPageHtml(items)
+    val pageHtml = buildConversationPageHtml(items, displayBasePath)
     var pendingScrollMode by remember(sessionId, restoreScrollY) {
         mutableStateOf<ConversationScrollMode>(
             restoreScrollY?.let { ConversationScrollMode.Restore(it) } ?: ConversationScrollMode.Bottom,
@@ -129,9 +131,21 @@ internal fun ConversationHistoryWebView(
             },
         )
     }
+    var lastViewportHeight by remember(sessionId) { mutableStateOf<Int?>(null) }
 
     AndroidView(
-        modifier = modifier,
+        modifier =
+            modifier.onSizeChanged { size ->
+                val previousHeight = lastViewportHeight
+                lastViewportHeight = size.height
+                if (previousHeight == null || previousHeight <= 0 || size.height <= 0) return@onSizeChanged
+                if (restoreScrollY != null || lastLoadedHtml == null) return@onSizeChanged
+                val delta = previousHeight - size.height
+                if (delta == 0) return@onSizeChanged
+                webView.post {
+                    webView.scrollBy(0, delta)
+                }
+            },
         factory = { webView },
         update = { view ->
             if (lastLoadedHtml == pageHtml) return@AndroidView
@@ -141,7 +155,7 @@ internal fun ConversationHistoryWebView(
                 when {
                     restoreScrollY != null && sessionChanged -> ConversationScrollMode.Restore(restoreScrollY)
                     sessionChanged -> ConversationScrollMode.Bottom
-                    followBottom && wasAtBottom -> ConversationScrollMode.Bottom
+                    wasAtBottom -> ConversationScrollMode.Bottom
                     else -> ConversationScrollMode.Restore(view.scrollY)
                 }
             lastLoadedHtml = pageHtml
@@ -169,7 +183,7 @@ private fun isConversationNearBottom(webView: WebView): Boolean {
 private fun buildConversationWebView(
     context: Context,
     onOpenLink: (String) -> Unit,
-    onOpenCodeBrowser: (itemId: String, scrollY: Int) -> Unit,
+    onOpenCodeBrowser: (itemId: String, path: String?, scrollY: Int) -> Unit,
     onPageFinished: (WebView) -> Unit,
 ): WebView =
     WebView(context).apply {
@@ -225,13 +239,13 @@ private fun handleConversationUrl(
     rawUrl: String,
     currentScrollY: Int,
     onOpenLink: (String) -> Unit,
-    onOpenCodeBrowser: (itemId: String, scrollY: Int) -> Unit,
+    onOpenCodeBrowser: (itemId: String, path: String?, scrollY: Int) -> Unit,
 ): Boolean {
     val uri = Uri.parse(rawUrl)
     if (uri.scheme == "codex-code-browser") {
         val itemId = uri.getQueryParameter("itemId").orEmpty()
         if (itemId.isNotBlank()) {
-            onOpenCodeBrowser(itemId, currentScrollY)
+            onOpenCodeBrowser(itemId, uri.getQueryParameter("path"), currentScrollY)
         }
         return true
     }
@@ -259,9 +273,13 @@ private fun applyConversationScrollMode(
     webView.evaluateJavascript(script, null)
 }
 
-private fun buildConversationPageHtml(items: List<ConversationItem>): String {
-    val bodyHtml = buildConversationItemsHtml(items)
+private fun buildConversationPageHtml(
+    items: List<ConversationItem>,
+    displayBasePath: String?,
+): String {
+    val bodyHtml = buildConversationItemsHtml(items, displayBasePath)
     val style = buildConversationCss()
+    val script = buildConversationScript()
     return """
         <!DOCTYPE html>
         <html dir="auto">
@@ -271,6 +289,9 @@ private fun buildConversationPageHtml(items: List<ConversationItem>): String {
             <style>
             $style
             </style>
+            <script>
+            $script
+            </script>
         </head>
         <body>
             <main>
@@ -285,13 +306,16 @@ private fun buildConversationPageHtml(items: List<ConversationItem>): String {
     """.trimIndent()
 }
 
-private fun buildConversationItemsHtml(items: List<ConversationItem>): String =
+private fun buildConversationItemsHtml(
+    items: List<ConversationItem>,
+    displayBasePath: String?,
+): String =
     buildString {
         items.forEach { item ->
             when (item) {
                 is ConversationItem.Bubble -> append(item.toHtml())
                 is ConversationItem.SystemNote -> append(item.toHtml())
-                is ConversationItem.FileChange -> append(item.toHtml())
+                is ConversationItem.FileChange -> append(item.toHtml(displayBasePath))
             }
         }
     }
@@ -319,15 +343,14 @@ private fun ConversationItem.SystemNote.toHtml(): String =
     </div>
     """.trimIndent()
 
-private fun ConversationItem.FileChange.toHtml(): String {
+private fun ConversationItem.FileChange.toHtml(displayBasePath: String?): String {
     val diffStats = buildConversationDiffStatsLine(diffEntries, fallbackDiff)
+    val metaLine = listOfNotNull(title.takeIf { it.isNotBlank() }, diffStats).joinToString(" · ").ifBlank { "文件修改" }
     return """
         <div class="cr-message assistant">
             <div class="cr-bubble file-change">
-                <div class="cr-file-change-title">${escapeConversationHtml(title)}</div>
-                <div class="cr-file-change-summary">${buildPlainTextHtml(summary)}</div>
-                ${diffStats?.let { "<div class=\"cr-file-change-stats\">${escapeConversationHtml(it)}</div>" }.orEmpty()}
-                ${buildConversationDiffDetailsHtml(diffEntries, fallbackDiff, defaultLabel = "点击查看 diff", browserItemId = id)}
+                <div class="cr-file-change-meta">${escapeConversationHtml(metaLine)}</div>
+                ${buildConversationDiffDetailsHtml(diffEntries, fallbackDiff, browserItemId = id, displayBasePath = displayBasePath)}
             </div>
         </div>
     """.trimIndent()
@@ -336,56 +359,35 @@ private fun ConversationItem.FileChange.toHtml(): String {
 private fun buildConversationDiffDetailsHtml(
     diffEntries: List<ConversationDiffEntry>,
     fallbackDiff: String?,
-    defaultLabel: String,
     browserItemId: String? = null,
+    displayBasePath: String?,
 ): String {
     if (diffEntries.isEmpty() && fallbackDiff.isNullOrBlank()) return ""
 
-    val body =
+    val content =
         if (diffEntries.isNotEmpty()) {
             buildString {
-                diffEntries.forEach { entry ->
-                    append(entry.toHtml())
+                append("""<div class="cr-diff-list">""")
+                diffEntries.forEachIndexed { index, entry ->
+                    append(
+                        buildConversationDiffEntryHtml(
+                            entry = entry,
+                            entryIndex = index,
+                            browserItemId = browserItemId,
+                            displayBasePath = displayBasePath,
+                        ),
+                    )
                 }
+                append("</div>")
             }
         } else {
-            "<pre><code>${buildConversationDiffCodeHtml(fallbackDiff.orEmpty())}</code></pre>"
+            buildConversationFallbackDiffHtml(
+                diffText = fallbackDiff.orEmpty(),
+                defaultLabel = "查看 diff",
+                browserItemId = browserItemId,
+            )
         }
-
-    val browserAction =
-        browserItemId?.takeIf { it.isNotBlank() }?.let {
-            """
-            <div class="cr-diff-browser-row">
-                <a class="cr-diff-browser-action" href="codex-code-browser://open?itemId=${encodeUrlComponent(it)}">浏览代码</a>
-            </div>
-            """.trimIndent()
-        }.orEmpty()
-
-    return """
-        $browserAction
-        <div class="cr-inline-diff">$body</div>
-    """.trimIndent()
-}
-
-private fun ConversationDiffEntry.toHtml(): String {
-    val kindLabel =
-        when (kind.trim()) {
-            "add" -> "新增"
-            "delete" -> "删除"
-            "update" -> if (movePath.isNullOrBlank()) "修改" else "重命名"
-            else -> kind.ifBlank { "变更" }
-        }
-    val diffText = diff.ifBlank { "无可显示 diff" }
-    val extraPath = movePath?.takeIf { it.isNotBlank() }?.let { " → $it" }.orEmpty()
-    return """
-        <details class="cr-diff-file">
-            <summary>
-                <span class="cr-diff-kind ${escapeConversationHtmlAttribute(kind.trim())}">${escapeConversationHtml(kindLabel)}</span>
-                <span class="cr-diff-path">${escapeConversationHtml(path + extraPath)}</span>
-            </summary>
-            <pre><code>${buildConversationDiffCodeHtml(diffText)}</code></pre>
-        </details>
-    """.trimIndent()
+    return """<div class="cr-inline-diff">$content</div>"""
 }
 
 private fun buildConversationDiffCodeHtml(diffText: String): String =
@@ -425,6 +427,97 @@ private fun buildConversationDiffCodeHtml(diffText: String): String =
                     }
             }
         }
+
+private fun buildConversationDiffEntryHtml(
+    entry: ConversationDiffEntry,
+    entryIndex: Int,
+    browserItemId: String?,
+    displayBasePath: String?,
+): String {
+    val panelId = "cr-diff-${browserItemId?.hashCode() ?: 0}-$entryIndex"
+    val label = entry.displayPath(basePath = displayBasePath, maxLength = 52)
+    val statsLabel = entry.diffStatsLabel() ?: conversationKindLabel(entry.kind, entry.movePath)
+    val href =
+        browserItemId?.takeIf { it.isNotBlank() }?.let {
+            buildString {
+                append("codex-code-browser://open?itemId=")
+                append(encodeUrlComponent(it))
+                val browsePath = entry.browsePath()
+                if (browsePath.isNotBlank()) {
+                    append("&path=")
+                    append(encodeUrlComponent(browsePath))
+                }
+            }
+        }
+    val titleHtml =
+        if (href != null) {
+            """<a class="cr-diff-file-link" href="$href">${escapeConversationHtml(label)}</a>"""
+        } else {
+            """<span class="cr-diff-file-link static">${escapeConversationHtml(label)}</span>"""
+        }
+    return """
+        <div class="cr-diff-item">
+            <div class="cr-diff-item-row">
+                $titleHtml
+                <span class="cr-diff-inline-stats">${escapeConversationHtml(statsLabel)}</span>
+                <button
+                    type="button"
+                    class="cr-diff-toggle"
+                    aria-label="展开 diff"
+                    onclick="return toggleConversationDiff(event, '$panelId', this);"
+                ></button>
+            </div>
+            <div class="cr-diff-panel" id="$panelId">
+                <pre><code>${buildConversationDiffCodeHtml(entry.diff.ifBlank { "无可显示 diff" })}</code></pre>
+            </div>
+        </div>
+    """.trimIndent()
+}
+
+private fun buildConversationFallbackDiffHtml(
+    diffText: String,
+    defaultLabel: String,
+    browserItemId: String?,
+): String {
+    val panelId = "cr-diff-${browserItemId?.hashCode() ?: 0}-fallback"
+    val href =
+        browserItemId?.takeIf { it.isNotBlank() }?.let {
+            "codex-code-browser://open?itemId=${encodeUrlComponent(it)}"
+        }
+    val titleHtml =
+        if (href != null) {
+            """<a class="cr-diff-file-link" href="$href">${escapeConversationHtml(defaultLabel)}</a>"""
+        } else {
+            """<span class="cr-diff-file-link static">${escapeConversationHtml(defaultLabel)}</span>"""
+        }
+    val statsLabel = buildConversationDiffStatsLine(emptyList(), diffText)
+    return """
+        <div class="cr-diff-item">
+            <div class="cr-diff-item-row">
+                $titleHtml
+                ${statsLabel?.let { """<span class="cr-diff-inline-stats">${escapeConversationHtml(it)}</span>""" }.orEmpty()}
+                <button
+                    type="button"
+                    class="cr-diff-toggle"
+                    aria-label="展开 diff"
+                    onclick="return toggleConversationDiff(event, '$panelId', this);"
+                ></button>
+            </div>
+            <div class="cr-diff-panel" id="$panelId">
+                <pre><code>${buildConversationDiffCodeHtml(diffText.ifBlank { "无可显示 diff" })}</code></pre>
+            </div>
+        </div>
+    """.trimIndent()
+}
+
+private fun conversationKindLabel(kind: String, movePath: String?): String {
+    return when (kind.trim()) {
+        "add" -> "新增"
+        "delete" -> "删除"
+        "update" -> if (movePath.isNullOrBlank()) "修改" else "重命名"
+        else -> kind.ifBlank { "变更" }
+    }
+}
 
 private enum class ConversationDiffLineKind {
     Added,
@@ -495,6 +588,23 @@ private fun buildPlainTextHtml(text: String): String =
     text.replace("\r\n", "\n")
         .split('\n')
         .joinToString("<br />") { line -> escapeConversationHtml(line) }
+
+private fun buildConversationScript(): String =
+    """
+    function toggleConversationDiff(event, panelId, button) {
+      if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      var panel = document.getElementById(panelId);
+      if (!panel) return false;
+      var expanded = panel.classList.toggle('expanded');
+      if (button) {
+        button.classList.toggle('expanded', expanded);
+      }
+      return false;
+    }
+    """.trimIndent()
 
 private fun buildConversationCss(): String =
     """
@@ -613,19 +723,7 @@ private fun buildConversationCss(): String =
         font-weight: 600 !important;
     }
 
-    .cr-file-change-title {
-        font-weight: 700 !important;
-        margin-bottom: 8px;
-    }
-
-    .cr-file-change-summary {
-        font-size: 13px !important;
-        line-height: 1.46 !important;
-        color: #5F7F69 !important;
-        margin-bottom: 10px;
-    }
-
-    .cr-file-change-stats {
+    .cr-file-change-meta {
         font-size: 12px !important;
         line-height: 1.35 !important;
         color: #5F7F69 !important;
@@ -633,115 +731,103 @@ private fun buildConversationCss(): String =
         margin-bottom: 10px;
     }
 
-    .cr-diff-browser-row {
-        margin-bottom: 10px;
-    }
-
-    .cr-diff-browser-action {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-width: 84px;
-        padding: 8px 12px;
-        border-radius: 12px;
-        background: #1A8F55 !important;
-        color: #FFFFFF !important;
-        text-decoration: none !important;
-        font-weight: 600 !important;
-    }
-
     .cr-inline-diff {
-        margin-top: 10px;
-    }
-
-    .cr-inline-diff > pre {
-        margin: 0;
-        padding: 10px 12px 12px;
-        border-radius: 10px;
-        background: #F6FBF7 !important;
-        overflow-x: hidden;
-        border: 1px solid #CFE2D3;
-    }
-
-    .cr-inline-diff > pre code {
-        color: #173326 !important;
-        background: transparent !important;
-        padding: 0 !important;
-        white-space: pre-wrap !important;
-        word-break: break-word;
-        overflow-wrap: anywhere;
-    }
-
-    .cr-diff-file {
-        margin-top: 8px;
-        border: 0;
-        border-radius: 0;
-        overflow: visible;
-        background: transparent;
-    }
-
-    .cr-diff-file > summary {
-        cursor: pointer;
-        list-style: none;
         display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    .cr-diff-list {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    .cr-diff-item {
+        display: flex;
+        flex-direction: column;
         gap: 8px;
+        padding: 6px 0;
+    }
+
+    .cr-diff-item + .cr-diff-item {
+        border-top: 1px solid rgba(207, 226, 211, 0.85);
+    }
+
+    .cr-diff-item-row {
+        display: flex;
         align-items: center;
-        padding: 0 0 8px;
+        gap: 10px;
+        min-width: 0;
+    }
+
+    .cr-diff-file-link {
+        flex: 1 1 auto;
+        min-width: 0;
         color: #173326 !important;
+        text-decoration: none !important;
         font-size: 13px !important;
+        font-weight: 600 !important;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
 
-    .cr-diff-file > summary::-webkit-details-marker {
-        display: none;
+    .cr-diff-file-link.static {
+        cursor: default;
     }
 
-    .cr-diff-kind {
+    .cr-diff-inline-stats {
         flex: 0 0 auto;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-width: 52px;
-        padding: 2px 8px;
-        border-radius: 999px;
-        background: #E9F5EC;
-        color: #1A8F55 !important;
+        color: #5F7F69 !important;
         font-size: 11px !important;
         font-weight: 700 !important;
     }
 
-    .cr-diff-kind.add {
-        background: #DDF3E4;
-        color: #1A8F55 !important;
-    }
-
-    .cr-diff-kind.delete {
-        background: #F4E7E7;
-        color: #B65757 !important;
-    }
-
-    .cr-diff-kind.update {
-        background: #EDF6EE;
+    .cr-diff-toggle {
+        flex: 0 0 auto;
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        border: 0;
+        border-radius: 999px;
+        background: transparent;
         color: #5F7F69 !important;
+        cursor: pointer;
+        position: relative;
     }
 
-    .cr-diff-path {
-        flex: 1 1 auto;
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+    .cr-diff-toggle::before {
+        content: "▾";
+        display: block;
+        font-size: 14px;
+        line-height: 24px;
+        text-align: center;
+        transition: transform 0.16s ease;
     }
 
-    .cr-diff-file pre {
+    .cr-diff-toggle.expanded::before {
+        transform: rotate(180deg);
+    }
+
+    .cr-diff-panel {
+        display: none;
+    }
+
+    .cr-diff-panel.expanded {
+        display: block;
+    }
+
+    .cr-diff-panel > pre {
         margin: 0;
         padding: 10px 12px 12px;
+        border-radius: 10px;
         background: #F6FBF7 !important;
         overflow-x: hidden;
-        border-radius: 10px;
         border: 1px solid #CFE2D3;
     }
 
-    .cr-diff-file code {
+    .cr-diff-panel > pre code {
         color: #173326 !important;
         background: transparent !important;
         padding: 0 !important;

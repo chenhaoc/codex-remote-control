@@ -14,6 +14,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -40,6 +41,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -56,6 +58,7 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalDrawerSheet
@@ -89,6 +92,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -106,6 +110,9 @@ import androidx.core.view.WindowInsetsControllerCompat
 import java.io.IOException
 import java.net.URI
 import java.net.URLEncoder
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.UUID
@@ -184,6 +191,8 @@ class MainActivity : ComponentActivity() {
     private var selectedModel by mutableStateOf("")
     private var connectionDetail by mutableStateOf("未连接")
     private var currentBridgeUrl by mutableStateOf<String?>(null)
+    private var connectionRenameState by mutableStateOf<ConnectionRenameDialogState?>(null)
+    private var sessionInfoSheetState by mutableStateOf<SessionInfoSheetState?>(null)
     private var composerText by mutableStateOf("")
     private var newChatDraft by mutableStateOf<NewChatDraft?>(null)
     private var liveTurnStatus by mutableStateOf<String?>(null)
@@ -212,6 +221,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         bridgeUrl = loadBridgeUrl()
         replaceConnectionHistory(loadConnectionHistory(bridgeUrl))
         persistConnectionHistory()
@@ -364,14 +374,29 @@ class MainActivity : ComponentActivity() {
                         onDismiss = { newChatDraft = null },
                         onModelChange = { model -> newChatDraft = draft.copy(model = model) },
                         onApprovalPolicyChange = { policy -> newChatDraft = draft.copy(approvalPolicy = policy) },
+                        onSandboxChange = { sandbox -> newChatDraft = draft.copy(sandbox = sandbox) },
                         onConfirm = {
                             startNewSession(
                                 projectPath = draft.projectPath,
                                 model = draft.model,
                                 approvalPolicy = draft.approvalPolicy,
+                                sandbox = draft.sandbox,
                             )
                             newChatDraft = null
                         },
+                    )
+                }
+            }
+
+            sessionInfoSheetState?.let { state ->
+                ModalBottomSheet(
+                    onDismissRequest = { sessionInfoSheetState = null },
+                    containerColor = uiSurface,
+                    contentColor = uiText,
+                ) {
+                    SessionInfoSheet(
+                        state = state,
+                        onDismiss = { sessionInfoSheetState = null },
                     )
                 }
             }
@@ -422,7 +447,25 @@ class MainActivity : ComponentActivity() {
                 navigationIconContentColor = uiText,
             ),
             actions = {
-                StatusDot(active = connected)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(
+                        end = if (selectedTab == AppTab.Chat) 14.dp else 8.dp,
+                        top = 6.dp,
+                        bottom = 6.dp,
+                    ),
+                ) {
+                    if (selectedTab == AppTab.Chat && activeSession() != null) {
+                        OutlinedButton(
+                            onClick = { openSessionInfoSheet() },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                        ) {
+                            Text("Info", color = uiMuted, fontSize = 12.sp)
+                        }
+                    }
+                    StatusDot(active = connected)
+                }
             },
         )
     }
@@ -463,7 +506,7 @@ class MainActivity : ComponentActivity() {
                                     overflow = TextOverflow.Ellipsis,
                                 )
                                 Text(
-                                    text = connectionDetail,
+                                    text = drawerConnectionSummaryText(),
                                     color = uiMuted,
                                     fontSize = 12.sp,
                                     maxLines = 2,
@@ -516,11 +559,6 @@ class MainActivity : ComponentActivity() {
                 items(items = projectGroups, key = { it.key() }) { group ->
                     ProjectGroupCard(
                         group = group,
-                        onOpenProject = {
-                            selectedWorkspace = group.path
-                            selectedTab = AppTab.Chat
-                            onCloseDrawer()
-                        },
                         onNewChat = {
                             openNewChatDialog(group.path)
                             onCloseDrawer()
@@ -544,10 +582,16 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun ProjectGroupCard(
         group: ProjectGroup,
-        onOpenProject: () -> Unit,
         onNewChat: () -> Unit,
         onSelectSession: (SessionInfo) -> Unit,
     ) {
+        val containsActiveSession = group.sessions.any { it.sessionId == activeSessionId }
+        var expanded by remember(group.key()) { mutableStateOf(containsActiveSession) }
+
+        LaunchedEffect(containsActiveSession) {
+            if (containsActiveSession) expanded = true
+        }
+
         Card(
             colors = CardDefaults.cardColors(containerColor = uiSurface),
             shape = RoundedCornerShape(22.dp),
@@ -561,49 +605,59 @@ class MainActivity : ComponentActivity() {
             ) {
                 Row(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(onClick = onOpenProject),
+                        .fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { expanded = !expanded },
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         Text(
                             text = group.displayName,
                             color = uiText,
                             fontWeight = FontWeight.Bold,
+                            modifier = Modifier.weight(1f, fill = false),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        Text(
-                            text = group.path ?: "未分类历史",
-                            color = uiMuted,
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             text = "${group.sessions.size}",
                             color = uiMuted,
                             fontSize = 12.sp,
+                            maxLines = 1,
                         )
-                        TextButton(onClick = onNewChat) {
-                            Text("＋")
-                        }
+                        Text(
+                            text = if (expanded) "▴" else "▾",
+                            color = uiMuted,
+                            fontSize = 16.sp,
+                        )
+                    }
+                    TextButton(onClick = onNewChat) {
+                        Icon(
+                            painter = painterResource(id = android.R.drawable.ic_input_add),
+                            contentDescription = "新对话",
+                            tint = uiPrimary,
+                            modifier = Modifier.size(22.dp),
+                        )
                     }
                 }
 
-                if (group.sessions.isEmpty()) {
-                    BodyText("这个项目暂时还没有历史会话。")
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        group.sessions.forEach { session ->
-                            SessionCard(
-                                session = session,
-                                selected = session.sessionId == activeSessionId,
-                                onClick = { onSelectSession(session) },
-                            )
+                if (expanded) {
+                    if (group.sessions.isEmpty()) {
+                        BodyText("这个项目暂时还没有历史会话。")
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            group.sessions.forEach { session ->
+                                SessionCard(
+                                    session = session,
+                                    selected = session.sessionId == activeSessionId,
+                                    onClick = { onSelectSession(session) },
+                                )
+                            }
                         }
                     }
                 }
@@ -644,11 +698,103 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
+    private fun ConnectionStatusBadge(active: Boolean) {
+        Surface(
+            shape = RoundedCornerShape(999.dp),
+            color = if (active) uiPrimarySoft else uiSurfaceAlt,
+            border = androidx.compose.foundation.BorderStroke(1.dp, if (active) uiPrimary else uiBorder),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                StatusDot(active = active)
+                Text(
+                    text = if (active) "已连接" else "未连接",
+                    color = uiText,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+    }
+
+    @Composable
+    private fun RenameConnectionDialog(
+        state: ConnectionRenameDialogState,
+        onDismiss: () -> Unit,
+        onConfirm: (String) -> Unit,
+    ) {
+        var draft by remember(state.url, state.currentName) { mutableStateOf(state.currentName) }
+
+        Dialog(onDismissRequest = onDismiss) {
+            Surface(
+                shape = RoundedCornerShape(24.dp),
+                color = uiSurface,
+                tonalElevation = 6.dp,
+                shadowElevation = 10.dp,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    Text(
+                        text = "命名历史连接",
+                        color = uiText,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = "给这条 bridge 连接起个更好认的名字，留空会恢复默认地址名。",
+                        color = uiMuted,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp,
+                    )
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = { draft = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        shape = RoundedCornerShape(18.dp),
+                        placeholder = { Text("例如：家里 Mac mini") },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = uiPrimary,
+                            unfocusedBorderColor = uiBorder,
+                            focusedTextColor = uiText,
+                            unfocusedTextColor = uiText,
+                            cursorColor = uiPrimary,
+                        ),
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                    ) {
+                        OutlinedButton(onClick = onDismiss) {
+                            Text("取消")
+                        }
+                        Button(
+                            onClick = { onConfirm(draft.trim()) },
+                            colors = ButtonDefaults.buttonColors(containerColor = uiPrimary),
+                        ) {
+                            Text("保存")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
     private fun NewChatSheet(
         draft: NewChatDraft,
         onDismiss: () -> Unit,
         onModelChange: (String) -> Unit,
         onApprovalPolicyChange: (String) -> Unit,
+        onSandboxChange: (String) -> Unit,
         onConfirm: () -> Unit,
     ) {
         val modelOptions = availableModels.ifEmpty {
@@ -680,7 +826,7 @@ class MainActivity : ComponentActivity() {
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    text = draft.projectPath ?: "先选项目，再选模型和权限。",
+                    text = draft.projectPath ?: "先选项目，再选模型、审批策略和沙箱。",
                     color = uiMuted,
                     fontSize = 12.sp,
                     maxLines = 2,
@@ -709,15 +855,16 @@ class MainActivity : ComponentActivity() {
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Label("权限")
+                Label("审批策略")
                 Row(
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     listOf(
-                        "on-request" to "保守",
-                        "on-failure" to "平衡",
-                        "never" to "自动",
+                        "untrusted" to "untrusted",
+                        "on-request" to "on-request",
+                        "on-failure" to "on-failure",
+                        "never" to "never",
                     ).forEach { (policy, label) ->
                         SelectablePill(
                             label = label,
@@ -726,6 +873,49 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 }
+                Text(
+                    text = approvalPolicyDescription(draft.approvalPolicy),
+                    color = uiMuted,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                )
+                Text(
+                    text = "permission profile 不单独手填；新对话按当前默认执行，历史对话继续沿用原会话配置。",
+                    color = uiMuted,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                )
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Label("沙箱")
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    listOf(
+                        "read-only" to "read-only",
+                        "danger-full-access" to "full-access",
+                        "workspace-write" to "workspace-write",
+                    ).forEach { (sandbox, label) ->
+                        SelectablePill(
+                            label = label,
+                            selected = draft.sandbox == sandbox,
+                            onClick = { onSandboxChange(sandbox) },
+                        )
+                    }
+                }
+                Text(
+                    text =
+                        when (draft.sandbox) {
+                            "read-only" -> "只读模式。不能改文件，适合纯查看、检索和解释。"
+                            "workspace-write" -> "仅允许写当前项目工作区；更稳妥，适合日常改代码。"
+                            else -> "允许完整文件系统访问；能力最强，但风险也最高。"
+                        },
+                    color = uiMuted,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                )
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
@@ -767,6 +957,78 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @Composable
+    private fun SessionInfoSheet(
+        state: SessionInfoSheetState,
+        onDismiss: () -> Unit,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp, vertical = 14.dp)
+                .navigationBarsPadding(),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = "会话信息",
+                        color = uiText,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        text = state.title,
+                        color = uiMuted,
+                        fontSize = 12.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                OutlinedButton(onClick = onDismiss) {
+                    Text("关闭")
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                state.rows.forEach { (label, value) ->
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = uiSurfaceAlt,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                text = label,
+                                color = uiMuted,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            Text(
+                                text = value,
+                                color = uiText,
+                                fontSize = 13.sp,
+                                lineHeight = 19.sp,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun ConnectionPage() {
@@ -797,7 +1059,14 @@ class MainActivity : ComponentActivity() {
                     border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
                 ) {
                     Column(modifier = Modifier.padding(18.dp)) {
-                        SectionTitle("连接 Linux Bridge")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            SectionTitle("连接 Linux Bridge")
+                            ConnectionStatusBadge(active = connected)
+                        }
                         Spacer(modifier = Modifier.height(8.dp))
                         BodyText("直接粘贴 `npm run bridge` 打印出来的完整 ws:// 地址，最好带上端口和 token。")
                     }
@@ -861,6 +1130,37 @@ class MainActivity : ComponentActivity() {
                                 Text(if (connected) "断开连接" else "连接")
                             }
                         }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = uiSurfaceAlt,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalAlignment = Alignment.Top,
+                            ) {
+                                StatusDot(active = connected)
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(
+                                        text = connectionStatusHeadline(),
+                                        color = uiText,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                    )
+                                    Text(
+                                        text = connectionStatusDetailText(),
+                                        color = uiMuted,
+                                        fontSize = 12.sp,
+                                        lineHeight = 18.sp,
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -883,7 +1183,7 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                             Spacer(modifier = Modifier.height(8.dp))
-                            BodyText("点卡片回填地址，点右侧按钮直接连接或切换。")
+                            BodyText("单击回填地址，长按重命名，也可以直接连接或切换。")
                             Spacer(modifier = Modifier.height(12.dp))
                             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                 connectionHistory.forEach { entry ->
@@ -892,6 +1192,7 @@ class MainActivity : ComponentActivity() {
                                         active = currentBridgeUrl == entry.url,
                                         onApply = { applyHistoryConnection(entry) },
                                         onConnect = { connectToHistory(entry) },
+                                        onRename = { openRenameConnectionDialog(entry) },
                                         onDelete = { removeConnectionHistory(entry.url) },
                                     )
                                 }
@@ -899,29 +1200,37 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = uiSurface),
-                    shape = RoundedCornerShape(22.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
-                ) {
-                    Column(modifier = Modifier.padding(18.dp)) {
-                        SectionTitle("连接状态")
-                        Spacer(modifier = Modifier.height(8.dp))
-                        BodyText(connectionDetail)
-                    }
-                }
             }
+        }
+
+        connectionRenameState?.let { state ->
+            RenameConnectionDialog(
+                state = state,
+                onDismiss = { connectionRenameState = null },
+                onConfirm = { name ->
+                    renameConnectionHistory(state.url, name)
+                    val updatedName = connectionHistory.firstOrNull { it.url == state.url }?.displayName()
+                        ?: BridgeHistoryEntry.fromUrl(state.url, name = name)?.displayName()
+                        ?: state.url
+                    if (currentBridgeUrl == state.url && connected) {
+                        connectionDetail = "已连接到 $updatedName"
+                    } else if (bridgeUrl.trim() == state.url.trim()) {
+                        connectionDetail = "已回填 $updatedName，点击连接即可"
+                    }
+                    connectionRenameState = null
+                },
+            )
         }
     }
 
     @Composable
+    @OptIn(ExperimentalFoundationApi::class)
     private fun HistoryConnectionCard(
         entry: BridgeHistoryEntry,
         active: Boolean,
         onApply: () -> Unit,
         onConnect: () -> Unit,
+        onRename: () -> Unit,
         onDelete: () -> Unit,
     ) {
         val connectLabel = when {
@@ -931,76 +1240,60 @@ class MainActivity : ComponentActivity() {
         }
 
         Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onApply),
+            modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(18.dp),
             color = if (active) uiPrimarySoft else uiSurfaceAlt,
             border = if (active) androidx.compose.foundation.BorderStroke(1.dp, uiPrimary) else androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
         ) {
-            Column(
-                modifier = Modifier.padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.Top,
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(end = 84.dp)
+                        .combinedClickable(
+                            onClick = onApply,
+                            onLongClick = onRename,
+                        ),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = entry.title,
-                            color = uiText,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = entry.detailLine(),
-                            color = uiMuted,
-                            fontSize = 12.sp,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "最近使用 ${entry.lastUsedLabel()}",
-                            color = uiMuted,
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-
-                    FilledTonalButton(
-                        onClick = onConnect,
-                        enabled = !(active && connected),
-                    ) {
+                    Text(
+                        text = entry.displayName(),
+                        color = uiText,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = entry.subtitleLine(),
+                        color = uiMuted,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = entry.lastUsedLabel(),
+                        color = uiMuted,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .widthIn(min = 64.dp),
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    FilledTonalButton(onClick = onConnect, enabled = !(active && connected)) {
                         Text(connectLabel)
                     }
-                }
-
-                Text(
-                    text = entry.maskedUrl,
-                    color = uiMuted,
-                    fontSize = 11.sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(
-                        onClick = onApply,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text("填入")
-                    }
-                    OutlinedButton(
-                        onClick = onDelete,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text("移除")
+                    TextButton(onClick = onDelete) {
+                        Text("移除", color = uiMuted)
                     }
                 }
             }
@@ -1040,13 +1333,14 @@ class MainActivity : ComponentActivity() {
                     ConversationHistoryWebView(
                         items = conversationItems,
                         sessionId = activeSessionId,
+                        displayBasePath = activeSession?.cwd,
                         followBottom = activeTurnId != null,
                         restoreScrollY = chatRestoreScrollY,
                         onScrollRestored = {
                             chatRestoreScrollY = null
                         },
-                        onOpenCodeBrowser = { itemId, scrollY ->
-                            openCodeBrowser(itemId, scrollY)
+                        onOpenCodeBrowser = { itemId, path, scrollY ->
+                            openCodeBrowser(itemId, path, scrollY)
                         },
                         modifier = Modifier
                             .fillMaxSize()
@@ -1070,7 +1364,7 @@ class MainActivity : ComponentActivity() {
                     .fillMaxWidth()
                     .padding(horizontal = 2.dp, vertical = 2.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.Bottom,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 OutlinedTextField(
                     value = composerText,
@@ -1097,16 +1391,16 @@ class MainActivity : ComponentActivity() {
                 Button(
                     onClick = { sendComposerText() },
                     enabled = connected && activeSessionId != null,
-                    modifier = Modifier.size(44.dp),
+                    modifier = Modifier.size(46.dp),
                     shape = CircleShape,
                     contentPadding = PaddingValues(0.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = uiPrimary),
                 ) {
-                    Text(
-                        text = "↑",
-                        color = Color.White,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
+                    Icon(
+                        painter = painterResource(id = android.R.drawable.ic_menu_send),
+                        contentDescription = "发送",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp),
                     )
                 }
             }
@@ -1148,11 +1442,42 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     if (approval.diffEntries.isNotEmpty()) {
-                        Text(
-                            text = "涉及文件: ${approval.diffEntries.size} 个",
-                            color = uiMuted,
-                            fontSize = 13.sp,
-                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = "涉及文件: ${approval.diffEntries.size} 个",
+                                color = uiMuted,
+                                fontSize = 13.sp,
+                            )
+                            Column {
+                                approval.diffEntries.forEachIndexed { index, entry ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 6.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(
+                                            text = entry.displayPath(basePath = currentWorkspacePath(), maxLength = 72),
+                                            color = uiText,
+                                            fontSize = 13.sp,
+                                            modifier = Modifier.weight(1f),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        Text(
+                                            text = entry.diffStatsLabel().orEmpty(),
+                                            color = uiMuted,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                        )
+                                    }
+                                    if (index < approval.diffEntries.lastIndex) {
+                                        HorizontalDivider(color = uiBorder.copy(alpha = 0.7f))
+                                    }
+                                }
+                            }
+                        }
                     }
                     HorizontalDivider(color = uiBorder.copy(alpha = 0.8f))
                     Row(
@@ -1232,7 +1557,7 @@ class MainActivity : ComponentActivity() {
                             )
                             Text(
                                 text = when {
-                                    selectedEntry != null -> selectedEntry.displayPath()
+                                    selectedEntry != null -> selectedEntry.displayPath(basePath = state.basePath, maxLength = 80)
                                     state.diffEntries.isNotEmpty() -> "共 ${state.diffEntries.size} 个文件"
                                     else -> "聚合 diff"
                                 },
@@ -1254,16 +1579,20 @@ class MainActivity : ComponentActivity() {
                 }
 
                 if (state.diffEntries.size > 1) {
-                    Row(
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(0.dp),
                     ) {
-                        state.diffEntries.forEach { entry ->
-                            CodeBrowserFileChip(
-                                label = entry.displayPath(),
+                        state.diffEntries.forEachIndexed { index, entry ->
+                            CodeBrowserFileRow(
+                                label = entry.displayPath(basePath = state.basePath, maxLength = 72),
+                                stats = entry.diffStatsLabel(),
                                 selected = state.selectedPath == entry.browsePath(),
                                 onClick = { selectCodeBrowserPath(entry.browsePath()) },
                             )
+                            if (index < state.diffEntries.lastIndex) {
+                                HorizontalDivider(color = uiBorder.copy(alpha = 0.75f))
+                            }
                         }
                     }
                 }
@@ -1352,7 +1681,7 @@ class MainActivity : ComponentActivity() {
                         if (state.mode == CodeBrowserMode.File) {
                             Text(
                                 text = buildString {
-                                    append(fileState.content.resolvedPath)
+                                    append(compactDiffDisplayPath(fileState.content.resolvedPath, state.basePath, maxLength = 96))
                                     if (fileState.content.truncated) {
                                         append(" · 已截断到 ${fileState.content.bytes} bytes")
                                     }
@@ -1399,25 +1728,38 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun CodeBrowserFileChip(
+    private fun CodeBrowserFileRow(
         label: String,
+        stats: String?,
         selected: Boolean,
         onClick: () -> Unit,
     ) {
-        Surface(
-            shape = RoundedCornerShape(999.dp),
-            color = if (selected) uiPrimary else uiSurfaceAlt,
-            border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, uiPrimary) else androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
-            modifier = Modifier.clickable(onClick = onClick),
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .background(if (selected) uiPrimarySoft else Color.Transparent)
+                .padding(horizontal = 4.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 text = label,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                color = if (selected) Color.White else uiText,
-                fontSize = 12.sp,
+                color = uiText,
+                fontSize = 13.sp,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                modifier = Modifier.weight(1f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            stats?.let {
+                Text(
+                    text = it,
+                    color = uiMuted,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
         }
     }
 
@@ -1685,25 +2027,23 @@ class MainActivity : ComponentActivity() {
             color = if (selected) uiPrimarySoft else uiSurfaceAlt,
             border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, uiPrimary) else androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
         ) {
-            Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Text(
                     text = session.titleLine(),
                     color = uiText,
                     fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = session.previewLine(),
-                    color = uiMuted,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(modifier = Modifier.height(5.dp))
-                Text(
-                    text = session.metaLine(),
+                    text = session.updatedAtLabel(),
                     color = uiMuted,
                     fontSize = 11.sp,
                     maxLines = 1,
@@ -1805,7 +2145,7 @@ class MainActivity : ComponentActivity() {
     private fun connectToBridge(url: String) {
         if (bridgeClient?.isOpen() == true && currentBridgeUrl == url) {
             selectedTab = AppTab.Chat
-            connectionDetail = "已连接到 ${BridgeHistoryEntry.fromUrl(url)?.title ?: url}"
+            connectionDetail = "已连接到 ${connectionHistory.firstOrNull { it.url == url }?.displayName() ?: BridgeHistoryEntry.fromUrl(url)?.displayName() ?: url}"
             return
         }
 
@@ -1827,7 +2167,7 @@ class MainActivity : ComponentActivity() {
                     connected = true
                     rememberConnectionHistory(url)
                     selectedTab = AppTab.Chat
-                    connectionDetail = "已连接，等待 bridge hello..."
+                    connectionDetail = "已连接到 ${connectionHistory.firstOrNull { it.url == url }?.displayName() ?: BridgeHistoryEntry.fromUrl(url)?.displayName() ?: url}"
                 }
             }
 
@@ -1865,12 +2205,20 @@ class MainActivity : ComponentActivity() {
 
     private fun applyHistoryConnection(entry: BridgeHistoryEntry) {
         bridgeUrl = entry.url
-        connectionDetail = "已回填 ${entry.title}，点击连接即可"
+        connectionDetail = "已回填 ${entry.displayName()}，点击连接即可"
     }
 
     private fun connectToHistory(entry: BridgeHistoryEntry) {
         bridgeUrl = entry.url
         connectToBridge(entry.url)
+    }
+
+    private fun openRenameConnectionDialog(entry: BridgeHistoryEntry) {
+        connectionRenameState =
+            ConnectionRenameDialogState(
+                url = entry.url,
+                currentName = entry.name.orEmpty(),
+            )
     }
 
     private fun handleIncoming(text: String) {
@@ -1938,6 +2286,10 @@ class MainActivity : ComponentActivity() {
                 }
             }
             return
+        }
+
+        payload.optJSONObject("thread")?.let { thread ->
+            SessionInfo.fromThread(thread)?.let(::upsertSession)
         }
 
         if (eventName == "session/changed") {
@@ -2122,6 +2474,7 @@ class MainActivity : ComponentActivity() {
         projectPath: String?,
         model: String,
         approvalPolicy: String,
+        sandbox: String,
     ) {
         if (!ensureConnected()) return
         if (model.isBlank()) {
@@ -2138,6 +2491,7 @@ class MainActivity : ComponentActivity() {
             put("threadSource", "user")
             put("model", model)
             put("approvalPolicy", approvalPolicy)
+            put("sandbox", sandbox)
         }
 
         sendRequest("session.start", payload) { response ->
@@ -2172,6 +2526,12 @@ class MainActivity : ComponentActivity() {
             if (model.isNotBlank()) {
                 put("model", model)
             }
+            activeSession()?.approvalPolicy?.takeIf { it.isNotBlank() }?.let { put("approvalPolicy", it) }
+            val sandboxValue = activeSession()?.sandbox
+            if (sandboxValue != null) {
+                put("sandboxPolicy", cloneJsonValue(sandboxValue))
+            }
+            activeSession()?.permissions?.let { put("permissions", cloneJsonValue(it)) }
         }
 
         if (!sendRequest("turn.send", payload) { response ->
@@ -2419,7 +2779,7 @@ class MainActivity : ComponentActivity() {
         pendingApprovals.removeAll { approval -> approval.turnId == normalizedTurnId }
     }
 
-    private fun openCodeBrowser(itemId: String, scrollY: Int) {
+    private fun openCodeBrowser(itemId: String, selectedPath: String?, scrollY: Int) {
         val sessionId = activeSessionId
         val item = conversationItems.firstOrNull { it.id == itemId }
         val state =
@@ -2429,9 +2789,10 @@ class MainActivity : ComponentActivity() {
                         conversationItemId = item.id,
                         sessionId = sessionId,
                         title = item.title,
+                        basePath = activeSession()?.cwd,
                         diffEntries = item.diffEntries,
                         fallbackDiff = item.fallbackDiff,
-                        selectedPath = item.diffEntries.firstOrNull()?.browsePath(),
+                        selectedPath = selectedPath ?: item.diffEntries.firstOrNull()?.browsePath(),
                     )
 
                 else -> null
@@ -2544,7 +2905,7 @@ class MainActivity : ComponentActivity() {
                             buildString {
                                 append(if (errorText.isBlank()) "文件读取失败" else errorText)
                                 append("\n候选路径: ")
-                                append(candidatePaths.joinToString(" | "))
+                                append(candidatePaths.joinToString(" | ") { compactDiffDisplayPath(it, state.basePath, maxLength = 64) })
                             },
                         ),
                     )
@@ -2613,7 +2974,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun rememberConnectionHistory(url: String) {
-        val entry = BridgeHistoryEntry.fromUrl(url, System.currentTimeMillis()) ?: return
+        val existingName = connectionHistory.firstOrNull { it.url == url }?.name
+        val entry = BridgeHistoryEntry.fromUrl(url, System.currentTimeMillis(), existingName) ?: return
         replaceConnectionHistory(
             listOf(entry) + connectionHistory.filterNot { it.url == entry.url },
         )
@@ -2627,6 +2989,15 @@ class MainActivity : ComponentActivity() {
 
     private fun clearConnectionHistory() {
         connectionHistory.clear()
+        persistConnectionHistory()
+    }
+
+    private fun renameConnectionHistory(url: String, name: String) {
+        replaceConnectionHistory(
+            connectionHistory.map { entry ->
+                if (entry.url == url) entry.withName(name) else entry
+            },
+        )
         persistConnectionHistory()
     }
 
@@ -2652,6 +3023,7 @@ class MainActivity : ComponentActivity() {
                     BridgeHistoryEntry.fromUrl(
                         url = url,
                         lastUsedAt = item.optLong("lastUsedAt", 0L).takeIf { it > 0L } ?: System.currentTimeMillis(),
+                        name = item.optString("name", "").trim(),
                     )?.let(parsed::add)
                 }
             } catch (_: JSONException) {
@@ -2674,6 +3046,7 @@ class MainActivity : ComponentActivity() {
                 JSONObject().apply {
                     put("url", entry.url)
                     put("lastUsedAt", entry.lastUsedAt)
+                    put("name", entry.name.orEmpty())
                 },
             )
         }
@@ -3386,10 +3759,8 @@ class MainActivity : ComponentActivity() {
         labelPatchStatus(status).takeIf { it.isNotBlank() }?.let(lines::add)
 
         if (diffEntries.isNotEmpty()) {
-            val paths = diffEntries.map { it.summaryPath() }.distinct()
-            lines.add("${paths.size} 个文件")
+            lines.add("${diffEntries.size} 个文件")
             buildDiffStatsLine(diffEntries = diffEntries, fallbackDiff = fallbackDiff)?.let(lines::add)
-            lines.addAll(paths)
         } else if (!fallbackDiff.isNullOrBlank()) {
             buildDiffStatsLine(diffEntries = emptyList(), fallbackDiff = fallbackDiff)?.let(lines::add)
         }
@@ -3407,17 +3778,7 @@ class MainActivity : ComponentActivity() {
             } else {
                 fallbackDiff.orEmpty()
             }
-        if (source.isBlank()) return null
-        var additions = 0
-        var deletions = 0
-        source.replace("\r\n", "\n").lineSequence().forEach { line ->
-            when {
-                line.startsWith("+") && !line.startsWith("+++") -> additions += 1
-                line.startsWith("-") && !line.startsWith("---") -> deletions += 1
-            }
-        }
-        if (additions == 0 && deletions == 0) return null
-        return "+$additions / -$deletions"
+        return parseDiffStats(source)?.toLabel()
     }
 
     private fun labelPatchStatus(status: String): String {
@@ -3796,6 +4157,53 @@ class MainActivity : ComponentActivity() {
         return parts.joinToString(" · ")
     }
 
+    private fun connectionStatusHeadline(): String {
+        val entry = currentConnectionEntry()
+        if (!connected) {
+            val name = entry?.displayName()?.takeIf { !currentBridgeUrl.isNullOrBlank() && it.isNotBlank() }
+            return if (name != null) {
+                "正在连接：$name"
+            } else {
+                "当前未连接"
+            }
+        }
+        val name = entry?.displayName()?.takeIf { it.isNotBlank() }
+        return if (name != null) {
+            "当前连接：$name"
+        } else {
+            "当前已连接"
+        }
+    }
+
+    private fun connectionStatusDetailText(): String {
+        val entry = currentConnectionEntry()
+        if (!connected) {
+            if (currentBridgeUrl.isNullOrBlank() || entry == null) return connectionDetail
+            return buildList {
+                add("正在建立连接")
+                entry.maskedUrl.takeIf { it.isNotBlank() }?.let(::add)
+            }.joinToString("\n")
+        }
+        entry ?: return connectionDetail
+        return entry.maskedUrl.takeIf { it.isNotBlank() } ?: connectionDetail
+    }
+
+    private fun drawerConnectionSummaryText(): String {
+        val target = currentBridgeUrl?.takeIf { it.isNotBlank() } ?: bridgeUrl.trim().takeIf { it.isNotBlank() }
+        val entry = target?.let { url ->
+            connectionHistory.firstOrNull { it.url == url } ?: BridgeHistoryEntry.fromUrl(url)
+        }
+        val label = entry?.displayName()?.takeIf { it.isNotBlank() } ?: target
+        return label?.let { "连接到 $it" } ?: "未连接"
+    }
+
+    private fun currentConnectionEntry(): BridgeHistoryEntry? {
+        val url = currentBridgeUrl?.takeIf { it.isNotBlank() } ?: bridgeUrl.takeIf { connected && it.isNotBlank() }
+        return url?.let { target ->
+            connectionHistory.firstOrNull { it.url == target } ?: BridgeHistoryEntry.fromUrl(target)
+        }
+    }
+
     private fun activeSession(): SessionInfo? = activeSessionId?.let { sessionId -> sessions.firstOrNull { it.sessionId == sessionId } }
 
     private fun currentWorkspacePath(): String? {
@@ -3858,7 +4266,38 @@ class MainActivity : ComponentActivity() {
             NewChatDraft(
                 projectPath = projectPath?.takeIf { it.isNotBlank() },
                 model = defaultModel,
-                approvalPolicy = "on-request",
+                approvalPolicy = "never",
+                sandbox = "danger-full-access",
+            )
+    }
+
+    private fun approvalPolicyDescription(policy: String): String {
+        return when (policy.trim()) {
+            "untrusted" -> "最保守。更广泛地要求审批，适合不信任当前环境时使用。"
+            "on-request" -> "默认推荐。Codex 主动请求时再审批。"
+            "on-failure" -> "先尝试执行，失败后再请求审批。"
+            "never" -> "不进行审批，按当前会话权限直接执行。"
+            else -> "将按该 approvalPolicy 原样下发给 Codex。"
+        }
+    }
+
+    private fun openSessionInfoSheet() {
+        val session = activeSession() ?: return
+        sessionInfoSheetState =
+            SessionInfoSheetState(
+                title = session.titleLine(),
+                rows =
+                    buildList {
+                        add("目录" to session.cwd.ifBlank { "未提供" })
+                        add("模型" to session.model.ifBlank { "未提供" })
+                        add("审批策略" to session.approvalPolicy.ifBlank { "未提供" })
+                        add("权限配置" to session.permissionsSummary())
+                        add("沙箱" to session.sandboxSummary())
+                        add("上下文窗口" to session.contextWindowSummary())
+                        add("最近 token" to session.lastTokenUsageSummary())
+                        add("累计 token" to session.totalTokenUsageSummary())
+                        add("会话 ID" to session.sessionId)
+                    },
             )
     }
 
@@ -4402,7 +4841,7 @@ data class ConversationDiffEntry(
     val diff: String,
     val movePath: String? = null,
 ) {
-    fun summaryPath(): String = normalizedMovePath()?.let { "${normalizedPath()} → $it" } ?: normalizedPath()
+    fun summaryPath(basePath: String? = null): String = displayPath(basePath = basePath, maxLength = Int.MAX_VALUE)
 
     fun browseCandidates(): List<String> {
         return listOfNotNull(
@@ -4413,7 +4852,17 @@ data class ConversationDiffEntry(
 
     fun browsePath(): String = browseCandidates().firstOrNull().orEmpty()
 
-    fun displayPath(): String = normalizedMovePath()?.let { "${normalizedPath()} → $it" } ?: normalizedPath()
+    fun displayPath(basePath: String? = null, maxLength: Int = 44): String {
+        val baseLabel = compactDiffDisplayPath(normalizedPath(), basePath, maxLength)
+        val moveLabel = normalizedMovePath()?.let { compactDiffDisplayPath(it, basePath, maxLength) }
+        val combined = moveLabel?.let { "$baseLabel → $it" } ?: baseLabel
+        if (combined.length <= maxLength) return combined
+        val compactBase = baseLabel.substringAfterLast('/').ifBlank { baseLabel }
+        val compactMove = moveLabel?.substringAfterLast('/')?.ifBlank { moveLabel }
+        return compactMove?.let { "$compactBase → $it" } ?: compactBase
+    }
+
+    fun diffStatsLabel(): String? = buildDiffStatsLabel(diff, kind)
 
     private fun normalizedPath(): String = sanitizeDiffPath(path).orEmpty()
 
@@ -4427,6 +4876,75 @@ private fun sanitizeDiffPath(value: String?): String? {
         text.equals("null", ignoreCase = true) -> null
         text.equals("undefined", ignoreCase = true) -> null
         else -> text
+    }
+}
+
+private fun compactDiffDisplayPath(
+    rawPath: String,
+    basePath: String?,
+    maxLength: Int,
+): String {
+    val normalizedPath = rawPath.replace('\\', '/').removePrefix("./")
+    val normalizedBase = sanitizeDiffPath(basePath)?.replace('\\', '/')?.trimEnd('/')
+    val relativePath =
+        when {
+            normalizedBase.isNullOrBlank() -> normalizedPath.takeIf { !it.startsWith('/') } ?: normalizedPath.substringAfterLast('/')
+            normalizedPath == normalizedBase -> normalizedPath.substringAfterLast('/')
+            normalizedPath.startsWith("$normalizedBase/") -> normalizedPath.removePrefix("$normalizedBase/")
+            normalizedPath.startsWith('/') -> normalizedPath.substringAfterLast('/')
+            else -> normalizedPath
+        }.ifBlank { normalizedPath.substringAfterLast('/') }
+    return if (relativePath.length <= maxLength) relativePath else relativePath.substringAfterLast('/').ifBlank { relativePath }
+}
+
+private fun buildDiffStatsLabel(
+    diffText: String,
+    kind: String,
+): String? {
+    val stats = parseDiffStats(diffText, kind)
+    return stats?.toLabel() ?: when (kind.trim()) {
+        "add" -> "新增"
+        "delete" -> "删除"
+        "update" -> "修改"
+        else -> null
+    }
+}
+
+private data class DiffStats(
+    val additions: Int,
+    val deletions: Int,
+) {
+    fun toLabel(): String {
+        return when {
+            additions > 0 && deletions > 0 -> "+$additions / -$deletions"
+            additions > 0 -> "+$additions"
+            deletions > 0 -> "-$deletions"
+            else -> "修改"
+        }
+    }
+}
+
+private fun parseDiffStats(
+    diffText: String,
+    kind: String? = null,
+): DiffStats? {
+    if (diffText.isBlank()) return null
+    var additions = 0
+    var deletions = 0
+    diffText.replace("\r\n", "\n").lineSequence().forEach { line ->
+        when {
+            line.startsWith("+") && !line.startsWith("+++") -> additions += 1
+            line.startsWith("-") && !line.startsWith("---") -> deletions += 1
+        }
+    }
+    if (additions > 0 || deletions > 0) {
+        return DiffStats(additions = additions, deletions = deletions)
+    }
+    val nonEmptyLines = diffText.lineSequence().count { it.isNotBlank() }
+    return when (kind?.trim()) {
+        "add" -> DiffStats(additions = nonEmptyLines.coerceAtLeast(1), deletions = 0)
+        "delete" -> DiffStats(additions = 0, deletions = nonEmptyLines.coerceAtLeast(1))
+        else -> null
     }
 }
 
@@ -4451,6 +4969,11 @@ private data class ApprovalDialogState(
     val turnId: String? = null,
 )
 
+private data class ConnectionRenameDialogState(
+    val url: String,
+    val currentName: String,
+)
+
 private data class BridgeHistoryEntry(
     val url: String,
     val title: String,
@@ -4458,20 +4981,29 @@ private data class BridgeHistoryEntry(
     val maskedToken: String?,
     val maskedUrl: String,
     val lastUsedAt: Long,
+    val name: String? = null,
 ) {
-    fun detailLine(): String {
-        val parts = mutableListOf(pathLabel)
-        maskedToken?.takeIf { it.isNotBlank() }?.let { parts.add("token $it") }
-        return parts.joinToString(" · ")
+    fun displayName(): String = name?.trim()?.takeIf { it.isNotBlank() } ?: title
+
+    fun subtitleLine(): String {
+        val parts = mutableListOf<String>()
+        if (displayName() != title) parts.add(title)
+        parts.add(pathLabel)
+        return parts.distinct().joinToString(" · ")
     }
 
+    fun withName(value: String?): BridgeHistoryEntry = copy(name = value?.trim()?.takeIf { it.isNotBlank() })
+
     fun lastUsedLabel(): String {
-        if (lastUsedAt <= 0L) return "刚刚"
-        return android.text.format.DateFormat.format("MM-dd HH:mm", lastUsedAt).toString()
+        return formatBeijingDateTimeLabel(lastUsedAt, fallback = "刚刚", pattern = "yyyy-MM-dd HH:mm")
     }
 
     companion object {
-        fun fromUrl(url: String, lastUsedAt: Long = System.currentTimeMillis()): BridgeHistoryEntry? {
+        fun fromUrl(
+            url: String,
+            lastUsedAt: Long = System.currentTimeMillis(),
+            name: String? = null,
+        ): BridgeHistoryEntry? {
             return try {
                 val uri = URI.create(url)
                 val scheme = uri.scheme?.takeIf { it.isNotBlank() } ?: "ws"
@@ -4506,6 +5038,7 @@ private data class BridgeHistoryEntry(
                     maskedToken = maskedToken,
                     maskedUrl = maskedUrl,
                     lastUsedAt = lastUsedAt,
+                    name = name?.trim()?.takeIf { it.isNotBlank() },
                 )
             } catch (_: Exception) {
                 null
@@ -4524,6 +5057,7 @@ private data class CodeBrowserState(
     val conversationItemId: String,
     val sessionId: String?,
     val title: String,
+    val basePath: String?,
     val diffEntries: List<ConversationDiffEntry>,
     val fallbackDiff: String?,
     val selectedPath: String?,
@@ -4782,6 +5316,12 @@ private data class NewChatDraft(
     val projectPath: String?,
     val model: String,
     val approvalPolicy: String,
+    val sandbox: String,
+)
+
+private data class SessionInfoSheetState(
+    val title: String,
+    val rows: List<Pair<String, String>>,
 )
 
 private data class ModelInfo(
@@ -4816,6 +5356,12 @@ private data class SessionInfo(
     val backend: String,
     val cwd: String,
     val updatedAt: String,
+    val approvalPolicy: String,
+    val sandbox: Any?,
+    val permissions: JSONObject?,
+    val contextWindow: Int?,
+    val lastTokenUsage: TokenUsageSnapshot?,
+    val totalTokenUsage: TokenUsageSnapshot?,
 ) {
     companion object {
         private fun firstNonEmpty(vararg values: String): String {
@@ -4843,28 +5389,48 @@ private data class SessionInfo(
                 backend = objectValue.optString("backend", ""),
                 cwd = objectValue.optString("cwd", ""),
                 updatedAt = objectValue.optString("updatedAt", ""),
+                approvalPolicy = objectValue.optString("approvalPolicy", ""),
+                sandbox = cloneJsonValue(objectValue.opt("sandbox")),
+                permissions = objectValue.optJSONObject("permissions")?.let { JSONObject(it.toString()) },
+                contextWindow = objectValue.optInt("contextWindow").takeIf { it > 0 },
+                lastTokenUsage = objectValue.optJSONObject("lastTokenUsage")?.let { TokenUsageSnapshot.fromJson(it) },
+                totalTokenUsage = objectValue.optJSONObject("totalTokenUsage")?.let { TokenUsageSnapshot.fromJson(it) },
             )
         }
 
         fun fromThread(objectValue: JSONObject): SessionInfo? {
+            val threadObject = objectValue.optJSONObject("thread") ?: objectValue
             val sessionId = firstNonEmpty(
+                objectValue.optString("session_id", ""),
+                objectValue.optString("thread_id", ""),
                 objectValue.optString("sessionId", ""),
+                threadObject.optString("sessionId", ""),
                 objectValue.optString("id", ""),
+                threadObject.optString("id", ""),
             )
             if (sessionId.isBlank()) return null
             val title = firstNonEmpty(
+                objectValue.optString("title", ""),
+                threadObject.optString("name", ""),
                 objectValue.optString("name", ""),
                 objectValue.optString("preview", ""),
-                objectValue.optString("title", ""),
+                threadObject.optString("preview", ""),
+                threadObject.optString("title", ""),
             )
             return SessionInfo(
                 sessionId = sessionId,
                 title = title,
-                preview = objectValue.optString("preview", ""),
-                model = objectValue.optString("model", ""),
-                backend = objectValue.optString("modelProvider", ""),
-                cwd = objectValue.optString("cwd", ""),
-                updatedAt = objectValue.optLong("updatedAt", 0L).toString(),
+                preview = firstNonEmpty(objectValue.optString("preview", ""), threadObject.optString("preview", "")),
+                model = firstNonEmpty(objectValue.optString("model", ""), threadObject.optString("model", "")),
+                backend = firstNonEmpty(objectValue.optString("backend", ""), objectValue.optString("modelProvider", ""), threadObject.optString("modelProvider", "")),
+                cwd = firstNonEmpty(objectValue.optString("cwd", ""), threadObject.optString("cwd", "")),
+                updatedAt = firstNonEmpty(objectValue.optString("updatedAt", ""), objectValue.optLong("updatedAt", 0L).takeIf { it > 0L }?.toString().orEmpty()),
+                approvalPolicy = objectValue.optString("approvalPolicy", ""),
+                sandbox = cloneJsonValue(objectValue.opt("sandbox")),
+                permissions = objectValue.optJSONObject("permissions")?.let { JSONObject(it.toString()) },
+                contextWindow = objectValue.optInt("contextWindow").takeIf { it > 0 },
+                lastTokenUsage = objectValue.optJSONObject("lastTokenUsage")?.let { TokenUsageSnapshot.fromJson(it) },
+                totalTokenUsage = objectValue.optJSONObject("totalTokenUsage")?.let { TokenUsageSnapshot.fromJson(it) },
             )
         }
     }
@@ -4881,13 +5447,89 @@ private data class SessionInfo(
         return "没有预览内容"
     }
 
+    fun updatedAtLabel(): String {
+        val raw = updatedAt.trim()
+        val timestamp =
+            raw.toLongOrNull()
+                ?: runCatching { Instant.parse(raw).toEpochMilli() }.getOrNull()
+                ?: return raw.ifBlank { "刚刚" }
+        return formatBeijingDateTimeLabel(timestamp, fallback = "刚刚")
+    }
+
     fun metaLine(): String {
         val parts = mutableListOf<String>()
         if (model.isNotBlank()) parts.add(model)
         if (backend.isNotBlank()) parts.add(backend)
+        if (approvalPolicy.isNotBlank()) parts.add("审批 ${approvalPolicy.trim()}")
         parts.add(sessionId.take(8))
-        if (updatedAt.isNotBlank()) parts.add(updatedAt)
+        if (updatedAt.isNotBlank()) parts.add(updatedAtLabel())
         return parts.joinToString(" · ")
+    }
+
+    fun permissionsSummary(): String {
+        val id = permissions?.optString("id", "")?.trim().orEmpty()
+        return id.ifBlank { "默认" }
+    }
+
+    fun sandboxSummary(): String {
+        val raw = sandbox
+        val type =
+            when (raw) {
+                is String -> raw
+                is JSONObject -> raw.optString("type", "").ifBlank { raw.toString() }
+                else -> raw?.toString().orEmpty()
+            }.trim()
+        return when (type) {
+            "danger-full-access", "dangerFullAccess" -> "full-access"
+            "workspace-write", "workspaceWrite" -> "workspace-write"
+            "read-only", "readOnly" -> "read-only"
+            "externalSandbox" -> "external sandbox"
+            else -> raw?.toString().orEmpty().ifBlank { "未提供" }
+        }
+    }
+
+    fun contextWindowSummary(): String = contextWindow?.let(::formatCountLabel) ?: "未提供"
+
+    fun lastTokenUsageSummary(): String = lastTokenUsage?.summary() ?: "未提供"
+
+    fun totalTokenUsageSummary(): String = totalTokenUsage?.summary() ?: "未提供"
+}
+
+private data class TokenUsageSnapshot(
+    val totalTokens: Int,
+    val inputTokens: Int,
+    val cachedInputTokens: Int,
+    val outputTokens: Int,
+    val reasoningOutputTokens: Int,
+) {
+    companion object {
+        fun fromJson(objectValue: JSONObject): TokenUsageSnapshot {
+            return TokenUsageSnapshot(
+                totalTokens = objectValue.optInt("totalTokens", 0),
+                inputTokens = objectValue.optInt("inputTokens", 0),
+                cachedInputTokens = objectValue.optInt("cachedInputTokens", 0),
+                outputTokens = objectValue.optInt("outputTokens", 0),
+                reasoningOutputTokens = objectValue.optInt("reasoningOutputTokens", 0),
+            )
+        }
+    }
+
+    fun summary(): String {
+        return buildList {
+            add("总 ${formatCountLabel(totalTokens)}")
+            if (inputTokens > 0) add("入 ${formatCountLabel(inputTokens)}")
+            if (cachedInputTokens > 0) add("缓存 ${formatCountLabel(cachedInputTokens)}")
+            if (outputTokens > 0) add("出 ${formatCountLabel(outputTokens)}")
+            if (reasoningOutputTokens > 0) add("推理 ${formatCountLabel(reasoningOutputTokens)}")
+        }.joinToString(" · ").ifBlank { "0" }
+    }
+}
+
+private fun formatCountLabel(value: Int): String {
+    return when {
+        value >= 1_000_000 -> String.format(Locale.US, "%.1fM", value / 1_000_000f)
+        value >= 1_000 -> String.format(Locale.US, "%.1fk", value / 1_000f)
+        else -> value.toString()
     }
 }
 
@@ -4908,4 +5550,26 @@ private fun ClipData.firstText(): String? {
     return null
 }
 
+private fun cloneJsonValue(value: Any?): Any? {
+    return when (value) {
+        null -> null
+        is JSONObject -> JSONObject(value.toString())
+        is JSONArray -> JSONArray(value.toString())
+        else -> value
+    }
+}
+
 private fun encodeToken(token: String): String = URLEncoder.encode(token, "UTF-8")
+
+private fun formatBeijingDateTimeLabel(
+    epochMillis: Long,
+    fallback: String = "刚刚",
+    pattern: String = "MM-dd HH:mm",
+): String {
+    if (epochMillis <= 0L) return fallback
+    return runCatching {
+        Instant.ofEpochMilli(epochMillis)
+            .atZone(ZoneId.of("Asia/Shanghai"))
+            .format(DateTimeFormatter.ofPattern(pattern))
+    }.getOrDefault(fallback)
+}
