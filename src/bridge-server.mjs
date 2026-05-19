@@ -280,8 +280,8 @@ export class BridgeServer extends EventEmitter {
             active: true,
           });
         }
-        await this.store.appendEvent(sessionId, inputEvent);
-        this.#broadcast(inputEvent);
+        const storedInputEvent = await this.store.appendEvent(sessionId, inputEvent);
+        this.#broadcast(storedInputEvent);
         const turnParams = {
           text: payload.text ?? '',
           input: payload.input ?? null,
@@ -330,6 +330,10 @@ export class BridgeServer extends EventEmitter {
           targetThreadId = ensured?.session?.thread_id ?? targetThreadId;
           turn = await this.backend.startTurn(targetThreadId, turnParams);
         }
+        if (turn?.id) {
+          await this.store.attachTurnIdToRequestEvent(sessionId, id, turn.id);
+        }
+        this.#emitSessionChanged(sessionId);
         ws.send(JSON.stringify(createResponse(id, { turn, session_id: sessionId })));
         return;
       }
@@ -345,21 +349,34 @@ export class BridgeServer extends EventEmitter {
           payload.error ?? null,
         );
         await this.store.resolveApproval(payload.session_id ?? payload.thread_id, payload.request_id ?? payload.requestId);
+        this.#emitSessionChanged(payload.session_id ?? payload.thread_id);
         ws.send(JSON.stringify(createResponse(id, { ok: true })));
         return;
       }
       case 'session.sync': {
         const sessionId = payload.session_id ?? payload.thread_id;
         const sinceSeq = payload.since_seq ?? 0;
+        if (sinceSeq > 0) {
+          ws.send(JSON.stringify(createResponse(id, {
+            session_id: sessionId,
+            events: this.#filterIncrementalSessionEvents(sessionId, sinceSeq),
+            last_seq: this.store.getLastSeq(sessionId),
+          })));
+          return;
+        }
+
         const refreshed = await this.#refreshSessionHistory(sessionId);
-        const events = sinceSeq === 0
-          ? refreshed.events
-          : this.store.syncEvents(sessionId, sinceSeq);
         ws.send(JSON.stringify(createResponse(id, {
           session_id: sessionId,
-          events,
+          events: refreshed.events,
           last_seq: refreshed.lastSeq,
         })));
+        return;
+      }
+      case 'session.content': {
+        const sessionId = payload.session_id ?? payload.thread_id;
+        const content = await this.#buildSessionContent(sessionId);
+        ws.send(JSON.stringify(createResponse(id, content)));
         return;
       }
       case 'file.read': {
@@ -398,10 +415,11 @@ export class BridgeServer extends EventEmitter {
         turn_id: turnId,
         payload,
       });
+      let broadcastEvent = event;
       if (sessionId) {
         const session = this.store.getSession(sessionId);
         if (session) {
-          await this.store.appendEvent(sessionId, event);
+          broadcastEvent = await this.store.appendEvent(sessionId, event);
         } else {
           await this.store.upsertSession({
             session_id: sessionId,
@@ -414,10 +432,13 @@ export class BridgeServer extends EventEmitter {
             active: true,
             thread: payload.thread ?? null,
           });
-          await this.store.appendEvent(sessionId, event);
+          broadcastEvent = await this.store.appendEvent(sessionId, event);
         }
       }
-      this.#broadcast(event);
+      this.#broadcast(broadcastEvent);
+      if (this.#shouldEmitSessionChanged(message.method, payload)) {
+        this.#emitSessionChanged(sessionId);
+      }
       return;
     }
 
@@ -432,6 +453,7 @@ export class BridgeServer extends EventEmitter {
         request_id: message.id,
         payload,
       });
+      let broadcastEvent = event;
       if (threadId) {
         const session = this.store.getSession(threadId);
         if (!session) {
@@ -454,9 +476,12 @@ export class BridgeServer extends EventEmitter {
           payload,
           at: nowIso(),
         });
-        await this.store.appendEvent(threadId, event);
+        broadcastEvent = await this.store.appendEvent(threadId, event);
       }
-      this.#broadcast(event);
+      this.#broadcast(broadcastEvent);
+      if (this.#shouldEmitSessionChanged(message.method, payload)) {
+        this.#emitSessionChanged(threadId);
+      }
       return;
     }
 
@@ -472,6 +497,34 @@ export class BridgeServer extends EventEmitter {
         ws.send(data);
       }
     }
+  }
+
+  #emitSessionChanged(sessionId) {
+    if (!sessionId) return;
+    const session = this.store.getSession(sessionId);
+    this.#broadcast(createEvent('session/changed', {
+      session_id: sessionId,
+      thread_id: session?.thread_id ?? sessionId,
+      payload: {
+        last_seq: this.store.getLastSeq(sessionId),
+        updated_at: session?.updatedAt ?? nowIso(),
+      },
+    }));
+  }
+
+  #shouldEmitSessionChanged(eventName, payload = {}) {
+    if (eventName === 'item/completed') {
+      const itemType = payload?.item?.type ?? '';
+      return itemType === 'agentMessage' || itemType === 'fileChange';
+    }
+    return eventName === 'thread/started'
+      || eventName === 'turn/started'
+      || eventName === 'turn/completed'
+      || eventName === 'item/commandExecution/requestApproval'
+      || eventName === 'item/fileChange/requestApproval'
+      || eventName === 'item/permissions/requestApproval'
+      || eventName === 'applyPatchApproval'
+      || eventName === 'execCommandApproval';
   }
 
   #compileApprovalResult(payload) {
@@ -551,6 +604,75 @@ export class BridgeServer extends EventEmitter {
         lastSeq: this.store.getLastSeq(sessionId),
       };
     }
+  }
+
+  async #buildSessionContent(sessionId) {
+    const session = this.store.getSession(sessionId);
+    if (!session) {
+      return {
+        session_id: sessionId,
+        thread_id: sessionId,
+        entries: [],
+        pending_approvals: [],
+      };
+    }
+
+    let thread = null;
+    try {
+      thread = await this.#loadHydrationThread(sessionId, session);
+    } catch {
+      thread = session.thread ?? null;
+    }
+
+    let entries = await this.#buildContentEntriesFromThread(sessionId, thread);
+    if (entries.length === 0 && session.thread?.path) {
+      try {
+        entries = await this.#buildContentEntriesFromRolloutFile(sessionId, session.thread.path, session.thread_id ?? sessionId);
+      } catch {}
+    }
+
+    return {
+      session_id: sessionId,
+      thread_id: session.thread_id ?? sessionId,
+      entries,
+      pending_approvals: this.store.getPendingApprovals(sessionId),
+    };
+  }
+
+  #filterIncrementalSessionEvents(sessionId, sinceSeq) {
+    const session = this.store.getSession(sessionId);
+    if (!session) return [];
+
+    const events = (session.events ?? []).slice().sort((left, right) => (left.seq ?? 0) - (right.seq ?? 0));
+    if (events.length === 0) return [];
+
+    const openTurnIds = new Set();
+    for (const event of events) {
+      if ((event.seq ?? 0) > sinceSeq) break;
+      const turnId = event?.turn_id ?? '';
+      if (!turnId) continue;
+      if (event.event === 'turn/started') {
+        openTurnIds.add(turnId);
+      } else if (event.event === 'turn/completed') {
+        openTurnIds.delete(turnId);
+      }
+    }
+
+    const recentTurnIds = new Set();
+    for (const event of events) {
+      if ((event.seq ?? 0) <= sinceSeq) continue;
+      if (event.event === 'turn/started' && event.turn_id) {
+        recentTurnIds.add(event.turn_id);
+      }
+    }
+
+    return events.filter((event) => {
+      if ((event.seq ?? 0) <= sinceSeq) return false;
+      const turnId = event?.turn_id ?? '';
+      if (!turnId) return true;
+      if (recentTurnIds.has(turnId)) return true;
+      return openTurnIds.has(turnId);
+    });
   }
 
   async #hydrateSessionHistory(sessionId) {
@@ -666,6 +788,66 @@ export class BridgeServer extends EventEmitter {
     return events;
   }
 
+  async #buildContentEntriesFromRolloutFile(sessionId, filePath, threadId = sessionId) {
+    const raw = await fs.readFile(filePath, 'utf8');
+    const lines = raw.split('\n').map((line) => line.trim()).filter(Boolean);
+    const entries = [];
+    let currentTurnId = null;
+    let currentItemSeq = 0;
+
+    for (const line of lines) {
+      const record = safeJsonLineParse(line);
+      if (!record || typeof record !== 'object') continue;
+      const payload = record.payload ?? {};
+      if (record.type !== 'event_msg') continue;
+
+      switch (payload.type) {
+        case 'task_started':
+          currentTurnId = payload.turn_id ?? currentTurnId;
+          currentItemSeq = 0;
+          break;
+        case 'user_message': {
+          const text = String(payload.message ?? '').trim();
+          if (!text) break;
+          entries.push({
+            type: 'item',
+            session_id: sessionId,
+            thread_id: threadId,
+            turn_id: currentTurnId,
+            item: {
+              type: 'userMessage',
+              id: currentTurnId ? `rollout_${currentTurnId}_user` : `rollout_${sessionId}_user`,
+              content: [{ type: 'text', text }],
+            },
+          });
+          break;
+        }
+        case 'agent_message': {
+          const text = String(payload.message ?? '').trim();
+          if (!text) break;
+          entries.push({
+            type: 'item',
+            session_id: sessionId,
+            thread_id: threadId,
+            turn_id: currentTurnId,
+            item: {
+              type: 'agentMessage',
+              id: currentTurnId ? `rollout_${currentTurnId}_${String(++currentItemSeq).padStart(4, '0')}` : `rollout_${sessionId}_${String(++currentItemSeq).padStart(4, '0')}`,
+              text,
+              phase: null,
+              memoryCitation: null,
+            },
+          });
+          break;
+        }
+        default:
+          break;
+      }
+    }
+
+    return entries;
+  }
+
   async #loadHydrationThread(sessionId, session) {
     if (typeof this.backend.readThread === 'function') {
       try {
@@ -700,7 +882,7 @@ export class BridgeServer extends EventEmitter {
 
   async #buildEventsFromThread(sessionId, thread) {
     const rawThread = thread?.thread ?? thread;
-    const turns = Array.isArray(rawThread?.turns) ? rawThread.turns : [];
+    const turns = this.#sortTurnsForRendering(Array.isArray(rawThread?.turns) ? rawThread.turns : []);
     const threadId = rawThread?.id ?? rawThread?.threadId ?? rawThread?.sessionId ?? sessionId;
     const events = [];
 
@@ -765,6 +947,63 @@ export class BridgeServer extends EventEmitter {
     }
 
     return events;
+  }
+
+  async #buildContentEntriesFromThread(sessionId, thread) {
+    const rawThread = thread?.thread ?? thread;
+    const turns = this.#sortTurnsForRendering(Array.isArray(rawThread?.turns) ? rawThread.turns : []);
+    const threadId = rawThread?.id ?? rawThread?.threadId ?? rawThread?.sessionId ?? sessionId;
+    const entries = [];
+
+    for (const turn of turns) {
+      if (!turn?.id) continue;
+      const items = await this.#loadTurnItems(threadId, turn);
+      let turnItemSeq = 0;
+      for (const item of items) {
+        if (!item?.type) continue;
+        if (item.type !== 'userMessage' && item.type !== 'agentMessage' && item.type !== 'fileChange') {
+          continue;
+        }
+        const itemId = item.id ?? `turn_${turn.id}_item_${String(++turnItemSeq).padStart(4, '0')}`;
+        entries.push({
+          type: 'item',
+          session_id: sessionId,
+          thread_id: threadId,
+          turn_id: turn.id,
+          item: {
+            ...item,
+            id: itemId,
+          },
+        });
+      }
+
+      if (turn.status && turn.status !== 'completed' && turn.status !== 'inProgress') {
+        entries.push({
+          type: 'turn_status',
+          session_id: sessionId,
+          thread_id: threadId,
+          turn_id: turn.id,
+          status: turn.status,
+          error: turn.error ?? null,
+        });
+      }
+    }
+
+    return entries;
+  }
+
+  #sortTurnsForRendering(turns) {
+    return turns.slice().sort((left, right) => {
+      const leftStarted = Number(left?.startedAt ?? left?.createdAt ?? 0);
+      const rightStarted = Number(right?.startedAt ?? right?.createdAt ?? 0);
+      if (leftStarted !== rightStarted) return leftStarted - rightStarted;
+
+      const leftCompleted = Number(left?.completedAt ?? 0);
+      const rightCompleted = Number(right?.completedAt ?? 0);
+      if (leftCompleted !== rightCompleted) return leftCompleted - rightCompleted;
+
+      return String(left?.id ?? '').localeCompare(String(right?.id ?? ''));
+    });
   }
 
   async #loadTurnItems(threadId, turn) {
@@ -891,11 +1130,13 @@ export class BridgeServer extends EventEmitter {
   #eventSignature(event) {
     const payload = event?.payload ?? {};
     if (event?.event === 'item/completed' || event?.event === 'item/started') {
+      const item = this.#canonicalizeItemForSignature(payload?.item ?? {});
       return [
         event?.event ?? '',
         event?.turn_id ?? '',
-        payload?.item?.id ?? '',
-        JSON.stringify(payload?.item ?? {}),
+        item?.id ?? '',
+        item?.type ?? '',
+        JSON.stringify(item),
       ].join('|');
     }
     if (event?.event === 'item/commandExecution/requestApproval') {
@@ -904,6 +1145,14 @@ export class BridgeServer extends EventEmitter {
         event?.turn_id ?? '',
         event?.request_id ?? '',
         payload?.itemId ?? '',
+      ].join('|');
+    }
+    if (event?.event === 'turn/completed') {
+      return [
+        event?.event ?? '',
+        event?.turn_id ?? '',
+        payload?.status ?? payload?.turn?.status ?? '',
+        payload?.turn?.error?.message ?? payload?.error?.message ?? '',
       ].join('|');
     }
     return [
@@ -918,6 +1167,16 @@ export class BridgeServer extends EventEmitter {
       payload?.item?.id ?? '',
       payload?.item?.type ?? '',
     ].join('|');
+  }
+
+  #canonicalizeItemForSignature(item) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return item;
+    }
+    const normalized = clone(item);
+    delete normalized.phase;
+    delete normalized.memoryCitation;
+    return normalized;
   }
 }
 

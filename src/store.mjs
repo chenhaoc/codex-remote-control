@@ -58,6 +58,11 @@ export class StateStore {
     return this.state.sessions[sessionId]?.lastSeq ?? 0;
   }
 
+  getPendingApprovals(sessionId) {
+    const approvals = Object.values(this.state.sessions[sessionId]?.pending_approvals ?? {});
+    return clone(approvals).sort((a, b) => String(a.at ?? '').localeCompare(String(b.at ?? '')));
+  }
+
   async upsertSession(session) {
     const current = this.state.sessions[session.session_id] ?? {
       session_id: session.session_id,
@@ -110,6 +115,30 @@ export class StateStore {
     this.state.sessions[sessionId] = session;
     await this.save();
     return clone(stored);
+  }
+
+  async attachTurnIdToRequestEvent(sessionId, requestId, turnId) {
+    const session = this.state.sessions[sessionId];
+    if (!session || !requestId || !turnId) return null;
+    const events = session.events ?? [];
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (event?.event !== 'turn/input' || event?.request_id !== requestId) {
+        continue;
+      }
+      if (event.turn_id === turnId) {
+        return clone(event);
+      }
+      events[index] = {
+        ...event,
+        turn_id: turnId,
+      };
+      session.updatedAt = nowIso();
+      this.state.sessions[sessionId] = session;
+      await this.save();
+      return clone(events[index]);
+    }
+    return null;
   }
 
   async recordPendingApproval(sessionId, approval) {

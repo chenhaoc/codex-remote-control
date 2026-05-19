@@ -69,6 +69,147 @@ test('mock backend produces events and approval flow', async () => {
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test('bridge broadcasts stored seq values and backfills turn ids for synced user input', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-seq-test-'));
+
+  class SeqBackfillBackend extends EventEmitter {
+    constructor() {
+      super();
+      this.thread = this.#makeThread();
+    }
+
+    async start() {}
+
+    async stop() {}
+
+    async startThread(params = {}) {
+      this.thread = this.#makeThread({
+        name: params.title ?? 'Live session',
+        preview: params.title ?? 'Live session',
+        model: params.model ?? 'gpt-5',
+      });
+      return structuredClone(this.thread);
+    }
+
+    async startTurn(threadId, params = {}) {
+      this.thread = {
+        ...this.thread,
+        id: threadId,
+        sessionId: threadId,
+        turns: [{
+          id: 'turn_live_1',
+          items: [
+            {
+              type: 'userMessage',
+              id: 'item_user_live_1',
+              content: [{ type: 'text', text: params.text ?? '', text_elements: [] }],
+            },
+            {
+              type: 'agentMessage',
+              id: 'item_agent_live_1',
+              text: '收到',
+              phase: null,
+              memoryCitation: null,
+            },
+          ],
+          itemsView: 'full',
+          status: 'completed',
+          error: null,
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+        }],
+      };
+      return {
+        id: 'turn_live_1',
+        items: [],
+        itemsView: 'summary',
+        status: 'inProgress',
+        error: null,
+        startedAt: 10,
+        completedAt: null,
+        durationMs: null,
+      };
+    }
+
+    async readThread() {
+      return { thread: structuredClone(this.thread) };
+    }
+
+    async interruptTurn() {}
+
+    async respondRequest() {}
+
+    #makeThread(overrides = {}) {
+      return {
+        id: 'live_thread_1',
+        sessionId: 'live_thread_1',
+        forkedFromId: null,
+        preview: 'Live session',
+        ephemeral: false,
+        model: 'gpt-5',
+        modelProvider: 'custom',
+        createdAt: 1,
+        updatedAt: 2,
+        status: { type: 'idle' },
+        path: null,
+        cwd: '/tmp',
+        cliVersion: 'mock',
+        source: 'app-server',
+        threadSource: null,
+        agentNickname: null,
+        agentRole: null,
+        gitInfo: null,
+        name: 'Live session',
+        turns: [],
+        ...overrides,
+      };
+    }
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  const backend = new SeqBackfillBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'session.start', payload: { title: 'Live session', model: 'gpt-5' } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+  const sessionId = messages.find((m) => m.type === 'response' && m.id === '1').payload.session.session_id;
+
+  ws.send(JSON.stringify({ id: '2', type: 'turn.send', payload: { session_id: sessionId, text: '继续' } }));
+  await waitFor(() => messages.find((m) => m.type === 'event' && m.event === 'turn/input' && m.payload?.text === '继续'));
+  const liveTurnInput = messages.find((m) => m.type === 'event' && m.event === 'turn/input' && m.payload?.text === '继续');
+  assert.equal(typeof liveTurnInput.seq, 'number');
+  assert.ok(liveTurnInput.seq > 0);
+
+  await waitFor(() => {
+    const session = store.getSession(sessionId);
+    return session?.events?.some((event) => event.event === 'turn/input' && event.turn_id === 'turn_live_1');
+  });
+
+  ws.send(JSON.stringify({ id: '3', type: 'session.sync', payload: { session_id: sessionId, since_seq: 0 } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '3'));
+  const syncResponse = messages.find((m) => m.type === 'response' && m.id === '3');
+  const userInputs = syncResponse.payload.events.filter((event) => event.event === 'turn/input' && event.payload?.text === '继续');
+  assert.equal(userInputs.length, 1);
+  assert.equal(userInputs[0].turn_id, 'turn_live_1');
+  assert.ok(syncResponse.payload.events.some((event) => event.event === 'item/completed' && event.payload.item.id === 'item_agent_live_1'));
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 test('bridge resumes notLoaded threads before send and hydrates history', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-resume-test-'));
   const rolloutPath = path.join(dir, 'resume-thread.jsonl');
@@ -491,6 +632,169 @@ test('session sync returns incremental events with last_seq after refresh', asyn
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test('incremental session sync does not surface hydrated events from older turns', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-incremental-history-test-'));
+
+  class IncrementalHistoryBackend extends EventEmitter {
+    async start() {}
+
+    async stop() {}
+
+    async readThread() {
+      return { thread: this.#thread() };
+    }
+
+    #thread() {
+      return {
+        id: 'history_thread_1',
+        sessionId: 'history_thread_1',
+        forkedFromId: null,
+        preview: '历史补全',
+        ephemeral: false,
+        model: 'gpt-5',
+        modelProvider: 'custom',
+        createdAt: 1,
+        updatedAt: 2,
+        status: { type: 'idle' },
+        path: null,
+        cwd: '/tmp',
+        cliVersion: 'mock',
+        source: 'app-server',
+        threadSource: null,
+        agentNickname: null,
+        agentRole: null,
+        gitInfo: null,
+        name: '历史补全',
+        turns: [{
+          id: 'old_turn_1',
+          items: [
+            {
+              type: 'userMessage',
+              id: 'old_user_1',
+              content: [{ type: 'text', text: '旧问题', text_elements: [] }],
+            },
+            {
+              type: 'agentMessage',
+              id: 'old_agent_1',
+              text: '旧回答',
+              phase: null,
+              memoryCitation: null,
+            },
+          ],
+          itemsView: 'full',
+          status: 'completed',
+          error: null,
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+        }],
+      };
+    }
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  await store.load();
+  await store.upsertSession({
+    session_id: 'history_thread_1',
+    thread_id: 'history_thread_1',
+    title: '历史补全',
+    cwd: '/tmp',
+    model: 'gpt-5',
+    backend: 'mock',
+    preview: '历史补全',
+    active: true,
+    thread: {
+      id: 'history_thread_1',
+      sessionId: 'history_thread_1',
+      status: { type: 'idle' },
+      turns: [],
+    },
+  });
+  await store.appendEvent('history_thread_1', {
+    type: 'event',
+    event: 'turn/started',
+    session_id: 'history_thread_1',
+    thread_id: 'history_thread_1',
+    turn_id: 'old_turn_1',
+    payload: {
+      turn: { id: 'old_turn_1' },
+    },
+  });
+  await store.appendEvent('history_thread_1', {
+    type: 'event',
+    event: 'turn/completed',
+    session_id: 'history_thread_1',
+    thread_id: 'history_thread_1',
+    turn_id: 'old_turn_1',
+    payload: {
+      status: 'completed',
+      turn: { id: 'old_turn_1', status: 'completed' },
+    },
+  });
+  const currentEvent = await store.appendEvent('history_thread_1', {
+    type: 'event',
+    event: 'turn/input',
+    session_id: 'history_thread_1',
+    thread_id: 'history_thread_1',
+    turn_id: 'current_turn_1',
+    payload: {
+      text: '当前问题',
+      input: null,
+    },
+  });
+  await store.appendEvent('history_thread_1', {
+    type: 'event',
+    event: 'item/completed',
+    session_id: 'history_thread_1',
+    thread_id: 'history_thread_1',
+    turn_id: 'old_turn_1',
+    payload: {
+      item: {
+        type: 'agentMessage',
+        id: 'old_agent_1',
+        text: '旧回答',
+        phase: 'final_answer',
+        memoryCitation: null,
+      },
+    },
+  });
+
+  const backend = new IncrementalHistoryBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'session.sync', payload: { session_id: 'history_thread_1', since_seq: currentEvent.seq } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+  const incrementalSync = messages.find((m) => m.type === 'response' && m.id === '1');
+  assert.equal(incrementalSync.ok, true);
+  assert.deepEqual(incrementalSync.payload.events, []);
+  assert.equal(incrementalSync.payload.last_seq, store.getLastSeq('history_thread_1'));
+
+  ws.send(JSON.stringify({ id: '2', type: 'session.sync', payload: { session_id: 'history_thread_1', since_seq: 0 } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '2'));
+  const fullSync = messages.find((m) => m.type === 'response' && m.id === '2');
+  assert.equal(fullSync.ok, true);
+  assert.ok(fullSync.payload.events.some((event) => event.event === 'turn/input' && event.payload.text === '旧问题'));
+  assert.equal(
+    fullSync.payload.events.filter((event) => event.event === 'item/completed' && event.payload.item.id === 'old_agent_1' && event.payload.item.text === '旧回答').length,
+    1,
+  );
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 test('session sync merges hydrated items for a turn even when stored events already exist', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-merge-test-'));
 
@@ -625,6 +929,269 @@ test('session sync merges hydrated items for a turn even when stored events alre
   assert.ok(syncResponse.payload.events.some((event) => event.event === 'turn/input' && event.payload.text === '历史问题'));
   assert.ok(syncResponse.payload.events.some((event) => event.event === 'item/completed' && event.payload.item.id === 'merge_part_1' && event.payload.item.text === '第一段'));
   assert.ok(syncResponse.payload.events.some((event) => event.event === 'item/completed' && event.payload.item.id === 'merge_part_2' && event.payload.item.text === '第二段'));
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('session content returns final thread items and pending approvals in stable order', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-content-test-'));
+
+  class ContentBackend extends EventEmitter {
+    async start() {}
+
+    async stop() {}
+
+    async listThreads() {
+      return [this.#thread()];
+    }
+
+    async readThread() {
+      return { thread: this.#thread() };
+    }
+
+    #thread() {
+      return {
+        id: 'content_thread_1',
+        sessionId: 'content_thread_1',
+        forkedFromId: null,
+        preview: '内容快照',
+        ephemeral: false,
+        model: 'gpt-5',
+        modelProvider: 'custom',
+        createdAt: 1,
+        updatedAt: 2,
+        status: { type: 'idle' },
+        path: null,
+        cwd: '/tmp',
+        cliVersion: 'mock',
+        source: 'app-server',
+        threadSource: null,
+        agentNickname: null,
+        agentRole: null,
+        gitInfo: null,
+        name: '内容快照',
+        turns: [{
+          id: 'content_turn_1',
+          items: [
+            {
+              type: 'userMessage',
+              id: 'content_user_1',
+              content: [{ type: 'text', text: '你好', text_elements: [] }],
+            },
+            {
+              type: 'agentMessage',
+              id: 'content_agent_1',
+              text: '已收到',
+              phase: null,
+              memoryCitation: null,
+            },
+            {
+              type: 'fileChange',
+              id: 'content_file_1',
+              status: 'completed',
+              changes: [
+                {
+                  type: 'update',
+                  path: 'src/app.ts',
+                  unified_diff: '@@ -1 +1 @@\n-old\n+new\n',
+                },
+              ],
+            },
+          ],
+          itemsView: 'full',
+          status: 'completed',
+          error: null,
+          startedAt: 10,
+          completedAt: 11,
+          durationMs: 1,
+        }, {
+          id: 'content_turn_0',
+          items: [
+            {
+              type: 'userMessage',
+              id: 'content_user_0',
+              content: [{ type: 'text', text: '更早', text_elements: [] }],
+            },
+            {
+              type: 'agentMessage',
+              id: 'content_agent_0',
+              text: '更早回复',
+              phase: null,
+              memoryCitation: null,
+            },
+          ],
+          itemsView: 'full',
+          status: 'completed',
+          error: null,
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1,
+        }],
+      };
+    }
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  const backend = new ContentBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'session.list', payload: {} }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+
+  await store.recordPendingApproval('content_thread_1', {
+    request_id: 'approval_1',
+    request_method: 'item/commandExecution/requestApproval',
+    thread_id: 'content_thread_1',
+    turn_id: 'content_turn_1',
+    payload: {
+      command: 'echo hello',
+      availableDecisions: ['accept', 'decline'],
+    },
+    at: '2026-01-01T00:00:00.000Z',
+  });
+
+  ws.send(JSON.stringify({ id: '2', type: 'session.content', payload: { session_id: 'content_thread_1' } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '2'));
+
+  const contentResponse = messages.find((m) => m.type === 'response' && m.id === '2');
+  assert.equal(contentResponse.ok, true);
+  assert.deepEqual(
+    contentResponse.payload.entries.map((entry) => entry.item?.type ?? entry.type),
+    ['userMessage', 'agentMessage', 'userMessage', 'agentMessage', 'fileChange'],
+  );
+  assert.equal(contentResponse.payload.entries[0].item.id, 'content_user_0');
+  assert.equal(contentResponse.payload.entries[1].item.id, 'content_agent_0');
+  assert.equal(contentResponse.payload.entries[2].item.id, 'content_user_1');
+  assert.equal(contentResponse.payload.entries[3].item.id, 'content_agent_1');
+  assert.equal(contentResponse.payload.entries[4].item.id, 'content_file_1');
+  assert.equal(contentResponse.payload.pending_approvals.length, 1);
+  assert.equal(contentResponse.payload.pending_approvals[0].request_id, 'approval_1');
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('bridge emits session changed notifications for turn sends', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-session-changed-test-'));
+
+  class SessionChangedBackend extends EventEmitter {
+    constructor() {
+      super();
+      this.thread = this.#thread();
+    }
+
+    async start() {}
+
+    async stop() {}
+
+    async startThread() {
+      return structuredClone(this.thread);
+    }
+
+    async startTurn(threadId, params = {}) {
+      this.thread = {
+        ...this.thread,
+        id: threadId,
+        sessionId: threadId,
+        turns: [{
+          id: 'session_changed_turn_1',
+          items: [{
+            type: 'userMessage',
+            id: 'session_changed_user_1',
+            content: [{ type: 'text', text: params.text ?? '', text_elements: [] }],
+          }],
+          itemsView: 'full',
+          status: 'inProgress',
+          error: null,
+          startedAt: 1,
+          completedAt: null,
+          durationMs: null,
+        }],
+      };
+      return {
+        id: 'session_changed_turn_1',
+        items: [],
+        itemsView: 'summary',
+        status: 'inProgress',
+        error: null,
+        startedAt: 1,
+        completedAt: null,
+        durationMs: null,
+      };
+    }
+
+    async readThread() {
+      return { thread: structuredClone(this.thread) };
+    }
+
+    async interruptTurn() {}
+
+    async respondRequest() {}
+
+    #thread() {
+      return {
+        id: 'session_changed_thread_1',
+        sessionId: 'session_changed_thread_1',
+        forkedFromId: null,
+        preview: '变化通知',
+        ephemeral: false,
+        model: 'gpt-5',
+        modelProvider: 'custom',
+        createdAt: 1,
+        updatedAt: 2,
+        status: { type: 'idle' },
+        path: null,
+        cwd: '/tmp',
+        cliVersion: 'mock',
+        source: 'app-server',
+        threadSource: null,
+        agentNickname: null,
+        agentRole: null,
+        gitInfo: null,
+        name: '变化通知',
+        turns: [],
+      };
+    }
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  const backend = new SessionChangedBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'session.start', payload: { title: '变化通知', model: 'gpt-5' } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+  const sessionId = messages.find((m) => m.type === 'response' && m.id === '1').payload.session.session_id;
+
+  ws.send(JSON.stringify({ id: '2', type: 'turn.send', payload: { session_id: sessionId, text: 'hello' } }));
+  await waitFor(() => messages.find((m) => m.type === 'event' && m.event === 'session/changed' && m.session_id === sessionId));
+
+  const changedEvent = messages.find((m) => m.type === 'event' && m.event === 'session/changed' && m.session_id === sessionId);
+  assert.equal(changedEvent.payload.last_seq > 0, true);
 
   ws.close();
   await once(ws, 'close');
