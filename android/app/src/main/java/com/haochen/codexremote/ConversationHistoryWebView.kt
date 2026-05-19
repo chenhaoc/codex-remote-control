@@ -89,7 +89,6 @@ internal fun ConversationHistoryWebView(
     items: List<ConversationItem>,
     sessionId: String?,
     followBottom: Boolean,
-    onApprovalDecision: (requestId: String, decision: String, itemId: String) -> Unit,
     restoreScrollY: Int? = null,
     onScrollRestored: () -> Unit = {},
     onOpenCodeBrowser: (itemId: String, scrollY: Int) -> Unit,
@@ -111,7 +110,6 @@ internal fun ConversationHistoryWebView(
         buildConversationWebView(
             context = context,
             onOpenLink = { url -> uriHandler.openUri(url) },
-            onApprovalDecision = onApprovalDecision,
             onOpenCodeBrowser = onOpenCodeBrowser,
             onPageFinished = { view ->
                 val targetMode = pendingScrollMode
@@ -171,7 +169,6 @@ private fun isConversationNearBottom(webView: WebView): Boolean {
 private fun buildConversationWebView(
     context: Context,
     onOpenLink: (String) -> Unit,
-    onApprovalDecision: (requestId: String, decision: String, itemId: String) -> Unit,
     onOpenCodeBrowser: (itemId: String, scrollY: Int) -> Unit,
     onPageFinished: (WebView) -> Unit,
 ): WebView =
@@ -202,7 +199,7 @@ private fun buildConversationWebView(
                     request: WebResourceRequest?,
                 ): Boolean {
                     val url = request?.url?.toString() ?: return false
-                    return handleConversationUrl(url, view?.scrollY ?: 0, onOpenLink, onApprovalDecision, onOpenCodeBrowser)
+                    return handleConversationUrl(url, view?.scrollY ?: 0, onOpenLink, onOpenCodeBrowser)
                 }
 
                 @Deprecated("Deprecated in Java")
@@ -211,7 +208,7 @@ private fun buildConversationWebView(
                     url: String?,
                 ): Boolean {
                     if (url.isNullOrBlank()) return false
-                    return handleConversationUrl(url, view?.scrollY ?: 0, onOpenLink, onApprovalDecision, onOpenCodeBrowser)
+                    return handleConversationUrl(url, view?.scrollY ?: 0, onOpenLink, onOpenCodeBrowser)
                 }
 
                 override fun onPageFinished(
@@ -228,19 +225,9 @@ private fun handleConversationUrl(
     rawUrl: String,
     currentScrollY: Int,
     onOpenLink: (String) -> Unit,
-    onApprovalDecision: (requestId: String, decision: String, itemId: String) -> Unit,
     onOpenCodeBrowser: (itemId: String, scrollY: Int) -> Unit,
 ): Boolean {
     val uri = Uri.parse(rawUrl)
-    if (uri.scheme == "codex-approval") {
-        val requestId = uri.getQueryParameter("requestId").orEmpty()
-        val decision = uri.getQueryParameter("decision").orEmpty()
-        val itemId = uri.getQueryParameter("itemId").orEmpty()
-        if (requestId.isNotBlank() && decision.isNotBlank() && itemId.isNotBlank()) {
-            onApprovalDecision(requestId, decision, itemId)
-        }
-        return true
-    }
     if (uri.scheme == "codex-code-browser") {
         val itemId = uri.getQueryParameter("itemId").orEmpty()
         if (itemId.isNotBlank()) {
@@ -304,7 +291,6 @@ private fun buildConversationItemsHtml(items: List<ConversationItem>): String =
             when (item) {
                 is ConversationItem.Bubble -> append(item.toHtml())
                 is ConversationItem.SystemNote -> append(item.toHtml())
-                is ConversationItem.Approval -> append(item.toHtml())
                 is ConversationItem.FileChange -> append(item.toHtml())
             }
         }
@@ -332,37 +318,6 @@ private fun ConversationItem.SystemNote.toHtml(): String =
         <div class="cr-note">${buildPlainTextHtml(text)}</div>
     </div>
     """.trimIndent()
-
-private fun ConversationItem.Approval.toHtml(): String {
-    val actions =
-        availableDecisions.joinToString("") { decision ->
-            val label =
-                when (decision) {
-                    "accept" -> "接受"
-                    "decline" -> "拒绝"
-                    "cancel" -> "取消"
-                    else -> decision
-                }
-            val href =
-                buildString {
-                    append("codex-approval://respond?")
-                    append("requestId=${encodeUrlComponent(requestId)}")
-                    append("&decision=${encodeUrlComponent(decision)}")
-                    append("&itemId=${encodeUrlComponent(id)}")
-                }
-            """<a class="cr-approval-action" href="$href">${escapeConversationHtml(label)}</a>"""
-        }
-    return """
-        <div class="cr-message assistant">
-                <div class="cr-bubble approval">
-                    <div class="cr-approval-title">${escapeConversationHtml(title)}</div>
-                    <div class="cr-approval-detail">${buildPlainTextHtml(detail)}</div>
-                ${buildConversationDiffDetailsHtml(diffEntries, null, defaultLabel = "点击查看文件 diff", browserItemId = id)}
-                <div class="cr-approval-actions">$actions</div>
-            </div>
-        </div>
-    """.trimIndent()
-}
 
 private fun ConversationItem.FileChange.toHtml(): String {
     val diffStats = buildConversationDiffStatsLine(diffEntries, fallbackDiff)

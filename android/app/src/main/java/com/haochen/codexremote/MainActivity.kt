@@ -100,6 +100,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import java.io.IOException
@@ -152,13 +153,13 @@ class MainActivity : ComponentActivity() {
     private val availableModels = mutableStateListOf<ModelInfo>()
     private val conversationItems = mutableStateListOf<ConversationItem>()
     private val assistantItemIds = mutableMapOf<String, String>()
-    private val approvalItemIds = mutableMapOf<String, String>()
     private val toolItemIds = mutableMapOf<String, String>()
     private val fileChangeItemIds = mutableMapOf<String, String>()
     private val fileChangeTurnIds = mutableMapOf<String, String>()
     private val turnDiffItemIds = mutableMapOf<String, String>()
     private val turnDiffs = mutableMapOf<String, String>()
     private val connectionHistory = mutableStateListOf<BridgeHistoryEntry>()
+    private val pendingApprovals = mutableStateListOf<ApprovalDialogState>()
     private val codeBrowserFileCache =
         object : LinkedHashMap<String, CodeBrowserFileContent>(CODE_BROWSER_FILE_CACHE_SIZE, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CodeBrowserFileContent>?): Boolean {
@@ -194,6 +195,7 @@ class MainActivity : ComponentActivity() {
     private var bootSyncRequested = false
     private var lastSyncedSeq = 0
     private var syncInFlight = false
+    private var sessionContentDirty = false
 
     private val syncRunnable = object : Runnable {
         override fun run() {
@@ -202,7 +204,7 @@ class MainActivity : ComponentActivity() {
                 syncInFlight = false
                 return
             }
-            requestSessionSync(sessionId, incremental = true)
+            requestSessionContent(sessionId)
             mainHandler.postDelayed(this, 1500L)
         }
     }
@@ -372,6 +374,18 @@ class MainActivity : ComponentActivity() {
                         },
                     )
                 }
+            }
+
+            pendingApprovals.firstOrNull()?.let { approval ->
+                ApprovalDialog(
+                    approval = approval,
+                    onDecision = { action ->
+                        sendApproval(approval.requestId, action)
+                    },
+                    onDismiss = {
+                        showNotice("还有待处理审批，请先完成后再继续")
+                    },
+                )
             }
         }
     }
@@ -1027,9 +1041,6 @@ class MainActivity : ComponentActivity() {
                         items = conversationItems,
                         sessionId = activeSessionId,
                         followBottom = activeTurnId != null,
-                        onApprovalDecision = { requestId, decision, itemId ->
-                            sendApproval(requestId, decision, itemId)
-                        },
                         restoreScrollY = chatRestoreScrollY,
                         onScrollRestored = {
                             chatRestoreScrollY = null
@@ -1097,6 +1108,79 @@ class MainActivity : ComponentActivity() {
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,
                     )
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun ApprovalDialog(
+        approval: ApprovalDialogState,
+        onDecision: (ApprovalAction) -> Unit,
+        onDismiss: () -> Unit,
+    ) {
+        Dialog(onDismissRequest = onDismiss) {
+            Surface(
+                shape = RoundedCornerShape(24.dp),
+                color = uiSurface,
+                tonalElevation = 6.dp,
+                shadowElevation = 10.dp,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    Text(
+                        text = approval.title,
+                        color = uiText,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    approval.detail.takeIf { it.isNotBlank() }?.let { detail ->
+                        Text(
+                            text = detail,
+                            color = uiMuted,
+                            fontSize = 14.sp,
+                            lineHeight = 20.sp,
+                        )
+                    }
+                    if (approval.diffEntries.isNotEmpty()) {
+                        Text(
+                            text = "涉及文件: ${approval.diffEntries.size} 个",
+                            color = uiMuted,
+                            fontSize = 13.sp,
+                        )
+                    }
+                    HorizontalDivider(color = uiBorder.copy(alpha = 0.8f))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                    ) {
+                        approval.actions.forEach { action ->
+                            val accepted = action.isPrimary
+                            val buttonColors =
+                                if (accepted) {
+                                    ButtonDefaults.buttonColors(containerColor = uiPrimary, contentColor = Color.White)
+                                } else {
+                                    ButtonDefaults.outlinedButtonColors(contentColor = uiText)
+                                }
+                            if (accepted) {
+                                Button(onClick = { onDecision(action) }, colors = buttonColors) {
+                                    Text(action.label)
+                                }
+                            } else {
+                                OutlinedButton(
+                                    onClick = { onDecision(action) },
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = uiText),
+                                ) {
+                                    Text(action.label)
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1707,6 +1791,8 @@ class MainActivity : ComponentActivity() {
         bridgeClient = null
         connected = false
         activeTurnId = null
+        sessionContentDirty = false
+        pendingApprovals.clear()
         pendingRequests.clear()
         currentBridgeUrl = null
         selectedWorkspace = null
@@ -1753,6 +1839,8 @@ class MainActivity : ComponentActivity() {
                 mainHandler.post {
                     connected = false
                     activeTurnId = null
+                    sessionContentDirty = false
+                    pendingApprovals.clear()
                     pendingRequests.clear()
                     stopSessionSyncLoop()
                     bridgeClient = null
@@ -1846,7 +1934,19 @@ class MainActivity : ComponentActivity() {
             if (info != null) {
                 upsertSession(info)
                 if (activeSessionId == null) {
-                    selectSession(info.sessionId, syncHistory = false)
+                    selectSession(info.sessionId, syncHistory = true)
+                }
+            }
+            return
+        }
+
+        if (eventName == "session/changed") {
+            val sessionId = message.optString("session_id", "")
+            if (sessionId.isNotBlank() && sessionId == activeSessionId) {
+                if (syncInFlight) {
+                    sessionContentDirty = true
+                } else {
+                    requestSessionContent(sessionId)
                 }
             }
             return
@@ -1859,10 +1959,7 @@ class MainActivity : ComponentActivity() {
 
         when (eventName) {
             "turn/input" -> {
-                val text = payload.optString("text", "").trim()
-                if (text.isNotEmpty()) {
-                    appendBubble(text, right = true, backgroundColor = 0xFF1A8F55.toInt(), textColor = AndroidColor.WHITE)
-                }
+                Unit
             }
 
             "turn/started" -> {
@@ -1875,46 +1972,29 @@ class MainActivity : ComponentActivity() {
 
             "item/agentMessage/delta" -> {
                 updateLiveTurnStatus("Codex 正在输出…")
-                handleAssistantDelta(message, payload)
-            }
-            "rawResponseItem/completed" -> {
-                handleRawResponseItem(message, payload)
             }
             "item/commandExecution/requestApproval",
             "item/fileChange/requestApproval",
             "item/permissions/requestApproval",
             "applyPatchApproval",
-            "execCommandApproval" -> handleApprovalRequest(eventName, message, payload)
+            "execCommandApproval" -> {
+                updateLiveTurnStatus("等待审批…")
+                handleApprovalRequest(eventName, message, payload)
+            }
             "item/fileChange/patchUpdated" -> {
                 updateLiveTurnStatus("Codex 正在修改文件…")
-                handleFileChangePatchUpdated(message, payload)
             }
             "turn/diff/updated" -> {
                 updateLiveTurnStatus("Codex 正在修改文件…")
-                handleTurnDiffUpdated(message, payload)
             }
             "item/started", "item/completed" -> {
                 updateLiveTurnStatusFromItem(eventName, payload.optJSONObject("item"))
-                handleThreadItemEvent(eventName, payload)
             }
             "warning" -> updateLiveTurnStatusFromWarning(payload)
             "error" -> updateLiveTurnStatusFromError(payload)
             "thread/status/changed" -> updateLiveTurnStatusFromThreadStatus(payload.optJSONObject("status"))
             "turn/completed" -> {
-                val turn = payload.optJSONObject("turn")
-                val status = turn?.optString("status", "completed") ?: payload.optString("status", "completed")
-                val errorText = extractErrorText(turn?.optJSONObject("error"))
-                if (status == "failed" || status == "interrupted" || errorText.isNotBlank()) {
-                    appendSystemNote(
-                        buildString {
-                            append("当前回合结束: $status")
-                            if (errorText.isNotBlank()) {
-                                append('\n')
-                                append(errorText)
-                            }
-                        },
-                    )
-                }
+                removeCompletedTurnApprovalItems(message.optString("turn_id", ""))
                 if (activeTurnId != null && activeTurnId == message.optString("turn_id", "")) {
                     activeTurnId = null
                 }
@@ -1950,39 +2030,39 @@ class MainActivity : ComponentActivity() {
 
     private fun handleApprovalRequest(eventName: String, message: JSONObject, payload: JSONObject) {
         val requestId = firstNonEmpty(message.optString("request_id", ""), message.optString("id", ""))
-        if (requestId.isBlank() || approvalItemIds.containsKey(requestId)) return
+        if (requestId.isBlank()) return
 
-        val decisions = payload.optJSONArray("availableDecisions").toDecisionList()
         val presentation = buildApprovalPresentation(eventName, payload)
-        val item = ConversationItem.Approval(
-            id = "approval_${UUID.randomUUID()}",
-            requestId = requestId,
-            title = presentation.title,
-            detail = presentation.detail,
-            availableDecisions = decisions.ifEmpty { listOf("accept", "decline") },
-            diffEntries = presentation.diffEntries,
+        upsertPendingApproval(
+            ApprovalDialogState(
+                requestId = requestId,
+                title = presentation.title,
+                detail = presentation.detail,
+                actions = buildApprovalActions(eventName, payload),
+                diffEntries = presentation.diffEntries,
+                turnId = extractExplicitTurnKey(message, payload).takeIf { it.isNotBlank() },
+            ),
         )
-        approvalItemIds[requestId] = item.id
-        conversationItems.add(item)
     }
 
-    private fun sendApproval(requestId: String, decision: String, itemId: String) {
+    private fun sendApproval(requestId: String, action: ApprovalAction) {
         val payload = JSONObject().apply {
             put("session_id", activeSessionId ?: "")
             put("request_id", requestId)
-            put("decision", decision)
+            action.responsePayload.keys().forEach { key ->
+                put(key, cloneJsonValue(action.responsePayload.opt(key)))
+            }
         }
 
         if (!sendRequest("approval.response", payload, object : ResponseHandler {
             override fun onResponse(response: JSONObject) {
                 appendSystemNote("审批结果已提交")
-                approvalItemIds.remove(requestId)
-                removeConversationItem(itemId)
+                removePendingApproval(requestId)
             }
         })) {
             appendSystemNote("审批发送失败")
         } else {
-            appendSystemNote("已发送审批: $decision")
+            appendSystemNote("已发送审批: ${action.label}")
         }
     }
 
@@ -2124,61 +2204,97 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun requestSessionSync(sessionId: String) {
-        requestSessionSync(sessionId, incremental = false)
-    }
-
-    private fun requestSessionSync(sessionId: String, incremental: Boolean) {
+    private fun requestSessionContent(sessionId: String) {
         if (sessionId.isBlank()) return
         if (!ensureConnected()) return
-        if (incremental && syncInFlight) return
-        if (!incremental) {
-            clearConversation()
+        if (syncInFlight) {
+            sessionContentDirty = true
+            return
         }
-        syncInFlight = incremental
+        syncInFlight = true
+        val requestedSessionId = sessionId
         val payload = JSONObject().apply {
             put("session_id", sessionId)
-            put("since_seq", if (incremental) lastSyncedSeq else 0)
         }
 
-        sendRequest("session.sync", payload) { response ->
-            syncInFlight = false
-            val responsePayload = response.optJSONObject("payload")
-            lastSyncedSeq = maxOf(lastSyncedSeq, responsePayload?.optInt("last_seq", lastSyncedSeq) ?: lastSyncedSeq)
-            val events = responsePayload?.optJSONArray("events")
-            if (events == null || events.length() == 0) {
-                if (!incremental) {
-                    appendSystemNote("这个会话暂时没有本地同步消息")
-                }
-                return@sendRequest
+        if (!sendRequest("session.content", payload, object : ResponseHandler {
+            override fun onResponse(response: JSONObject) {
+                syncInFlight = false
+                val responsePayload = response.optJSONObject("payload")
+                applySessionContentSnapshot(responsePayload)
+                flushPendingSessionRefresh(requestedSessionId)
             }
-            for (i in 0 until events.length()) {
-                events.optJSONObject(i)?.let { renderHistoricalEvent(it) }
+
+            override fun onError(errorText: String) {
+                syncInFlight = false
+                flushPendingSessionRefresh(requestedSessionId)
+            }
+        })) {
+            syncInFlight = false
+        }
+    }
+
+    private fun flushPendingSessionRefresh(sessionId: String) {
+        if (!sessionContentDirty) return
+        if (!connected || activeSessionId != sessionId) return
+        sessionContentDirty = false
+        mainHandler.post { requestSessionContent(sessionId) }
+    }
+
+    private fun applySessionContentSnapshot(payload: JSONObject?) {
+        val snapshotItems = buildConversationItemsFromSnapshot(payload)
+        val snapshotApprovals = buildPendingApprovalsFromSnapshot(payload)
+        if (snapshotItems.isEmpty() && snapshotApprovals.isEmpty() && conversationItems.isNotEmpty()) {
+            return
+        }
+        assistantItemIds.clear()
+        toolItemIds.clear()
+        fileChangeItemIds.clear()
+        fileChangeTurnIds.clear()
+        turnDiffItemIds.clear()
+        turnDiffs.clear()
+
+        conversationItems.clear()
+        conversationItems.addAll(snapshotItems)
+        replacePendingApprovals(snapshotApprovals)
+
+        snapshotItems.forEach { item ->
+            when (item) {
+                is ConversationItem.FileChange -> {
+                    item.sourceItemId?.takeIf { it.isNotBlank() }?.let { sourceId ->
+                        fileChangeItemIds[sourceId] = item.id
+                    }
+                    item.turnId?.takeIf { it.isNotBlank() }?.let { turnId ->
+                        item.sourceItemId?.takeIf { it.isNotBlank() }?.let { sourceId -> fileChangeTurnIds[sourceId] = turnId }
+                    }
+                }
+                else -> Unit
+            }
+        }
+
+        codeBrowserState?.let { state ->
+            if (!state.conversationItemId.startsWith("approval_") && snapshotItems.none { it.id == state.conversationItemId }) {
+                codeBrowserState = null
             }
         }
     }
 
-    private fun renderHistoricalEvent(event: JSONObject) {
-        when (event.optString("event", "")) {
-            "turn/input",
-            "turn/started",
-            "item/agentMessage/delta",
-            "rawResponseItem/completed",
-            "item/commandExecution/requestApproval",
-            "item/fileChange/requestApproval",
-            "item/permissions/requestApproval",
-            "applyPatchApproval",
-            "execCommandApproval",
-            "item/fileChange/patchUpdated",
-            "turn/diff/updated",
-            "turn/completed",
-            "thread/started",
-            "item/started",
-            "item/completed",
-            "warning",
-            "error",
-            "thread/status/changed" -> handleEvent(event)
+    private fun replacePendingApprovals(approvals: List<ApprovalDialogState>) {
+        pendingApprovals.clear()
+        pendingApprovals.addAll(approvals)
+    }
+
+    private fun upsertPendingApproval(approval: ApprovalDialogState) {
+        val index = pendingApprovals.indexOfFirst { it.requestId == approval.requestId }
+        if (index >= 0) {
+            pendingApprovals[index] = approval
+        } else {
+            pendingApprovals.add(approval)
         }
+    }
+
+    private fun removePendingApproval(requestId: String) {
+        pendingApprovals.removeAll { it.requestId == requestId }
     }
 
     private fun selectSession(sessionId: String, syncHistory: Boolean) {
@@ -2190,7 +2306,7 @@ class MainActivity : ComponentActivity() {
             ?.let { selectModel(it) }
         clearConversation()
         if (syncHistory) {
-            requestSessionSync(sessionId)
+            requestSessionContent(sessionId)
         }
         startSessionSyncLoop()
     }
@@ -2211,7 +2327,6 @@ class MainActivity : ComponentActivity() {
     private fun clearConversation() {
         conversationItems.clear()
         assistantItemIds.clear()
-        approvalItemIds.clear()
         toolItemIds.clear()
         fileChangeItemIds.clear()
         fileChangeTurnIds.clear()
@@ -2223,6 +2338,8 @@ class MainActivity : ComponentActivity() {
         codeBrowserState = null
         lastSyncedSeq = 0
         syncInFlight = false
+        sessionContentDirty = false
+        pendingApprovals.clear()
     }
 
     private fun appendSystemNote(text: String) {
@@ -2234,7 +2351,33 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun appendBubble(text: String, right: Boolean, backgroundColor: Int, textColor: Int) {
+    private fun appendBubble(
+        text: String,
+        right: Boolean,
+        backgroundColor: Int,
+        textColor: Int,
+        turnKey: String? = null,
+    ) {
+        val normalizedTurnKey = turnKey?.trim()?.takeIf { it.isNotBlank() }
+        if (right) {
+            val latestUserBubble = conversationItems.asReversed().firstOrNull { item ->
+                (item as? ConversationItem.Bubble)?.right == true
+            } as? ConversationItem.Bubble
+            if (latestUserBubble != null && normalizeAssistantText(latestUserBubble.text) == normalizeAssistantText(text)) {
+                val existingTurnKey = latestUserBubble.turnKey.orEmpty()
+                val incomingTurnKey = normalizedTurnKey.orEmpty()
+                if (existingTurnKey == incomingTurnKey || existingTurnKey.isBlank() || incomingTurnKey.isBlank()) {
+                    replaceConversationItem(latestUserBubble.id) { item ->
+                        if (item is ConversationItem.Bubble) {
+                            item.copy(turnKey = normalizedTurnKey ?: item.turnKey)
+                        } else {
+                            item
+                        }
+                    }
+                    return
+                }
+            }
+        }
         conversationItems.add(
             ConversationItem.Bubble(
                 id = "msg_${UUID.randomUUID()}",
@@ -2242,6 +2385,7 @@ class MainActivity : ComponentActivity() {
                 text = text,
                 backgroundColor = backgroundColor,
                 textColor = textColor,
+                turnKey = normalizedTurnKey,
             ),
         )
     }
@@ -2263,6 +2407,18 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun removeCompletedTurnApprovalItems(turnId: String) {
+        val normalizedTurnId = turnId.trim()
+        if (pendingApprovals.isEmpty()) return
+
+        if (normalizedTurnId.isBlank()) {
+            pendingApprovals.clear()
+            return
+        }
+
+        pendingApprovals.removeAll { approval -> approval.turnId == normalizedTurnId }
+    }
+
     private fun openCodeBrowser(itemId: String, scrollY: Int) {
         val sessionId = activeSessionId
         val item = conversationItems.firstOrNull { it.id == itemId }
@@ -2275,16 +2431,6 @@ class MainActivity : ComponentActivity() {
                         title = item.title,
                         diffEntries = item.diffEntries,
                         fallbackDiff = item.fallbackDiff,
-                        selectedPath = item.diffEntries.firstOrNull()?.browsePath(),
-                    )
-
-                is ConversationItem.Approval ->
-                    CodeBrowserState(
-                        conversationItemId = item.id,
-                        sessionId = sessionId,
-                        title = item.title,
-                        diffEntries = item.diffEntries,
-                        fallbackDiff = null,
                         selectedPath = item.diffEntries.firstOrNull()?.browsePath(),
                     )
 
@@ -2702,6 +2848,241 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private fun buildApprovalActions(eventName: String, payload: JSONObject): List<ApprovalAction> {
+        if (eventName == "item/permissions/requestApproval") {
+            val permissions = payload.optJSONObject("permissions") ?: JSONObject()
+            return listOf(
+                ApprovalAction(
+                    label = "本回合允许",
+                    responsePayload = JSONObject().apply {
+                        put("permissions", cloneJsonValue(permissions))
+                        put("scope", "turn")
+                    },
+                    isPrimary = true,
+                ),
+                ApprovalAction(
+                    label = "本会话允许",
+                    responsePayload = JSONObject().apply {
+                        put("permissions", cloneJsonValue(permissions))
+                        put("scope", "session")
+                    },
+                ),
+                ApprovalAction(
+                    label = "拒绝",
+                    responsePayload = JSONObject().apply {
+                        put("error", "declined by user")
+                    },
+                ),
+            )
+        }
+
+        val available = payload.optJSONArray("availableDecisions")
+        val rawActions =
+            if (available != null && available.length() > 0) {
+                buildList {
+                    for (i in 0 until available.length()) {
+                        buildApprovalActionFromRawDecision(eventName, available.opt(i))?.let(::add)
+                    }
+                }
+            } else {
+                emptyList()
+            }
+        if (rawActions.isNotEmpty()) return rawActions
+
+        return when (eventName) {
+            "execCommandApproval", "applyPatchApproval" -> listOf(
+                ApprovalAction(
+                    label = "接受",
+                    responsePayload = JSONObject().put("decision", "approved"),
+                    isPrimary = true,
+                ),
+                ApprovalAction(
+                    label = "拒绝",
+                    responsePayload = JSONObject().put("decision", "denied"),
+                ),
+            )
+            else -> listOf(
+                ApprovalAction(
+                    label = "接受",
+                    responsePayload = JSONObject().put("decision", "accept"),
+                    isPrimary = true,
+                ),
+                ApprovalAction(
+                    label = "拒绝",
+                    responsePayload = JSONObject().put("decision", "decline"),
+                ),
+            )
+        }
+    }
+
+    private fun buildApprovalActionFromRawDecision(eventName: String, rawDecision: Any?): ApprovalAction? {
+        val label = labelApprovalDecision(eventName, rawDecision) ?: return null
+        return ApprovalAction(
+            label = label,
+            responsePayload = JSONObject().put("decision", cloneJsonValue(rawDecision)),
+            isPrimary = isPrimaryApprovalDecision(rawDecision),
+        )
+    }
+
+    private fun labelApprovalDecision(eventName: String, rawDecision: Any?): String? {
+        val decisionKey =
+            when (rawDecision) {
+                is JSONObject -> rawDecision.keys().asSequence().firstOrNull().orEmpty()
+                is String -> rawDecision
+                else -> ""
+            }
+        if (decisionKey.isBlank()) return null
+        return when (decisionKey) {
+            "accept", "approved" -> "接受"
+            "acceptForSession", "approved_for_session" -> "本会话允许"
+            "decline", "denied" -> "拒绝"
+            "cancel", "abort", "timed_out" -> "取消"
+            "acceptWithExecpolicyAmendment", "approved_execpolicy_amendment" -> "接受并记住规则"
+            "applyNetworkPolicyAmendment", "network_policy_amendment" -> "应用网络规则"
+            else -> if (eventName == "item/permissions/requestApproval") "允许" else decisionKey
+        }
+    }
+
+    private fun isPrimaryApprovalDecision(rawDecision: Any?): Boolean {
+        return when (rawDecision) {
+            is String -> rawDecision == "accept" || rawDecision == "approved" || rawDecision == "acceptForSession" || rawDecision == "approved_for_session"
+            is JSONObject -> {
+                val key = rawDecision.keys().asSequence().firstOrNull().orEmpty()
+                key == "acceptWithExecpolicyAmendment"
+                    || key == "applyNetworkPolicyAmendment"
+                    || key == "approved_execpolicy_amendment"
+                    || key == "network_policy_amendment"
+            }
+            else -> false
+        }
+    }
+
+    private fun cloneJsonValue(value: Any?): Any? {
+        return when (value) {
+            null -> null
+            is JSONObject -> JSONObject(value.toString())
+            is JSONArray -> JSONArray(value.toString())
+            else -> value
+        }
+    }
+
+    private fun buildConversationItemsFromSnapshot(payload: JSONObject?): List<ConversationItem> {
+        if (payload == null) return emptyList()
+        val items = mutableListOf<ConversationItem>()
+        payload.optJSONArray("entries")?.let { entries ->
+            for (i in 0 until entries.length()) {
+                val entry = entries.optJSONObject(i) ?: continue
+                buildConversationItemFromSnapshotEntry(entry)?.let(items::add)
+            }
+        }
+        return items
+    }
+
+    private fun buildPendingApprovalsFromSnapshot(payload: JSONObject?): List<ApprovalDialogState> {
+        if (payload == null) return emptyList()
+        val approvals = mutableListOf<ApprovalDialogState>()
+        payload.optJSONArray("pending_approvals")?.let { array ->
+            for (i in 0 until array.length()) {
+                val approval = array.optJSONObject(i) ?: continue
+                buildConversationApprovalFromSnapshot(approval)?.let(approvals::add)
+            }
+        }
+        return approvals
+    }
+
+    private fun buildConversationItemFromSnapshotEntry(entry: JSONObject): ConversationItem? {
+        return when (entry.optString("type", "")) {
+            "item" -> buildConversationSnapshotThreadItem(entry)
+            "turn_status" -> buildConversationSnapshotTurnStatus(entry)
+            else -> null
+        }
+    }
+
+    private fun buildConversationSnapshotThreadItem(entry: JSONObject): ConversationItem? {
+        val item = entry.optJSONObject("item") ?: return null
+        val itemType = item.optString("type", "").trim()
+        val turnId = entry.optString("turn_id", "").trim()
+        val itemId = item.optString("id", "").trim()
+        return when (itemType) {
+            "userMessage" -> {
+                val text = extractThreadItemText(item)
+                if (text.isBlank()) return null
+                ConversationItem.Bubble(
+                    id = "snapshot_user_${itemId.ifBlank { turnId.ifBlank { "item" } }}",
+                    right = true,
+                    text = text,
+                    backgroundColor = 0xFF1A8F55.toInt(),
+                    textColor = AndroidColor.WHITE,
+                    turnKey = turnId.takeIf { it.isNotBlank() },
+                )
+            }
+            "agentMessage" -> {
+                val text = extractThreadItemText(item)
+                if (text.isBlank()) return null
+                ConversationItem.Bubble(
+                    id = "snapshot_agent_${itemId.ifBlank { turnId.ifBlank { "item" } }}",
+                    right = false,
+                    text = text,
+                    backgroundColor = 0xFFF1F8F2.toInt(),
+                    textColor = 0xFF183326.toInt(),
+                    turnKey = turnId.ifBlank { "assistant" },
+                    assistantKey = itemId.takeIf { it.isNotBlank() },
+                )
+            }
+            "fileChange" -> {
+                val diffEntries = item.optJSONArray("changes").toConversationDiffEntries()
+                val status = item.optString("status", "").trim()
+                ConversationItem.FileChange(
+                    id = "snapshot_file_${itemId.ifBlank { turnId.ifBlank { "item" } }}",
+                    title = if (status == "inProgress") "文件修改中" else "文件修改",
+                    summary = buildFileChangeSummary(status, diffEntries, fallbackDiff = null),
+                    status = status,
+                    diffEntries = diffEntries,
+                    fallbackDiff = null,
+                    sourceItemId = itemId.takeIf { it.isNotBlank() },
+                    turnId = turnId.takeIf { it.isNotBlank() },
+                )
+            }
+            else -> null
+        }
+    }
+
+    private fun buildConversationSnapshotTurnStatus(entry: JSONObject): ConversationItem? {
+        val turnId = entry.optString("turn_id", "").trim()
+        val status = entry.optString("status", "").trim()
+        val errorText = extractErrorText(entry.optJSONObject("error"))
+        if (status != "failed" && status != "interrupted" && errorText.isBlank()) {
+            return null
+        }
+        return ConversationItem.SystemNote(
+            id = "snapshot_turn_status_${turnId.ifBlank { "unknown" }}",
+            text = buildString {
+                append("当前回合结束: ${if (status.isNotBlank()) status else "unknown"}")
+                if (errorText.isNotBlank()) {
+                    append('\n')
+                    append(errorText)
+                }
+            },
+            itemKey = turnId.takeIf { it.isNotBlank() },
+        )
+    }
+
+    private fun buildConversationApprovalFromSnapshot(approval: JSONObject): ApprovalDialogState? {
+        val requestId = approval.optString("request_id", "").trim()
+        if (requestId.isBlank()) return null
+        val eventName = approval.optString("request_method", "").trim().ifBlank { "approval" }
+        val payload = approval.optJSONObject("payload") ?: JSONObject()
+        val presentation = buildApprovalPresentation(eventName, payload)
+        return ApprovalDialogState(
+            requestId = requestId,
+            title = presentation.title,
+            detail = presentation.detail,
+            actions = buildApprovalActions(eventName, payload),
+            diffEntries = presentation.diffEntries,
+            turnId = approval.optString("turn_id", "").trim().takeIf { it.isNotBlank() },
+        )
+    }
+
     private fun handleThreadItemEvent(eventName: String, payload: JSONObject) {
         val item = payload.optJSONObject("item") ?: return
         val turnKey = extractTurnKey(payload = payload)
@@ -2714,13 +3095,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
             "fileChange" -> handleFileChangeItem(turnKey, item)
-            "commandExecution",
-            "mcpToolCall",
-            "dynamicToolCall",
-            "collabAgentToolCall",
-            "plan",
-            "reasoning",
-            "contextCompaction" -> handleToolItem(eventName, item)
             else -> Unit
         }
     }
@@ -2759,39 +3133,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun handleRawResponseItem(message: JSONObject, payload: JSONObject) {
-        val item = payload.optJSONObject("item") ?: return
-        if (item.optString("type", "") != "message") return
-
-        val role = item.optString("role", "").trim()
-        val text = extractResponseItemText(item).ifBlank { formatJson(item) }
-        if (text.isBlank()) return
-
-        when (role) {
-            "assistant" -> {
-                updateLiveTurnStatus("Codex 正在输出…")
-                appendStandaloneAssistantBubble(extractTurnKey(message, payload), text)
-            }
-            "system" -> appendSystemNote("系统消息:\n\n$text")
-            else -> Unit
-        }
-    }
-
     private fun extractThreadItemText(item: JSONObject): String {
         return when (item.optString("type", "")) {
-            "userMessage" -> {
-                val content = item.optJSONArray("content") ?: return ""
-                val parts = mutableListOf<String>()
-                for (i in 0 until content.length()) {
-                    val part = content.optJSONObject(i)
-                    if (part?.optString("type", "") == "text") {
-                        part.optString("text", "").trim().takeIf { it.isNotBlank() }?.let(parts::add)
-                    }
-                }
-                parts.joinToString("\n")
-            }
-
-            "agentMessage", "plan" -> item.optString("text", "").trim()
+            "userMessage" -> extractPlainTextContent(item.optJSONArray("content"))
+            "agentMessage" -> firstNonEmpty(
+                item.optString("text", "").trim(),
+                extractPlainTextContent(item.optJSONArray("content")),
+            )
+            "plan" -> item.optString("text", "").trim()
             "reasoning" -> {
                 val summary = item.optJSONArray("summary")?.let { array ->
                     buildList {
@@ -2817,18 +3166,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun extractResponseItemText(item: JSONObject): String {
-        if (item.optString("type", "") != "message") return ""
-        val content = item.optJSONArray("content") ?: return ""
+    private fun extractPlainTextContent(content: JSONArray?): String {
+        if (content == null) return ""
         val parts = mutableListOf<String>()
         for (i in 0 until content.length()) {
-            val part = content.optJSONObject(i) ?: continue
-            val text = when (part.optString("type", "")) {
-                "input_text", "output_text" -> part.optString("text", "")
-                else -> part.optString("text", part.optString("content", ""))
-            }.trim()
-            if (text.isNotBlank()) {
-                parts.add(text)
+            val part = content.optJSONObject(i)
+            if (part?.optString("type", "") == "text") {
+                part.optString("text", "").trim().takeIf { it.isNotBlank() }?.let(parts::add)
             }
         }
         return parts.joinToString("\n").trim()
@@ -3107,7 +3451,7 @@ class MainActivity : ComponentActivity() {
         val movePath = firstNonEmpty(
             normalizeNullablePath(kindObject?.opt("move_path")).orEmpty(),
             normalizeNullablePath(opt("move_path")).orEmpty(),
-        ).ifBlank { null }
+        ).takeIf { it.isNotBlank() }
         return ConversationDiffEntry(
             path = path,
             kind = kindType,
@@ -3214,6 +3558,15 @@ class MainActivity : ComponentActivity() {
             payload?.optString("turn_id", "") ?: "",
             payload?.optString("turnId", "") ?: "",
             "assistant",
+        )
+    }
+
+    private fun extractExplicitTurnKey(message: JSONObject? = null, payload: JSONObject? = null): String {
+        return firstNonEmpty(
+            message?.optString("turn_id", "") ?: "",
+            message?.optString("turnId", "") ?: "",
+            payload?.optString("turn_id", "") ?: "",
+            payload?.optString("turnId", "") ?: "",
         )
     }
 
@@ -4004,14 +4357,6 @@ class MainActivity : ComponentActivity() {
         return ": $message"
     }
 
-    private fun JSONArray?.toDecisionList(): List<String> {
-        if (this == null) return emptyList()
-        val out = mutableListOf<String>()
-        for (i in 0 until length()) {
-            optString(i).takeIf { it.isNotBlank() }?.let(out::add)
-        }
-        return out
-    }
 }
 
 private enum class AppTab {
@@ -4039,15 +4384,6 @@ sealed interface ConversationItem {
         val itemKey: String? = null,
     ) : ConversationItem
 
-    data class Approval(
-        override val id: String,
-        val requestId: String,
-        val title: String,
-        val detail: String,
-        val availableDecisions: List<String>,
-        val diffEntries: List<ConversationDiffEntry> = emptyList(),
-    ) : ConversationItem
-
     data class FileChange(
         override val id: String,
         val title: String,
@@ -4055,6 +4391,8 @@ sealed interface ConversationItem {
         val status: String,
         val diffEntries: List<ConversationDiffEntry>,
         val fallbackDiff: String? = null,
+        val sourceItemId: String? = null,
+        val turnId: String? = null,
     ) : ConversationItem
 }
 
@@ -4096,6 +4434,21 @@ private data class ApprovalPresentation(
     val title: String,
     val detail: String,
     val diffEntries: List<ConversationDiffEntry>,
+)
+
+private data class ApprovalAction(
+    val label: String,
+    val responsePayload: JSONObject,
+    val isPrimary: Boolean = false,
+)
+
+private data class ApprovalDialogState(
+    val requestId: String,
+    val title: String,
+    val detail: String,
+    val actions: List<ApprovalAction>,
+    val diffEntries: List<ConversationDiffEntry>,
+    val turnId: String? = null,
 )
 
 private data class BridgeHistoryEntry(
