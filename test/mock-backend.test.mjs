@@ -69,6 +69,365 @@ test('mock backend produces events and approval flow', async () => {
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test('bridge does not resume brand-new session before first turn', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-fresh-turn-test-'));
+
+  class FreshSessionBackend extends EventEmitter {
+    constructor() {
+      super();
+      this.resumeCalls = 0;
+      this.startTurnCalls = 0;
+    }
+
+    async start() {}
+
+    async stop() {}
+
+    async startThread(params = {}) {
+      return {
+        thread: {
+          id: 'fresh_thread_1',
+          sessionId: 'fresh_thread_1',
+          forkedFromId: null,
+          preview: params.title ?? 'Fresh session',
+          ephemeral: false,
+          modelProvider: 'custom',
+          createdAt: 1,
+          updatedAt: 2,
+          status: { type: 'idle' },
+          path: null,
+          cwd: params.cwd ?? '/tmp/fresh-workspace',
+          cliVersion: 'mock',
+          source: 'app-server',
+          threadSource: null,
+          agentNickname: null,
+          agentRole: null,
+          gitInfo: null,
+          name: params.title ?? 'Fresh session',
+          turns: [],
+        },
+        model: params.model ?? 'gpt-5',
+        cwd: params.cwd ?? '/tmp/fresh-workspace',
+      };
+    }
+
+    async resumeThread() {
+      this.resumeCalls += 1;
+      throw new Error('resumeThread should not run before first turn on a fresh session');
+    }
+
+    async startTurn(threadId, params = {}) {
+      this.startTurnCalls += 1;
+      assert.equal(threadId, 'fresh_thread_1');
+      assert.equal(params.text, 'hello fresh');
+      return {
+        id: 'turn_fresh_1',
+        items: [],
+        itemsView: 'summary',
+        status: 'inProgress',
+        error: null,
+        startedAt: 10,
+        completedAt: null,
+        durationMs: null,
+      };
+    }
+
+    async interruptTurn() {}
+
+    async respondRequest() {}
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  const backend = new FreshSessionBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'session.start', payload: { title: 'Fresh session', model: 'gpt-5' } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+  const sessionId = messages.find((m) => m.type === 'response' && m.id === '1').payload.session.session_id;
+
+  ws.send(JSON.stringify({ id: '2', type: 'turn.send', payload: { session_id: sessionId, text: 'hello fresh' } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '2'));
+  const sendResponse = messages.find((m) => m.type === 'response' && m.id === '2');
+  assert.equal(sendResponse.ok, true);
+  assert.equal(sendResponse.payload.turn.id, 'turn_fresh_1');
+  assert.equal(backend.startTurnCalls, 1);
+  assert.equal(backend.resumeCalls, 0);
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('bridge preserves top-level model metadata from session start responses', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-start-model-test-'));
+
+  class StartEnvelopeBackend extends EventEmitter {
+    async start() {}
+
+    async stop() {}
+
+    async startThread(params = {}) {
+      return {
+        thread: {
+          id: 'envelope_thread_1',
+          sessionId: 'envelope_thread_1',
+          forkedFromId: null,
+          preview: 'Envelope session',
+          ephemeral: false,
+          modelProvider: 'custom',
+          createdAt: 1,
+          updatedAt: 2,
+          status: { type: 'idle' },
+          path: null,
+          cwd: params.cwd ?? '/tmp/envelope-workspace',
+          cliVersion: 'mock',
+          source: 'app-server',
+          threadSource: null,
+          agentNickname: null,
+          agentRole: null,
+          gitInfo: null,
+          name: params.title ?? 'Envelope session',
+          turns: [],
+        },
+        model: params.model ?? 'gpt-5',
+        cwd: params.cwd ?? '/tmp/envelope-workspace',
+      };
+    }
+
+    async listThreads() {
+      return [{
+        id: 'envelope_thread_1',
+        sessionId: 'envelope_thread_1',
+        forkedFromId: null,
+        preview: 'Envelope session',
+        ephemeral: false,
+        modelProvider: 'custom',
+        createdAt: 1,
+        updatedAt: 2,
+        status: { type: 'idle' },
+        path: null,
+        cwd: '/tmp/envelope-workspace',
+        cliVersion: 'mock',
+        source: 'app-server',
+        threadSource: null,
+        agentNickname: null,
+        agentRole: null,
+        gitInfo: null,
+        name: 'Envelope session',
+        turns: [],
+      }];
+    }
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  const backend = new StartEnvelopeBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'session.start', payload: { title: 'Envelope session', model: 'gpt-5' } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+  const sessionStart = messages.find((m) => m.type === 'response' && m.id === '1');
+  assert.equal(sessionStart.ok, true);
+  assert.equal(sessionStart.payload.session.model, 'gpt-5');
+  assert.equal(sessionStart.payload.session.cwd, '/tmp/envelope-workspace');
+
+  ws.send(JSON.stringify({ id: '2', type: 'session.list', payload: {} }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '2'));
+  const sessionList = messages.find((m) => m.type === 'response' && m.id === '2');
+  assert.equal(sessionList.ok, true);
+  assert.equal(sessionList.payload.sessions[0].model, 'gpt-5');
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('session content skips thread.read for brand-new sessions without rollout or turns', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-empty-session-test-'));
+
+  class EmptySessionBackend extends EventEmitter {
+    constructor() {
+      super();
+      this.readThreadCalls = 0;
+    }
+
+    async start() {}
+
+    async stop() {}
+
+    async startThread(params = {}) {
+      return {
+        thread: {
+          id: 'empty_thread_1',
+          sessionId: 'empty_thread_1',
+          forkedFromId: null,
+          preview: params.title ?? 'Empty session',
+          ephemeral: false,
+          modelProvider: 'custom',
+          createdAt: 1,
+          updatedAt: 2,
+          status: { type: 'idle' },
+          path: null,
+          cwd: params.cwd ?? '/tmp/empty-workspace',
+          cliVersion: 'mock',
+          source: 'app-server',
+          threadSource: null,
+          agentNickname: null,
+          agentRole: null,
+          gitInfo: null,
+          name: params.title ?? 'Empty session',
+          turns: [],
+        },
+        model: params.model ?? 'gpt-5',
+        cwd: params.cwd ?? '/tmp/empty-workspace',
+      };
+    }
+
+    async readThread() {
+      this.readThreadCalls += 1;
+      throw new Error('no rollout found for thread');
+    }
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  const backend = new EmptySessionBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'session.start', payload: { title: 'Empty session', model: 'gpt-5' } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+  const sessionId = messages.find((m) => m.type === 'response' && m.id === '1').payload.session.session_id;
+
+  ws.send(JSON.stringify({ id: '2', type: 'session.content', payload: { session_id: sessionId } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '2'));
+  const sessionContent = messages.find((m) => m.type === 'response' && m.id === '2');
+  assert.equal(sessionContent.ok, true);
+  assert.deepEqual(sessionContent.payload.entries, []);
+  assert.equal(backend.readThreadCalls, 0);
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('session content skips thread.read after thread started event with no meaningful events', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-started-empty-session-test-'));
+
+  class StartedEmptySessionBackend extends EventEmitter {
+    constructor() {
+      super();
+      this.readThreadCalls = 0;
+    }
+
+    async start() {}
+
+    async stop() {}
+
+    async startThread(params = {}) {
+      const thread = {
+        id: 'started_empty_thread_1',
+        sessionId: 'started_empty_thread_1',
+        forkedFromId: null,
+        preview: params.title ?? 'Started empty session',
+        ephemeral: false,
+        modelProvider: 'custom',
+        createdAt: 1,
+        updatedAt: 2,
+        status: { type: 'idle' },
+        path: '/tmp/started-empty-rollout.jsonl',
+        cwd: params.cwd ?? '/tmp/started-empty-workspace',
+        cliVersion: 'mock',
+        source: 'app-server',
+        threadSource: null,
+        agentNickname: null,
+        agentRole: null,
+        gitInfo: null,
+        name: params.title ?? 'Started empty session',
+        turns: [],
+      };
+      queueMicrotask(() => {
+        this.emit('message', {
+          type: 'notification',
+          method: 'thread/started',
+          params: { thread },
+        });
+      });
+      return {
+        thread,
+        model: params.model ?? 'gpt-5',
+        cwd: params.cwd ?? '/tmp/started-empty-workspace',
+      };
+    }
+
+    async readThread() {
+      this.readThreadCalls += 1;
+      throw new Error('thread is not materialized yet');
+    }
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  const backend = new StartedEmptySessionBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'session.start', payload: { title: 'Started empty session', model: 'gpt-5' } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+  const sessionId = messages.find((m) => m.type === 'response' && m.id === '1').payload.session.session_id;
+  await waitFor(() => messages.find((m) => m.type === 'event' && m.event === 'thread/started' && m.session_id === sessionId));
+
+  ws.send(JSON.stringify({ id: '2', type: 'session.content', payload: { session_id: sessionId } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '2'));
+  const sessionContent = messages.find((m) => m.type === 'response' && m.id === '2');
+  assert.equal(sessionContent.ok, true);
+  assert.equal(backend.readThreadCalls, 0);
+  assert.deepEqual(sessionContent.payload.entries, []);
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 test('bridge broadcasts stored seq values and backfills turn ids for synced user input', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-seq-test-'));
 
@@ -343,6 +702,187 @@ test('bridge resumes notLoaded threads before send and hydrates history', async 
   assert.equal(syncResponse.ok, true);
   assert.ok(syncResponse.payload.events.some((event) => event.event === 'turn/input' && event.payload.text === '旧消息'));
   assert.ok(syncResponse.payload.events.some((event) => event.event === 'item/completed' && event.payload.item.id === 'item_agent' && event.payload.item.text === '旧回复'));
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('bridge normalizes stored sandbox policy when resuming notLoaded session content', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-resume-sandbox-test-'));
+  const sessionId = 'resume_sandbox_thread_1';
+
+  class ResumeSandboxBackend extends EventEmitter {
+    constructor() {
+      super();
+      this.resumeSandbox = null;
+    }
+
+    async start() {}
+
+    async stop() {}
+
+    async resumeThread(threadId, params = {}) {
+      this.resumeSandbox = params.sandbox;
+      return {
+        thread: {
+          id: threadId,
+          sessionId: threadId,
+          forkedFromId: null,
+          preview: 'Sandbox session',
+          ephemeral: false,
+          model: 'gpt-5',
+          modelProvider: 'custom',
+          createdAt: 1,
+          updatedAt: 2,
+          status: { type: 'idle' },
+          path: null,
+          cwd: '/tmp',
+          cliVersion: 'mock',
+          source: 'app-server',
+          threadSource: null,
+          agentNickname: null,
+          agentRole: null,
+          gitInfo: null,
+          name: 'Sandbox session',
+          turns: [],
+        },
+        model: 'gpt-5',
+        sandbox: { type: 'dangerFullAccess' },
+      };
+    }
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  await store.load();
+  await store.upsertSession({
+    session_id: sessionId,
+    thread_id: sessionId,
+    title: 'Sandbox session',
+    cwd: '/tmp',
+    model: 'gpt-5',
+    backend: 'custom',
+    preview: 'Sandbox session',
+    active: true,
+    approvalPolicy: 'never',
+    permissions: { type: 'profile', id: ':workspace' },
+    sandbox: { type: 'dangerFullAccess' },
+    thread: {
+      id: sessionId,
+      sessionId,
+      cwd: '/tmp',
+      status: { type: 'notLoaded' },
+      turns: [],
+    },
+  });
+
+  const backend = new ResumeSandboxBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'session.content', payload: { session_id: sessionId } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+  const contentResponse = messages.find((m) => m.type === 'response' && m.id === '1');
+  assert.equal(contentResponse.ok, true);
+  assert.equal(backend.resumeSandbox, 'danger-full-access');
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('session content deduplicates stored user messages when both turn input and completed item exist', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-dedupe-user-message-test-'));
+  const sessionId = 'dedupe_user_message_thread_1';
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  await store.load();
+  await store.upsertSession({
+    session_id: sessionId,
+    thread_id: sessionId,
+    title: 'Dedupe session',
+    cwd: '/tmp',
+    model: 'gpt-5',
+    backend: 'custom',
+    preview: 'Dedupe session',
+    active: true,
+    thread: {
+      id: sessionId,
+      sessionId,
+      cwd: '/tmp',
+      status: { type: 'idle' },
+      turns: [],
+    },
+  });
+
+  await store.appendEvent(sessionId, {
+    type: 'event',
+    event: 'turn/input',
+    turn_id: 'turn_dup_1',
+    payload: {
+      text: '重复用户消息',
+      input: null,
+    },
+  });
+  await store.appendEvent(sessionId, {
+    type: 'event',
+    event: 'item/completed',
+    turn_id: 'turn_dup_1',
+    payload: {
+      item: {
+        type: 'userMessage',
+        id: 'item_user_dup_1',
+        content: [{ type: 'text', text: '重复用户消息' }],
+      },
+    },
+  });
+  await store.appendEvent(sessionId, {
+    type: 'event',
+    event: 'item/completed',
+    turn_id: 'turn_dup_1',
+    payload: {
+      item: {
+        type: 'agentMessage',
+        id: 'item_agent_dup_1',
+        text: '收到',
+        phase: null,
+        memoryCitation: null,
+      },
+    },
+  });
+
+  const backend = new MockBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'session.content', payload: { session_id: sessionId } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+  const response = messages.find((m) => m.type === 'response' && m.id === '1');
+  assert.equal(response.ok, true);
+
+  const userMessages = response.payload.entries.filter((entry) => entry.item?.type === 'userMessage');
+  assert.equal(userMessages.length, 1);
+  assert.equal(userMessages[0].item.id, 'item_user_dup_1');
 
   ws.close();
   await once(ws, 'close');

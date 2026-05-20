@@ -75,6 +75,45 @@ function mergeSessionSummary(summary, stored) {
   return merged;
 }
 
+function normalizeSandboxMode(value) {
+  if (typeof value === 'string') {
+    const normalized = value.trim();
+    switch (normalized) {
+      case 'read-only':
+      case 'readOnly':
+        return 'read-only';
+      case 'workspace-write':
+      case 'workspaceWrite':
+        return 'workspace-write';
+      case 'danger-full-access':
+      case 'dangerFullAccess':
+      case 'full-access':
+        return 'danger-full-access';
+      default:
+        return normalized || null;
+    }
+  }
+
+  if (value && typeof value === 'object') {
+    const type = typeof value.type === 'string' ? value.type.trim() : '';
+    switch (type) {
+      case 'read-only':
+      case 'readOnly':
+        return 'read-only';
+      case 'workspace-write':
+      case 'workspaceWrite':
+        return 'workspace-write';
+      case 'danger-full-access':
+      case 'dangerFullAccess':
+        return 'danger-full-access';
+      default:
+        return null;
+    }
+  }
+
+  return null;
+}
+
 function normalizePermissionSelection(activePermissionProfile) {
   if (!activePermissionProfile || typeof activePermissionProfile !== 'object') return null;
   const id = typeof activePermissionProfile.id === 'string' ? activePermissionProfile.id.trim() : '';
@@ -102,8 +141,8 @@ function normalizeThreadSummary(thread, backend = 'mock') {
     session_id: id,
     thread_id: id,
     title: raw.name ?? raw.title ?? raw.preview ?? '',
-    cwd: raw.cwd ?? raw.path ?? '',
-    model: raw.model ?? '',
+    cwd: envelope.cwd ?? raw.cwd ?? raw.path ?? '',
+    model: envelope.model ?? raw.model ?? '',
     preview: raw.preview ?? '',
     active: raw.status ? String(raw.status) === 'active' || String(raw.status) === 'running' : true,
     backend,
@@ -123,6 +162,19 @@ function getThreadStatusType(thread) {
   const status = thread?.status;
   if (!status) return null;
   return typeof status === 'string' ? status : status.type ?? null;
+}
+
+function hasMeaningfulSessionEvents(session) {
+  const events = Array.isArray(session?.events) ? session.events : [];
+  return events.some((event) => {
+    const name = String(event?.event ?? '');
+    return name !== 'thread/started'
+      && name !== 'session/changed'
+      && name !== 'thread/tokenUsage/updated'
+      && name !== 'thread/status/changed'
+      && name !== 'warning'
+      && name !== 'error';
+  });
 }
 
 function extractUserMessageText(content = []) {
@@ -301,7 +353,7 @@ export class BridgeServer extends EventEmitter {
           model: payload.model ?? null,
           approvalPolicy: payload.approvalPolicy ?? null,
           approvalsReviewer: payload.approvalsReviewer ?? null,
-          sandbox: payload.sandbox ?? null,
+          sandbox: normalizeSandboxMode(payload.sandbox),
           permissions: payload.permissions ?? null,
           config: payload.config ?? null,
           serviceName: payload.serviceName ?? null,
@@ -333,7 +385,7 @@ export class BridgeServer extends EventEmitter {
           cwd: payload.cwd ?? null,
           approvalPolicy: payload.approvalPolicy ?? null,
           approvalsReviewer: payload.approvalsReviewer ?? null,
-          sandbox: payload.sandbox ?? null,
+          sandbox: normalizeSandboxMode(payload.sandbox),
           permissions: payload.permissions ?? null,
           config: payload.config ?? null,
           baseInstructions: payload.baseInstructions ?? null,
@@ -393,22 +445,7 @@ export class BridgeServer extends EventEmitter {
           collaborationMode: payload.collaborationMode ?? null,
           turnId: payload.turn_id ?? null,
         };
-        if (session && typeof this.backend.resumeThread === 'function' && (!session.approvalPolicy || !session.permissions || !session.sandbox)) {
-          const hydrated = await this.#resumeStoredSession(sessionId, {
-            path: session.thread?.path ?? null,
-            model: turnParams.model,
-            cwd: turnParams.cwd,
-            approvalPolicy: payload.approvalPolicy ?? null,
-            approvalsReviewer: turnParams.approvalsReviewer,
-            sandbox: payload.sandboxPolicy ?? null,
-            permissions: payload.permissions ?? null,
-            personality: turnParams.personality,
-            excludeTurns: true,
-          });
-          session = hydrated?.session ?? session;
-        }
         let ensured = await this.#ensureSessionLoaded(sessionId, {
-          path: session?.thread?.path ?? null,
           model: turnParams.model,
           cwd: turnParams.cwd,
           approvalPolicy: turnParams.approvalPolicy,
@@ -425,7 +462,6 @@ export class BridgeServer extends EventEmitter {
         } catch (error) {
           if (!isThreadNotFoundError(error)) throw error;
           ensured = await this.#resumeStoredSession(sessionId, {
-            path: session?.thread?.path ?? null,
             model: turnParams.model,
             cwd: turnParams.cwd,
             approvalPolicy: turnParams.approvalPolicy,
@@ -666,14 +702,15 @@ export class BridgeServer extends EventEmitter {
   async #resumeStoredSession(sessionId, params = {}) {
     const session = this.store.getSession(sessionId);
     if (!session) return null;
+    const explicitPath = Object.prototype.hasOwnProperty.call(params, 'path') ? params.path : null;
     const resumed = await this.backend.resumeThread(session.thread_id ?? sessionId, {
       threadId: session.thread_id ?? sessionId,
-      path: params.path ?? session.thread?.path ?? null,
+      path: explicitPath,
       model: params.model ?? session.model ?? null,
           cwd: params.cwd ?? session.cwd ?? null,
           approvalPolicy: params.approvalPolicy ?? session.approvalPolicy ?? null,
           approvalsReviewer: params.approvalsReviewer ?? null,
-          sandbox: params.sandbox ?? session.sandbox ?? null,
+          sandbox: normalizeSandboxMode(params.sandbox ?? session.sandbox ?? null),
           permissions: params.permissions ?? session.permissions ?? null,
           personality: params.personality ?? null,
           excludeTurns: params.excludeTurns ?? null,
@@ -742,6 +779,9 @@ export class BridgeServer extends EventEmitter {
     }
 
     let entries = await this.#buildContentEntriesFromThread(sessionId, thread);
+    if (entries.length === 0) {
+      entries = this.#buildContentEntriesFromStoredEvents(sessionId);
+    }
     if (entries.length === 0 && session.thread?.path) {
       try {
         entries = await this.#buildContentEntriesFromRolloutFile(sessionId, session.thread.path, session.thread_id ?? sessionId);
@@ -966,7 +1006,80 @@ export class BridgeServer extends EventEmitter {
     return entries;
   }
 
+  #buildContentEntriesFromStoredEvents(sessionId) {
+    const session = this.store.getSession(sessionId);
+    if (!session) return [];
+
+    const events = this.store.syncEvents(sessionId, 0);
+    const entries = [];
+    const seenItemIds = new Set();
+    const completedUserMessageSignatures = new Set();
+
+    for (const event of events) {
+      if (event?.event !== 'item/completed') continue;
+      const item = event?.payload?.item;
+      if (item?.type !== 'userMessage') continue;
+      const text = extractUserMessageText(item.content ?? []);
+      if (!text) continue;
+      completedUserMessageSignatures.add(`${event.turn_id ?? ''}|${text}`);
+    }
+
+    for (const event of events) {
+      if (event?.event === 'turn/input') {
+        const text = String(event?.payload?.text ?? '').trim();
+        if (!text) continue;
+        if (completedUserMessageSignatures.has(`${event.turn_id ?? ''}|${text}`)) {
+          continue;
+        }
+        entries.push({
+          type: 'item',
+          session_id: sessionId,
+          thread_id: session.thread_id ?? sessionId,
+          turn_id: event.turn_id ?? null,
+          item: {
+            type: 'userMessage',
+            id: event.turn_id ? `stored_${event.turn_id}_user_${event.seq ?? entries.length}` : `stored_${sessionId}_user_${event.seq ?? entries.length}`,
+            content: [{ type: 'text', text }],
+          },
+        });
+        continue;
+      }
+
+      if (event?.event !== 'item/completed') continue;
+      const item = event?.payload?.item;
+      if (!item?.type) continue;
+      if (item.type !== 'userMessage' && item.type !== 'agentMessage' && item.type !== 'fileChange') continue;
+
+      const itemId = item.id ?? `stored_item_${event.seq ?? entries.length}`;
+      if (seenItemIds.has(itemId)) continue;
+      seenItemIds.add(itemId);
+      entries.push({
+        type: 'item',
+        session_id: sessionId,
+        thread_id: session.thread_id ?? sessionId,
+        turn_id: event.turn_id ?? null,
+        item: {
+          ...item,
+          id: itemId,
+        },
+      });
+    }
+
+    return entries;
+  }
+
   async #loadHydrationThread(sessionId, session) {
+    const thread = session.thread ?? null;
+    const rawThread = thread?.thread ?? thread;
+    const status = getThreadStatusType(thread);
+    const inlineTurns = Array.isArray(rawThread?.turns) ? rawThread.turns : [];
+    const hasMeaningfulEvents = hasMeaningfulSessionEvents(session);
+    const shouldSkipHydrationRead = thread && status !== 'notLoaded' && inlineTurns.length === 0 && !hasMeaningfulEvents;
+
+    if (shouldSkipHydrationRead) {
+      return thread;
+    }
+
     if (typeof this.backend.readThread === 'function') {
       try {
         const read = await this.backend.readThread(session.thread_id ?? sessionId, {
@@ -983,14 +1096,11 @@ export class BridgeServer extends EventEmitter {
       } catch {}
     }
 
-    const thread = session.thread ?? null;
-    const status = getThreadStatusType(thread);
     if (thread && status !== 'notLoaded') {
       return thread;
     }
 
     const resumed = await this.#resumeStoredSession(sessionId, {
-      path: session.thread?.path ?? null,
       model: session.model ?? null,
       cwd: session.cwd ?? null,
       excludeTurns: false,
