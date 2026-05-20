@@ -346,11 +346,15 @@ private fun ConversationItem.SystemNote.toHtml(): String =
 
 private fun ConversationItem.FileChange.toHtml(displayBasePath: String?): String {
     val diffStats = buildConversationDiffStatsLine(diffEntries, fallbackDiff)
-    val metaLine = listOfNotNull(title.takeIf { it.isNotBlank() }, diffStats).joinToString(" · ").ifBlank { "文件修改" }
+    val metaHtml = buildConversationFileChangeMetaHtml(
+        title = title.ifBlank { "文件修改" },
+        stats = diffStats,
+        browserItemId = id,
+    )
     return """
         <div class="cr-message assistant">
             <div class="cr-bubble file-change">
-                <div class="cr-file-change-meta">${escapeConversationHtml(metaLine)}</div>
+                $metaHtml
                 ${buildConversationDiffDetailsHtml(diffEntries, fallbackDiff, browserItemId = id, displayBasePath = displayBasePath)}
             </div>
         </div>
@@ -391,22 +395,26 @@ private fun buildConversationDiffDetailsHtml(
     return """<div class="cr-inline-diff">$content</div>"""
 }
 
-private fun buildConversationDiffCodeHtml(diffText: String): String =
+private fun buildConversationDiffCodeHtml(
+    diffText: String,
+    pathHint: String? = null,
+): String =
     diffText.replace("\r\n", "\n")
         .split('\n')
-        .joinToString("<br />") { line ->
+        .joinToString("") { line ->
+            val language = detectConversationCodeLanguage(pathHint)
             when (classifyConversationDiffLine(line)) {
                 ConversationDiffLineKind.Added ->
                     """
                     <span class="cr-diff-line add">
-                        <span class="cr-diff-prefix add">+</span><span class="cr-diff-content">${escapeConversationHtml(line.drop(1))}</span>
+                        <span class="cr-diff-prefix add">+</span><span class="cr-diff-content">${buildConversationHighlightedCodeHtml(line.drop(1), language)}</span>
                     </span>
                     """.trimIndent()
 
                 ConversationDiffLineKind.Deleted ->
                     """
                     <span class="cr-diff-line delete">
-                        <span class="cr-diff-prefix delete">-</span><span class="cr-diff-content">${escapeConversationHtml(line.drop(1))}</span>
+                        <span class="cr-diff-prefix delete">-</span><span class="cr-diff-content">${buildConversationHighlightedCodeHtml(line.drop(1), language)}</span>
                     </span>
                     """.trimIndent()
 
@@ -420,11 +428,11 @@ private fun buildConversationDiffCodeHtml(diffText: String): String =
                     if (line.startsWith(" ")) {
                         """
                         <span class="cr-diff-line">
-                            <span class="cr-diff-prefix context"> </span><span class="cr-diff-content">${escapeConversationHtml(line.drop(1))}</span>
+                            <span class="cr-diff-prefix context"> </span><span class="cr-diff-content">${buildConversationHighlightedCodeHtml(line.drop(1), language)}</span>
                         </span>
                         """.trimIndent()
                     } else {
-                        """<span class="cr-diff-line">${escapeConversationHtml(line)}</span>"""
+                        """<span class="cr-diff-line">${buildConversationHighlightedCodeHtml(line, language)}</span>"""
                     }
             }
         }
@@ -452,24 +460,24 @@ private fun buildConversationDiffEntryHtml(
         }
     val titleHtml =
         if (href != null) {
-            """<a class="cr-diff-file-link" href="$href">${escapeConversationHtml(label)}</a>"""
+            """<span class="cr-diff-file-link">${escapeConversationHtml(label)}</span>"""
         } else {
             """<span class="cr-diff-file-link static">${escapeConversationHtml(label)}</span>"""
         }
+    val statsHtml = statsLabel?.let { buildConversationDiffStatsHtml(it) }.orEmpty()
     return """
         <div class="cr-diff-item">
-            <div class="cr-diff-item-row">
+            <div class="cr-diff-item-row" onclick="return toggleConversationDiff(event, '$panelId');">
                 $titleHtml
-                <span class="cr-diff-inline-stats">${escapeConversationHtml(statsLabel)}</span>
-                <button
-                    type="button"
+                <span class="cr-diff-inline-stats">$statsHtml</span>
+                <span
                     class="cr-diff-toggle"
-                    aria-label="展开 diff"
-                    onclick="return toggleConversationDiff(event, '$panelId', this);"
-                ></button>
+                    data-panel-id="$panelId"
+                    aria-hidden="true"
+                ></span>
             </div>
             <div class="cr-diff-panel" id="$panelId">
-                <pre><code>${buildConversationDiffCodeHtml(entry.diff.ifBlank { "无可显示 diff" })}</code></pre>
+                <pre><code>${buildConversationDiffCodeHtml(entry.diff.ifBlank { "无可显示 diff" }, entry.browsePath())}</code></pre>
             </div>
         </div>
     """.trimIndent()
@@ -487,22 +495,21 @@ private fun buildConversationFallbackDiffHtml(
         }
     val titleHtml =
         if (href != null) {
-            """<a class="cr-diff-file-link" href="$href">${escapeConversationHtml(defaultLabel)}</a>"""
+            """<span class="cr-diff-file-link">${escapeConversationHtml(defaultLabel)}</span>"""
         } else {
             """<span class="cr-diff-file-link static">${escapeConversationHtml(defaultLabel)}</span>"""
         }
     val statsLabel = buildConversationDiffStatsLine(emptyList(), diffText)
     return """
         <div class="cr-diff-item">
-            <div class="cr-diff-item-row">
+            <div class="cr-diff-item-row" onclick="return toggleConversationDiff(event, '$panelId');">
                 $titleHtml
-                ${statsLabel?.let { """<span class="cr-diff-inline-stats">${escapeConversationHtml(it)}</span>""" }.orEmpty()}
-                <button
-                    type="button"
+                ${statsLabel?.let { """<span class="cr-diff-inline-stats">${buildConversationDiffStatsHtml(it)}</span>""" }.orEmpty()}
+                <span
                     class="cr-diff-toggle"
-                    aria-label="展开 diff"
-                    onclick="return toggleConversationDiff(event, '$panelId', this);"
-                ></button>
+                    data-panel-id="$panelId"
+                    aria-hidden="true"
+                ></span>
             </div>
             <div class="cr-diff-panel" id="$panelId">
                 <pre><code>${buildConversationDiffCodeHtml(diffText.ifBlank { "无可显示 diff" })}</code></pre>
@@ -569,6 +576,214 @@ private fun buildConversationDiffStatsLine(
     return "+$additions / -$deletions"
 }
 
+private fun buildConversationFileChangeMetaHtml(
+    title: String,
+    stats: String?,
+    browserItemId: String?,
+): String {
+    val innerHtml = buildString {
+        append("""<span class="cr-file-change-open-title">${escapeConversationHtml(title)}</span>""")
+        if (!stats.isNullOrBlank()) {
+            append("""<span class="cr-diff-inline-stats">${buildConversationDiffStatsHtml(stats)}</span>""")
+        }
+        append("""<span class="cr-file-change-open-hint">查看详情 ▸</span>""")
+    }
+    val titleHtml =
+        browserItemId?.takeIf { it.isNotBlank() }?.let {
+            val href = "codex-code-browser://open?itemId=${encodeUrlComponent(it)}"
+            """<a class="cr-file-change-open" href="$href">$innerHtml</a>"""
+        } ?: """<span class="cr-file-change-open">$innerHtml</span>"""
+    return """<div class="cr-file-change-meta">$titleHtml</div>"""
+}
+
+private fun buildConversationDiffStatsHtml(label: String): String =
+    buildString {
+        var index = 0
+        while (index < label.length) {
+            when {
+                label[index] == '+' -> {
+                    val end = readConversationDiffStatsEnd(label, index + 1)
+                    append("""<span class="cr-diff-stats-add">${escapeConversationHtml(label.substring(index, end))}</span>""")
+                    index = end
+                }
+
+                label[index] == '-' -> {
+                    val end = readConversationDiffStatsEnd(label, index + 1)
+                    append("""<span class="cr-diff-stats-delete">${escapeConversationHtml(label.substring(index, end))}</span>""")
+                    index = end
+                }
+
+                else -> {
+                    append(escapeConversationHtml(label[index].toString()))
+                    index += 1
+                }
+            }
+        }
+    }
+
+private fun readConversationDiffStatsEnd(
+    label: String,
+    start: Int,
+): Int {
+    var index = start
+    while (index < label.length && label[index].isDigit()) {
+        index += 1
+    }
+    return index
+}
+
+private enum class ConversationCodeLanguage {
+    Plain,
+    Kotlin,
+    Java,
+    TypeScript,
+    JavaScript,
+    Python,
+    Shell,
+    Go,
+    Rust,
+    Json,
+    Yaml,
+    Xml,
+    Markdown,
+    Sql,
+    Css,
+}
+
+private fun detectConversationCodeLanguage(pathHint: String?): ConversationCodeLanguage {
+    val path = pathHint?.trim().orEmpty().lowercase()
+    return when {
+        path.endsWith(".kt") || path.endsWith(".kts") -> ConversationCodeLanguage.Kotlin
+        path.endsWith(".java") -> ConversationCodeLanguage.Java
+        path.endsWith(".ts") || path.endsWith(".tsx") || path.endsWith(".mts") || path.endsWith(".cts") -> ConversationCodeLanguage.TypeScript
+        path.endsWith(".js") || path.endsWith(".jsx") || path.endsWith(".mjs") || path.endsWith(".cjs") -> ConversationCodeLanguage.JavaScript
+        path.endsWith(".py") -> ConversationCodeLanguage.Python
+        path.endsWith(".sh") || path.endsWith(".bash") || path.endsWith(".zsh") || path.endsWith(".env") || path.endsWith("dockerfile") -> ConversationCodeLanguage.Shell
+        path.endsWith(".go") -> ConversationCodeLanguage.Go
+        path.endsWith(".rs") -> ConversationCodeLanguage.Rust
+        path.endsWith(".json") || path.endsWith(".jsonc") || path.endsWith(".json5") -> ConversationCodeLanguage.Json
+        path.endsWith(".yml") || path.endsWith(".yaml") -> ConversationCodeLanguage.Yaml
+        path.endsWith(".xml") || path.endsWith(".html") || path.endsWith(".htm") || path.endsWith(".svg") -> ConversationCodeLanguage.Xml
+        path.endsWith(".md") || path.endsWith(".markdown") -> ConversationCodeLanguage.Markdown
+        path.endsWith(".sql") -> ConversationCodeLanguage.Sql
+        path.endsWith(".css") || path.endsWith(".scss") -> ConversationCodeLanguage.Css
+        else -> ConversationCodeLanguage.Plain
+    }
+}
+
+private fun buildConversationHighlightedCodeHtml(
+    text: String,
+    language: ConversationCodeLanguage,
+): String =
+    buildString {
+        var index = 0
+        while (index < text.length) {
+            when {
+                text.startsWith("//", index) && (index == 0 || text[index - 1].isWhitespace()) -> {
+                    append(wrapConversationDiffCodeToken("comment", text.substring(index)))
+                    return@buildString
+                }
+
+                text[index] == '"' || text[index] == '\'' || text[index] == '`' -> {
+                    val end = readConversationInlineCodeStringEnd(text, index, text[index])
+                    append(wrapConversationDiffCodeToken("string", text.substring(index, end)))
+                    index = end
+                }
+
+                text[index].isDigit() -> {
+                    val end = readConversationInlineCodeNumberEnd(text, index)
+                    append(wrapConversationDiffCodeToken("number", text.substring(index, end)))
+                    index = end
+                }
+
+                isConversationInlineCodeIdentifierStart(text[index]) -> {
+                    val end = readConversationInlineCodeIdentifierEnd(text, index)
+                    val token = text.substring(index, end)
+                    val kind =
+                        when {
+                            token in conversationCodeKeywords(language) -> "keyword"
+                            token in conversationInlineCodeLiterals() -> "literal"
+                            token.firstOrNull()?.isUpperCase() == true && token.length > 1 -> "type"
+                            else -> null
+                        }
+                    if (kind == null) {
+                        append(escapeConversationHtml(token))
+                    } else {
+                        append(wrapConversationDiffCodeToken(kind, token))
+                    }
+                    index = end
+                }
+
+                else -> {
+                    append(escapeConversationHtml(text[index].toString()))
+                    index += 1
+                }
+            }
+        }
+    }
+
+private fun wrapConversationDiffCodeToken(
+    kind: String,
+    text: String,
+): String = """<span class="cr-diff-code-$kind">${escapeConversationHtml(text)}</span>"""
+
+private fun conversationCodeKeywords(language: ConversationCodeLanguage): Set<String> =
+    when (language) {
+        ConversationCodeLanguage.Kotlin ->
+            setOf(
+                "package", "import", "class", "interface", "object", "fun", "val", "var", "if", "else",
+                "when", "for", "while", "return", "null", "true", "false", "data", "sealed", "private",
+                "public", "internal", "override", "companion", "suspend", "try", "catch",
+            )
+
+        ConversationCodeLanguage.Java ->
+            setOf(
+                "package", "import", "class", "interface", "enum", "public", "private", "protected",
+                "static", "final", "void", "new", "if", "else", "for", "while", "return", "null",
+                "true", "false", "try", "catch", "throws", "extends", "implements",
+            )
+
+        ConversationCodeLanguage.TypeScript, ConversationCodeLanguage.JavaScript ->
+            setOf(
+                "import", "export", "from", "class", "interface", "type", "const", "let", "var",
+                "function", "return", "if", "else", "for", "while", "switch", "case", "new", "await",
+                "async", "null", "undefined", "true", "false", "try", "catch",
+            )
+
+        ConversationCodeLanguage.Python ->
+            setOf(
+                "import", "from", "class", "def", "return", "if", "elif", "else", "for", "while",
+                "try", "except", "finally", "with", "as", "pass", "None", "True", "False", "async", "await",
+            )
+
+        ConversationCodeLanguage.Shell ->
+            setOf(
+                "if", "then", "else", "elif", "fi", "for", "in", "do", "done", "case", "esac",
+                "while", "until", "function", "export", "local", "readonly",
+            )
+
+        ConversationCodeLanguage.Go ->
+            setOf(
+                "package", "import", "func", "type", "struct", "interface", "if", "else", "for",
+                "range", "return", "go", "defer", "nil", "true", "false",
+            )
+
+        ConversationCodeLanguage.Rust ->
+            setOf(
+                "use", "mod", "fn", "let", "mut", "pub", "struct", "enum", "impl", "trait", "if",
+                "else", "match", "for", "while", "loop", "return", "Self", "self", "true", "false",
+            )
+
+        ConversationCodeLanguage.Json ->
+            setOf("true", "false", "null")
+
+        ConversationCodeLanguage.Yaml ->
+            setOf("true", "false", "null")
+
+        ConversationCodeLanguage.Xml, ConversationCodeLanguage.Markdown, ConversationCodeLanguage.Sql, ConversationCodeLanguage.Css, ConversationCodeLanguage.Plain ->
+            setOf()
+    }
+
 private fun buildConversationMarkdownHtml(markdown: String): String {
     val blocks = parseConversationMarkdownBlocks(markdown)
     if (blocks.isEmpty()) {
@@ -599,6 +814,9 @@ private fun buildConversationScript(): String =
       }
       var panel = document.getElementById(panelId);
       if (!panel) return false;
+      if (!button) {
+        button = document.querySelector('[data-panel-id="' + panelId + '"]');
+      }
       var expanded = panel.classList.toggle('expanded');
       if (button) {
         button.classList.toggle('expanded', expanded);
@@ -725,11 +943,46 @@ private fun buildConversationCss(): String =
     }
 
     .cr-file-change-meta {
+        margin-bottom: 10px;
+    }
+
+    .cr-file-change-open {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 9px 11px;
+        border-radius: 12px;
+        background: rgba(26, 143, 85, 0.06) !important;
+        border: 1px solid rgba(26, 143, 85, 0.14);
+        text-decoration: none !important;
+        cursor: pointer;
+        transition: background-color 0.15s ease, border-color 0.15s ease;
+    }
+
+    .cr-file-change-open:hover {
+        background: rgba(26, 143, 85, 0.09) !important;
+        border-color: rgba(26, 143, 85, 0.20);
+    }
+
+    .cr-file-change-open-title {
+        color: #173326 !important;
         font-size: 12px !important;
         line-height: 1.35 !important;
-        color: #5F7F69 !important;
+        font-weight: 700 !important;
+    }
+
+    .cr-file-change-open-hint {
+        margin-left: auto;
+        color: #6D8876 !important;
+        font-size: 11px !important;
         font-weight: 600 !important;
-        margin-bottom: 10px;
+        white-space: nowrap;
+    }
+
+    .cr-file-change-meta .cr-diff-inline-stats {
+        margin: 0;
     }
 
     .cr-inline-diff {
@@ -760,22 +1013,36 @@ private fun buildConversationCss(): String =
         align-items: center;
         gap: 10px;
         min-width: 0;
+        padding: 4px 6px;
+        border-radius: 10px;
+        cursor: pointer;
+        transition: background-color 0.15s ease;
+    }
+
+    .cr-diff-item-row:hover {
+        background: rgba(26, 143, 85, 0.05) !important;
     }
 
     .cr-diff-file-link {
         flex: 1 1 auto;
         min-width: 0;
         color: #173326 !important;
+        appearance: none;
+        border: 0;
+        background: transparent;
+        padding: 0;
+        text-align: left;
         text-decoration: none !important;
         font-size: 13px !important;
         font-weight: 600 !important;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        cursor: pointer;
     }
 
     .cr-diff-file-link.static {
-        cursor: default;
+        cursor: pointer;
     }
 
     .cr-diff-inline-stats {
@@ -783,6 +1050,14 @@ private fun buildConversationCss(): String =
         color: #5F7F69 !important;
         font-size: 11px !important;
         font-weight: 700 !important;
+    }
+
+    .cr-diff-stats-add {
+        color: #1A8F55 !important;
+    }
+
+    .cr-diff-stats-delete {
+        color: #DC2626 !important;
     }
 
     .cr-diff-toggle {
@@ -832,9 +1107,38 @@ private fun buildConversationCss(): String =
         color: #173326 !important;
         background: transparent !important;
         padding: 0 !important;
+        font-size: 0.84em !important;
+        line-height: 1.56 !important;
         white-space: pre-wrap !important;
         word-break: break-word;
         overflow-wrap: anywhere;
+    }
+
+    .cr-diff-code-keyword {
+        color: #0F766E !important;
+        font-weight: 700 !important;
+    }
+
+    .cr-diff-code-literal {
+        color: #1A8F55 !important;
+        font-weight: 700 !important;
+    }
+
+    .cr-diff-code-string {
+        color: #C2410C !important;
+    }
+
+    .cr-diff-code-number {
+        color: #7C3AED !important;
+    }
+
+    .cr-diff-code-comment {
+        color: #6D8876 !important;
+    }
+
+    .cr-diff-code-type {
+        color: #D97706 !important;
+        font-weight: 700 !important;
     }
 
     .cr-diff-line {
@@ -846,8 +1150,8 @@ private fun buildConversationCss(): String =
         word-break: break-word;
         overflow-wrap: anywhere;
         border-radius: 8px;
-        padding: 1px 4px;
-        margin: 1px 0;
+        padding: 0 4px;
+        margin: 2px 0;
         box-sizing: border-box;
     }
 
@@ -967,16 +1271,51 @@ private fun buildConversationCss(): String =
         border-radius: 8px;
         padding: 0.14em 0.42em;
         font-family: "SFMono-Regular", "JetBrains Mono", "Fira Code", monospace;
-        font-size: 0.92em !important;
+        font-size: 0.84em !important;
         white-space: pre-wrap !important;
     }
 
+    .cr-md-inline-code {
+        color: #173326 !important;
+        background: #E5F2E8 !important;
+        border-color: #C9DFCf !important;
+        line-height: 1.45 !important;
+    }
+
+    .cr-md-inline-code-keyword {
+        color: #0F766E !important;
+        font-weight: 700 !important;
+    }
+
+    .cr-md-inline-code-literal {
+        color: #1A8F55 !important;
+        font-weight: 700 !important;
+    }
+
+    .cr-md-inline-code-string {
+        color: #C2410C !important;
+    }
+
+    .cr-md-inline-code-number {
+        color: #7C3AED !important;
+    }
+
+    .cr-md-inline-code-comment {
+        color: #6D8876 !important;
+    }
+
+    .cr-md-inline-code-type {
+        color: #D97706 !important;
+        font-weight: 700 !important;
+    }
+
     .cr-md-code-block {
-        margin: 0.62em 0 !important;
-        border-radius: 16px;
+        margin: 0.45em 0 !important;
+        border-radius: 14px;
         overflow: hidden;
-        background: linear-gradient(180deg, #173326 0%, #10261B 100%) !important;
-        box-shadow: 0 10px 24px rgba(16, 38, 27, 0.18);
+        background: #F1F7F2 !important;
+        border: 1px solid #D8E8DB;
+        box-shadow: 0 4px 12px rgba(16, 38, 27, 0.08);
     }
 
     .cr-md-code-header {
@@ -984,9 +1323,9 @@ private fun buildConversationCss(): String =
         align-items: center;
         justify-content: space-between;
         gap: 12px;
-        padding: 9px 14px;
-        background: rgba(255, 255, 255, 0.06) !important;
-        border-bottom: 1px solid rgba(232, 255, 240, 0.12);
+        padding: 7px 12px;
+        background: rgba(26, 143, 85, 0.04) !important;
+        border-bottom: 1px solid rgba(26, 143, 85, 0.10);
     }
 
     .cr-md pre {
@@ -994,21 +1333,21 @@ private fun buildConversationCss(): String =
         background: transparent !important;
         border: 0 !important;
         border-radius: 0 !important;
-        padding: 14px 16px 16px !important;
+        padding: 10px 12px 12px !important;
         overflow-x: auto !important;
         white-space: pre !important;
     }
 
     .cr-md pre code {
         background: transparent !important;
-        color: #E8FFF0 !important;
+        color: #173326 !important;
         border: 0 !important;
         padding: 0 !important;
         border-radius: 0 !important;
         white-space: pre !important;
         display: block;
-        font-size: 0.92em !important;
-        line-height: 1.62 !important;
+        font-size: 0.88em !important;
+        line-height: 1.52 !important;
     }
 
     .cr-md blockquote {
@@ -1080,20 +1419,20 @@ private fun buildConversationCss(): String =
 
     .cr-md-code-language {
         margin: 0 !important;
-        color: #98F1BD !important;
-        font-size: 0.76em !important;
+        color: #5F7F69 !important;
+        font-size: 0.74em !important;
         font-weight: 700 !important;
-        letter-spacing: 0.08em !important;
+        letter-spacing: 0.06em !important;
         text-transform: uppercase !important;
     }
 
     .cr-md-code-accent {
         flex: 0 0 auto;
-        width: 8px;
-        height: 8px;
+        width: 7px;
+        height: 7px;
         border-radius: 999px;
-        background: #98F1BD !important;
-        box-shadow: 0 0 0 4px rgba(152, 241, 189, 0.18);
+        background: #A4D9B4 !important;
+        box-shadow: 0 0 0 4px rgba(164, 217, 180, 0.14);
     }
 
     .cr-md-task-marker {
@@ -1449,7 +1788,7 @@ private fun buildConversationInlineHtml(text: String): String {
                     source.startsWith("`", index) -> {
                         val end = source.indexOf('`', startIndex = index + 1)
                         if (end != -1) {
-                            append(buildConversationHtmlTag("code", escapeConversationHtml(source.substring(index + 1, end))))
+                            append(buildConversationInlineCodeHtml(source.substring(index + 1, end)))
                             index = end + 1
                             continue
                         }
@@ -1512,6 +1851,129 @@ private fun buildConversationInlineHtml(text: String): String {
         }
 
     return text.split('\n').joinToString("<br />") { line -> parseSegment(line) }
+}
+
+private fun buildConversationInlineCodeHtml(text: String): String =
+    buildString {
+        append("""<code class="cr-md-inline-code">""")
+        append(highlightConversationInlineCode(text))
+        append("</code>")
+    }
+
+private fun highlightConversationInlineCode(text: String): String =
+    buildString {
+        var index = 0
+        while (index < text.length) {
+            when {
+                text.startsWith("//", index) && (index == 0 || text[index - 1].isWhitespace()) -> {
+                    append(wrapConversationInlineCodeToken("comment", text.substring(index)))
+                    return@buildString
+                }
+
+                text[index] == '"' || text[index] == '\'' || text[index] == '`' -> {
+                    val end = readConversationInlineCodeStringEnd(text, index, text[index])
+                    append(wrapConversationInlineCodeToken("string", text.substring(index, end)))
+                    index = end
+                }
+
+                text[index].isDigit() -> {
+                    val end = readConversationInlineCodeNumberEnd(text, index)
+                    append(wrapConversationInlineCodeToken("number", text.substring(index, end)))
+                    index = end
+                }
+
+                isConversationInlineCodeIdentifierStart(text[index]) -> {
+                    val end = readConversationInlineCodeIdentifierEnd(text, index)
+                    val token = text.substring(index, end)
+                    val kind =
+                        when {
+                            token in conversationInlineCodeKeywords() -> "keyword"
+                            token in conversationInlineCodeLiterals() -> "literal"
+                            token.firstOrNull()?.isUpperCase() == true && token.length > 1 -> "type"
+                            else -> null
+                        }
+                    if (kind == null) {
+                        append(escapeConversationHtml(token))
+                    } else {
+                        append(wrapConversationInlineCodeToken(kind, token))
+                    }
+                    index = end
+                }
+
+                else -> {
+                    append(escapeConversationHtml(text[index].toString()))
+                    index += 1
+                }
+            }
+        }
+    }
+
+private fun wrapConversationInlineCodeToken(
+    kind: String,
+    text: String,
+): String = """<span class="cr-md-inline-code-$kind">${escapeConversationHtml(text)}</span>"""
+
+private fun conversationInlineCodeKeywords(): Set<String> =
+    setOf(
+        "if", "else", "for", "while", "do", "switch", "case", "when", "try", "catch", "finally",
+        "throw", "throws", "return", "break", "continue", "class", "interface", "enum", "object",
+        "fun", "function", "def", "lambda", "async", "await", "import", "from", "export", "package",
+        "public", "private", "protected", "internal", "static", "final", "abstract", "override",
+        "const", "let", "var", "val", "new", "this", "super",
+    )
+
+private fun conversationInlineCodeLiterals(): Set<String> =
+    setOf(
+        "true", "false", "null", "undefined", "nil", "none", "None", "self",
+    )
+
+private fun isConversationInlineCodeIdentifierStart(ch: Char): Boolean = ch == '_' || ch == '$' || ch.isLetter()
+
+private fun readConversationInlineCodeIdentifierEnd(
+    text: String,
+    start: Int,
+): Int {
+    var index = start + 1
+    while (index < text.length) {
+        val ch = text[index]
+        if (!(ch == '_' || ch == '$' || ch.isLetterOrDigit())) break
+        index += 1
+    }
+    return index
+}
+
+private fun readConversationInlineCodeNumberEnd(
+    text: String,
+    start: Int,
+): Int {
+    var index = start + 1
+    while (index < text.length) {
+        val ch = text[index]
+        if (!(ch.isLetterOrDigit() || ch == '.' || ch == '_' || ch == 'x' || ch == 'X')) break
+        index += 1
+    }
+    return index
+}
+
+private fun readConversationInlineCodeStringEnd(
+    text: String,
+    start: Int,
+    delimiter: Char,
+): Int {
+    var index = start + 1
+    var escaped = false
+    while (index < text.length) {
+        val ch = text[index]
+        if (escaped) {
+            escaped = false
+        } else if (ch == '\\') {
+            escaped = true
+        } else if (ch == delimiter) {
+            return index + 1
+        }
+        index += 1
+    }
+    return text.length
 }
 
 private fun isConversationMarkdownTableHeaderLine(line: String): Boolean = line.contains('|')

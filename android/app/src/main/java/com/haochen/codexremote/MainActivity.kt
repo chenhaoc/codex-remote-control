@@ -478,10 +478,10 @@ class MainActivity : ComponentActivity() {
                             onClick = { openSessionInfoSheet() },
                         ) {
                             Icon(
-                                painter = painterResource(id = android.R.drawable.ic_menu_info_details),
+                                painter = painterResource(id = android.R.drawable.ic_dialog_info),
                                 contentDescription = "会话信息",
                                 tint = uiMuted,
-                                modifier = Modifier.size(20.dp),
+                                modifier = Modifier.size(19.dp),
                             )
                         }
                     }
@@ -500,6 +500,24 @@ class MainActivity : ComponentActivity() {
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    SectionTitle("侧边栏")
+                    IconButton(onClick = onCloseDrawer) {
+                        Icon(
+                            painter = painterResource(id = android.R.drawable.ic_menu_close_clear_cancel),
+                            contentDescription = "收起侧边栏",
+                            tint = uiMuted,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+            }
+
             item {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = uiSurface),
@@ -1350,29 +1368,23 @@ class MainActivity : ComponentActivity() {
                     horizontalAlignment = Alignment.End,
                 ) {
                     if (isConnectedState) {
-                        Surface(
-                            shape = RoundedCornerShape(999.dp),
-                            color = uiPrimarySoft,
-                            border = androidx.compose.foundation.BorderStroke(1.dp, uiOnline),
+                        Row(
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Icon(
-                                    painter = painterResource(id = android.R.drawable.checkbox_on_background),
-                                    contentDescription = "已连接",
-                                    tint = uiOnline,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                                Text(
-                                    text = "已连接",
-                                    color = uiText,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                )
-                            }
+                            Text(
+                                text = "✓",
+                                color = uiOnline,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Text(
+                                text = "已连接",
+                                color = uiText,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
                         }
                     } else {
                         FilledTonalButton(onClick = onConnect, enabled = !isConnectingState) {
@@ -1421,6 +1433,9 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun ChatPage() {
         val activeSession = activeSession()
+        val density = LocalDensity.current
+        val imeBottom = WindowInsets.ime.getBottom(density)
+        val shouldFollowBottom = activeTurnId != null || imeBottom > 0
 
         Column(
             modifier = Modifier
@@ -1452,7 +1467,7 @@ class MainActivity : ComponentActivity() {
                         items = conversationItems,
                         sessionId = activeSessionId,
                         displayBasePath = activeSession?.cwd,
-                        followBottom = activeTurnId != null,
+                        followBottom = shouldFollowBottom,
                         restoreScrollY = chatRestoreScrollY,
                         onScrollRestored = {
                             chatRestoreScrollY = null
@@ -1636,6 +1651,12 @@ class MainActivity : ComponentActivity() {
     ) {
         val selectedEntry = state.selectedEntry()
         val diffStats = buildDiffStatsLine(diffEntries = state.diffEntries, fallbackDiff = state.fallbackDiff)
+        val selectedPathLabel =
+            selectedEntry?.displayPath(basePath = state.basePath, maxLength = 96)
+                ?: state.selectedPath?.takeIf { it.isNotBlank() }?.let {
+                    compactDiffDisplayPath(it, state.basePath, maxLength = 96)
+                }
+                ?: "未选择文件"
 
         LaunchedEffect(state.conversationItemId, state.mode, state.selectedPath, state.fileReadState) {
             if (state.mode == CodeBrowserMode.File && selectedEntry != null && state.fileReadState is CodeBrowserFileReadState.Idle) {
@@ -1652,61 +1673,40 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Surface(
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    color = uiSurface,
-                    border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = state.title,
-                                color = uiText,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Text(
-                                text = when {
-                                    selectedEntry != null -> selectedEntry.displayPath(basePath = state.basePath, maxLength = 80)
-                                    state.diffEntries.isNotEmpty() -> "共 ${state.diffEntries.size} 个文件"
-                                    else -> "聚合 diff"
-                                },
-                                color = uiMuted,
-                                fontSize = 12.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                        diffStats?.let {
-                            Text(
-                                text = it,
-                                color = uiMuted,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                        }
+                    Text(
+                        text = "文件修改",
+                        color = uiText,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    diffStats?.let {
+                        DiffStatsText(
+                            label = it,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
                     }
                 }
 
-                if (state.diffEntries.size > 1) {
+                if (state.diffEntries.isNotEmpty()) {
                     Column(
                         modifier = Modifier.fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(0.dp),
                     ) {
                         state.diffEntries.forEachIndexed { index, entry ->
                             CodeBrowserFileRow(
-                                label = entry.displayPath(basePath = state.basePath, maxLength = 72),
+                                label = entry.filenameLabel(),
                                 stats = entry.diffStatsLabel(),
                                 selected = state.selectedPath == entry.browsePath(),
-                                onClick = { selectCodeBrowserPath(entry.browsePath()) },
+                                onClick = {
+                                    selectCodeBrowserPath(entry.browsePath())
+                                    setCodeBrowserMode(CodeBrowserMode.File)
+                                },
                             )
                             if (index < state.diffEntries.lastIndex) {
                                 HorizontalDivider(color = uiBorder.copy(alpha = 0.75f))
@@ -1747,71 +1747,125 @@ class MainActivity : ComponentActivity() {
                                     BodyText("这个条目暂时没有可展示的 diff。")
                                 }
                             } else {
-                                CodeBrowserTextPane(
-                                    text = diffText,
-                                    mode = CodeTextMode.Diff,
-                                    pathHint = selectedEntry?.browsePath(),
-                                    modifier = Modifier.fillMaxSize(),
-                                )
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    if (selectedEntry != null) {
+                                        Text(
+                                            text = selectedPathLabel,
+                                            color = uiMuted,
+                                            fontSize = 11.sp,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                    CodeBrowserTextPane(
+                                        text = diffText,
+                                        mode = CodeTextMode.Diff,
+                                        pathHint = selectedEntry?.browsePath(),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .weight(1f),
+                                    )
+                                }
                             }
                         }
 
                         CodeBrowserMode.File -> {
                             when (val fileState = state.fileReadState) {
                                 CodeBrowserFileReadState.Idle -> {
-                                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                        BodyText("正在准备读取文件内容…")
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(14.dp),
+                                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                                    ) {
+                                        Text(
+                                            text = selectedPathLabel,
+                                            color = uiMuted,
+                                            fontSize = 11.sp,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                            BodyText("正在准备读取文件内容…")
+                                        }
                                     }
                                 }
 
                                 CodeBrowserFileReadState.Loading -> {
-                                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                        CircularProgressIndicator(color = uiPrimary)
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(14.dp),
+                                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                                    ) {
+                                        Text(
+                                            text = selectedPathLabel,
+                                            color = uiMuted,
+                                            fontSize = 11.sp,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                            CircularProgressIndicator(color = uiPrimary)
+                                        }
                                     }
                                 }
 
                                 is CodeBrowserFileReadState.Error -> {
-                                    Box(
+                                    Column(
                                         modifier = Modifier
                                             .fillMaxSize()
-                                            .padding(18.dp),
-                                        contentAlignment = Alignment.Center,
+                                            .padding(14.dp),
+                                        verticalArrangement = Arrangement.spacedBy(10.dp),
                                     ) {
-                                        BodyText(fileState.message)
+                                        Text(
+                                            text = selectedPathLabel,
+                                            color = uiMuted,
+                                            fontSize = 11.sp,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        Box(
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            BodyText(fileState.message)
+                                        }
                                     }
                                 }
 
                                 is CodeBrowserFileReadState.Loaded -> {
-                                    CodeBrowserTextPane(
-                                        text = fileState.content.content,
-                                        mode = CodeTextMode.File,
-                                        pathHint = fileState.content.resolvedPath,
-                                        modifier = Modifier.fillMaxSize(),
-                                    )
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(14.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        Text(
+                                            text = compactDiffDisplayPath(fileState.content.resolvedPath, state.basePath, maxLength = 96),
+                                            color = uiMuted,
+                                            fontSize = 11.sp,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        CodeBrowserTextPane(
+                                            text = fileState.content.content,
+                                            mode = CodeTextMode.File,
+                                            pathHint = fileState.content.resolvedPath,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .weight(1f),
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
-                }
-
-                when (val fileState = state.fileReadState) {
-                    is CodeBrowserFileReadState.Loaded ->
-                        if (state.mode == CodeBrowserMode.File) {
-                            Text(
-                                text = buildString {
-                                    append(compactDiffDisplayPath(fileState.content.resolvedPath, state.basePath, maxLength = 96))
-                                    if (fileState.content.truncated) {
-                                        append(" · 已截断到 ${fileState.content.bytes} bytes")
-                                    }
-                                },
-                                color = uiMuted,
-                                fontSize = 11.sp,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-
-                    else -> Unit
                 }
             }
         }
@@ -1871,14 +1925,73 @@ class MainActivity : ComponentActivity() {
                 overflow = TextOverflow.Ellipsis,
             )
             stats?.let {
-                Text(
-                    text = it,
-                    color = uiMuted,
+                DiffStatsText(
+                    label = it,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
             }
         }
+    }
+
+    @Composable
+    private fun DiffStatsText(
+        label: String,
+        fontSize: androidx.compose.ui.unit.TextUnit,
+        fontWeight: FontWeight,
+        modifier: Modifier = Modifier,
+    ) {
+        val annotated =
+            remember(label, fontSize, fontWeight) {
+                buildAnnotatedString {
+                    var index = 0
+                    while (index < label.length) {
+                        when {
+                            label[index] == '+' -> {
+                                val end = readDiffStatsSegmentEnd(label, index + 1)
+                                withStyle(SpanStyle(color = uiPrimary, fontWeight = fontWeight)) {
+                                    append(label.substring(index, end))
+                                }
+                                index = end
+                            }
+
+                            label[index] == '-' -> {
+                                val end = readDiffStatsSegmentEnd(label, index + 1)
+                                withStyle(SpanStyle(color = Color(0xFFDC2626), fontWeight = fontWeight)) {
+                                    append(label.substring(index, end))
+                                }
+                                index = end
+                            }
+
+                            else -> {
+                                withStyle(SpanStyle(color = uiMuted, fontWeight = fontWeight)) {
+                                    append(label[index])
+                                }
+                                index += 1
+                            }
+                        }
+                    }
+                }
+            }
+        Text(
+            text = annotated,
+            color = uiMuted,
+            fontSize = fontSize,
+            modifier = modifier,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+
+    private fun readDiffStatsSegmentEnd(
+        label: String,
+        start: Int,
+    ): Int {
+        var index = start
+        while (index < label.length && label[index].isDigit()) {
+            index += 1
+        }
+        return index
     }
 
     @Composable
@@ -2432,8 +2545,7 @@ class MainActivity : ComponentActivity() {
         val payload = message.optJSONObject("payload") ?: JSONObject()
 
         if (eventName == "thread/started") {
-            val thread = payload.optJSONObject("thread")
-            val info = thread?.let { SessionInfo.fromThread(it) }
+            val info = SessionInfo.fromThread(payload)
             if (info != null) {
                 upsertSession(info)
                 if (activeSessionId == null) {
@@ -2443,8 +2555,8 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        payload.optJSONObject("thread")?.let { thread ->
-            SessionInfo.fromThread(thread)?.let(::upsertSession)
+        if (payloadCarriesSessionMetadata(payload)) {
+            SessionInfo.fromThread(payload)?.let(::upsertSession)
         }
 
         if (eventName == "session/changed") {
@@ -2522,6 +2634,23 @@ class MainActivity : ComponentActivity() {
         if (renderedEventKeys.contains(key)) return true
         renderedEventKeys.add(key)
         return false
+    }
+
+    private fun payloadCarriesSessionMetadata(payload: JSONObject): Boolean {
+        return payload.has("thread")
+            || payload.has("cwd")
+            || payload.has("model")
+            || payload.has("modelProvider")
+            || payload.has("approvalPolicy")
+            || payload.has("sandbox")
+            || payload.has("sandboxPolicy")
+            || payload.has("permissions")
+            || payload.has("activePermissionProfile")
+            || payload.has("permissionProfile")
+            || payload.has("tokenUsage")
+            || payload.has("contextWindow")
+            || payload.has("lastTokenUsage")
+            || payload.has("totalTokenUsage")
     }
 
     private fun handleAssistantDelta(message: JSONObject, payload: JSONObject) {
@@ -2736,6 +2865,9 @@ class MainActivity : ComponentActivity() {
             override fun onResponse(response: JSONObject) {
                 syncInFlight = false
                 val responsePayload = response.optJSONObject("payload")
+                responsePayload?.optJSONObject("session")
+                    ?.let(SessionInfo::fromSession)
+                    ?.let(::upsertSession)
                 applySessionContentSnapshot(responsePayload)
                 flushPendingSessionRefresh(requestedSessionId)
             }
@@ -2827,16 +2959,22 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun replaceSessions(newSessions: List<SessionInfo>) {
+        val existingSessions = sessions.associateBy { it.sessionId }
         sessions.clear()
-        sessions.addAll(newSessions.sortedByDescending { it.updatedAt })
+        sessions.addAll(
+            newSessions
+                .map { it.mergedWith(existingSessions[it.sessionId]) }
+                .sortedByDescending { it.updatedAt },
+        )
         if (selectedWorkspace != null && sessions.none { it.cwd == selectedWorkspace }) {
             selectedWorkspace = null
         }
     }
 
     private fun upsertSession(info: SessionInfo) {
+        val merged = info.mergedWith(sessions.firstOrNull { it.sessionId == info.sessionId })
         sessions.removeAll { it.sessionId == info.sessionId }
-        sessions.add(0, info)
+        sessions.add(0, merged)
     }
 
     private fun clearConversation() {
@@ -2948,6 +3086,7 @@ class MainActivity : ComponentActivity() {
                         diffEntries = item.diffEntries,
                         fallbackDiff = item.fallbackDiff,
                         selectedPath = selectedPath ?: item.diffEntries.firstOrNull()?.browsePath(),
+                        mode = if (selectedPath.isNullOrBlank()) CodeBrowserMode.Diff else CodeBrowserMode.File,
                     )
 
                 else -> null
@@ -2970,6 +3109,7 @@ class MainActivity : ComponentActivity() {
         if (state.selectedPath == path) return
         codeBrowserState = state.copy(
             selectedPath = path,
+            mode = CodeBrowserMode.File,
             fileReadState = CodeBrowserFileReadState.Idle,
         )
     }
@@ -4870,7 +5010,7 @@ class MainActivity : ComponentActivity() {
                 if (text[index] == '`') {
                     val end = text.indexOf('`', startIndex = index + 1)
                     if (end > index) {
-                        withStyle(palette.string) { append(text.substring(index, end + 1)) }
+                        appendHighlightedInlineCodeSegment(text.substring(index + 1, end), palette)
                         index = end + 1
                         continue
                     }
@@ -4880,6 +5020,79 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    private fun AnnotatedString.Builder.appendHighlightedInlineCodeSegment(
+        text: String,
+        palette: CodeSyntaxPalette,
+    ) {
+        val baseStyle = inlineCodeSpanStyle(color = uiText)
+        val keywordStyle = inlineCodeSpanStyle(color = palette.keyword.color, fontWeight = palette.keyword.fontWeight)
+        val literalStyle = inlineCodeSpanStyle(color = palette.literal.color, fontWeight = palette.literal.fontWeight)
+        val stringStyle = inlineCodeSpanStyle(color = palette.string.color, fontWeight = palette.string.fontWeight)
+        val numberStyle = inlineCodeSpanStyle(color = palette.number.color, fontWeight = palette.number.fontWeight)
+        val commentStyle = inlineCodeSpanStyle(color = palette.comment.color, fontWeight = palette.comment.fontWeight)
+        val typeStyle = inlineCodeSpanStyle(color = palette.type.color, fontWeight = palette.type.fontWeight)
+
+        var index = 0
+        while (index < text.length) {
+            when {
+                text.startsWith("//", index) && (index == 0 || text[index - 1].isWhitespace()) -> {
+                    withStyle(commentStyle) { append(text.substring(index)) }
+                    return
+                }
+
+                text[index] == '"' || text[index] == '\'' || text[index] == '`' -> {
+                    val end = readStringEnd(text, index, text[index])
+                    withStyle(stringStyle) { append(text.substring(index, end)) }
+                    index = end
+                }
+
+                text[index].isDigit() -> {
+                    val end = readNumberEnd(text, index)
+                    withStyle(numberStyle) { append(text.substring(index, end)) }
+                    index = end
+                }
+
+                isIdentifierStart(text[index]) -> {
+                    val end = readIdentifierEnd(text, index)
+                    val token = text.substring(index, end)
+                    val style =
+                        when {
+                            token in inlineCodeKeywords() -> keywordStyle
+                            token in inlineCodeLiterals() -> literalStyle
+                            token.firstOrNull()?.isUpperCase() == true && token.length > 1 -> typeStyle
+                            else -> baseStyle
+                        }
+                    withStyle(style) { append(token) }
+                    index = end
+                }
+
+                else -> {
+                    withStyle(baseStyle) { append(text[index]) }
+                    index += 1
+                }
+            }
+        }
+    }
+
+    private fun inlineCodeSpanStyle(
+        color: Color,
+        fontWeight: FontWeight? = null,
+    ): SpanStyle = SpanStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = color, fontWeight = fontWeight)
+
+    private fun inlineCodeKeywords(): Set<String> =
+        setOf(
+            "if", "else", "for", "while", "do", "switch", "case", "when", "try", "catch", "finally",
+            "throw", "throws", "return", "break", "continue", "class", "interface", "enum", "object",
+            "fun", "function", "def", "lambda", "async", "await", "import", "from", "export", "package",
+            "public", "private", "protected", "internal", "static", "final", "abstract", "override",
+            "const", "let", "var", "val", "new", "this", "super",
+        )
+
+    private fun inlineCodeLiterals(): Set<String> =
+        setOf(
+            "true", "false", "null", "undefined", "nil", "none", "None", "self",
+        )
 
     private fun detectCodeLanguage(pathHint: String?): CodeLanguage {
         val path = pathHint?.trim().orEmpty().lowercase(Locale.getDefault())
@@ -4919,7 +5132,7 @@ class MainActivity : ComponentActivity() {
             string = SpanStyle(color = c(0xFFF9A66C)),
             number = SpanStyle(color = c(0xFFC084FC)),
             comment = SpanStyle(color = uiMuted),
-            type = SpanStyle(color = c(0xFFFDE68A)),
+            type = SpanStyle(color = c(0xFFD97706), fontWeight = FontWeight.SemiBold),
             annotation = SpanStyle(color = c(0xFFF472B6)),
         )
     }
@@ -5056,6 +5269,12 @@ data class ConversationDiffEntry(
     val movePath: String? = null,
 ) {
     fun summaryPath(basePath: String? = null): String = displayPath(basePath = basePath, maxLength = Int.MAX_VALUE)
+
+    fun filenameLabel(): String {
+        val baseName = normalizedPath().substringAfterLast('/').ifBlank { normalizedPath() }
+        val moveName = normalizedMovePath()?.substringAfterLast('/')?.ifBlank { normalizedMovePath().orEmpty() }
+        return moveName?.let { "$baseName → $it" } ?: baseName
+    }
 
     fun browseCandidates(): List<String> {
         return listOfNotNull(
@@ -5583,32 +5802,109 @@ private data class SessionInfo(
             return ""
         }
 
+        private fun copyJsonObject(value: JSONObject?): JSONObject? = value?.let { JSONObject(it.toString()) }
+
+        private fun normalizeTimestamp(raw: Long): String {
+            if (raw <= 0L) return ""
+            return if (raw < 1_000_000_000_000L) {
+                (raw * 1000L).toString()
+            } else {
+                raw.toString()
+            }
+        }
+
+        private fun extractUpdatedAt(envelope: JSONObject, threadObject: JSONObject): String {
+            return firstNonEmpty(
+                envelope.optString("updatedAt", ""),
+                threadObject.optString("updatedAt", ""),
+                normalizeTimestamp(envelope.optLong("updatedAt", 0L)),
+                normalizeTimestamp(threadObject.optLong("updatedAt", 0L)),
+            )
+        }
+
+        private fun extractPermissions(envelope: JSONObject, threadObject: JSONObject): JSONObject? {
+            return copyJsonObject(
+                envelope.optJSONObject("permissions")
+                    ?: envelope.optJSONObject("activePermissionProfile")
+                    ?: envelope.optJSONObject("permissionProfile")
+                    ?: threadObject.optJSONObject("permissions")
+                    ?: threadObject.optJSONObject("activePermissionProfile")
+                    ?: threadObject.optJSONObject("permissionProfile"),
+            )
+        }
+
+        private fun extractSandbox(envelope: JSONObject, threadObject: JSONObject): Any? {
+            return cloneJsonValue(
+                envelope.opt("sandbox")
+                    ?: envelope.opt("sandboxPolicy")
+                    ?: threadObject.opt("sandbox")
+                    ?: threadObject.opt("sandboxPolicy"),
+            )
+        }
+
+        private fun extractContextWindow(envelope: JSONObject, threadObject: JSONObject): Int? {
+            return envelope.optInt("contextWindow").takeIf { it > 0 }
+                ?: threadObject.optInt("contextWindow").takeIf { it > 0 }
+                ?: envelope.optJSONObject("tokenUsage")?.optInt("modelContextWindow")?.takeIf { it > 0 }
+                ?: threadObject.optJSONObject("tokenUsage")?.optInt("modelContextWindow")?.takeIf { it > 0 }
+        }
+
+        private fun extractTokenUsageSnapshot(
+            envelope: JSONObject,
+            threadObject: JSONObject,
+            directKey: String,
+            nestedKey: String,
+        ): TokenUsageSnapshot? {
+            return envelope.optJSONObject(directKey)?.let { TokenUsageSnapshot.fromJson(it) }
+                ?: threadObject.optJSONObject(directKey)?.let { TokenUsageSnapshot.fromJson(it) }
+                ?: envelope.optJSONObject("tokenUsage")?.optJSONObject(nestedKey)?.let { TokenUsageSnapshot.fromJson(it) }
+                ?: threadObject.optJSONObject("tokenUsage")?.optJSONObject(nestedKey)?.let { TokenUsageSnapshot.fromJson(it) }
+        }
+
         fun fromSession(objectValue: JSONObject): SessionInfo? {
+            val threadObject = objectValue.optJSONObject("thread") ?: objectValue
             val sessionId = firstNonEmpty(
                 objectValue.optString("session_id", ""),
                 objectValue.optString("thread_id", ""),
+                objectValue.optString("sessionId", ""),
+                threadObject.optString("sessionId", ""),
                 objectValue.optString("id", ""),
+                threadObject.optString("id", ""),
             )
             if (sessionId.isBlank()) return null
             val title = firstNonEmpty(
                 objectValue.optString("title", ""),
                 objectValue.optString("name", ""),
                 objectValue.optString("preview", ""),
+                threadObject.optString("name", ""),
+                threadObject.optString("title", ""),
+                threadObject.optString("preview", ""),
             )
             return SessionInfo(
                 sessionId = sessionId,
                 title = title,
-                preview = objectValue.optString("preview", ""),
-                model = objectValue.optString("model", ""),
-                backend = objectValue.optString("backend", ""),
-                cwd = objectValue.optString("cwd", ""),
-                updatedAt = objectValue.optString("updatedAt", ""),
-                approvalPolicy = objectValue.optString("approvalPolicy", ""),
-                sandbox = cloneJsonValue(objectValue.opt("sandbox")),
-                permissions = objectValue.optJSONObject("permissions")?.let { JSONObject(it.toString()) },
-                contextWindow = objectValue.optInt("contextWindow").takeIf { it > 0 },
-                lastTokenUsage = objectValue.optJSONObject("lastTokenUsage")?.let { TokenUsageSnapshot.fromJson(it) },
-                totalTokenUsage = objectValue.optJSONObject("totalTokenUsage")?.let { TokenUsageSnapshot.fromJson(it) },
+                preview = firstNonEmpty(objectValue.optString("preview", ""), threadObject.optString("preview", "")),
+                model = firstNonEmpty(objectValue.optString("model", ""), threadObject.optString("model", "")),
+                backend = firstNonEmpty(
+                    objectValue.optString("backend", ""),
+                    objectValue.optString("modelProvider", ""),
+                    threadObject.optString("modelProvider", ""),
+                ),
+                cwd = firstNonEmpty(
+                    objectValue.optString("cwd", ""),
+                    threadObject.optString("cwd", ""),
+                    threadObject.optString("path", ""),
+                ),
+                updatedAt = extractUpdatedAt(objectValue, threadObject),
+                approvalPolicy = firstNonEmpty(
+                    objectValue.optString("approvalPolicy", ""),
+                    threadObject.optString("approvalPolicy", ""),
+                ),
+                sandbox = extractSandbox(objectValue, threadObject),
+                permissions = extractPermissions(objectValue, threadObject),
+                contextWindow = extractContextWindow(objectValue, threadObject),
+                lastTokenUsage = extractTokenUsageSnapshot(objectValue, threadObject, "lastTokenUsage", "last"),
+                totalTokenUsage = extractTokenUsageSnapshot(objectValue, threadObject, "totalTokenUsage", "total"),
             )
         }
 
@@ -5637,16 +5933,41 @@ private data class SessionInfo(
                 preview = firstNonEmpty(objectValue.optString("preview", ""), threadObject.optString("preview", "")),
                 model = firstNonEmpty(objectValue.optString("model", ""), threadObject.optString("model", "")),
                 backend = firstNonEmpty(objectValue.optString("backend", ""), objectValue.optString("modelProvider", ""), threadObject.optString("modelProvider", "")),
-                cwd = firstNonEmpty(objectValue.optString("cwd", ""), threadObject.optString("cwd", "")),
-                updatedAt = firstNonEmpty(objectValue.optString("updatedAt", ""), objectValue.optLong("updatedAt", 0L).takeIf { it > 0L }?.toString().orEmpty()),
-                approvalPolicy = objectValue.optString("approvalPolicy", ""),
-                sandbox = cloneJsonValue(objectValue.opt("sandbox")),
-                permissions = objectValue.optJSONObject("permissions")?.let { JSONObject(it.toString()) },
-                contextWindow = objectValue.optInt("contextWindow").takeIf { it > 0 },
-                lastTokenUsage = objectValue.optJSONObject("lastTokenUsage")?.let { TokenUsageSnapshot.fromJson(it) },
-                totalTokenUsage = objectValue.optJSONObject("totalTokenUsage")?.let { TokenUsageSnapshot.fromJson(it) },
+                cwd = firstNonEmpty(
+                    objectValue.optString("cwd", ""),
+                    threadObject.optString("cwd", ""),
+                    threadObject.optString("path", ""),
+                ),
+                updatedAt = extractUpdatedAt(objectValue, threadObject),
+                approvalPolicy = firstNonEmpty(
+                    objectValue.optString("approvalPolicy", ""),
+                    threadObject.optString("approvalPolicy", ""),
+                ),
+                sandbox = extractSandbox(objectValue, threadObject),
+                permissions = extractPermissions(objectValue, threadObject),
+                contextWindow = extractContextWindow(objectValue, threadObject),
+                lastTokenUsage = extractTokenUsageSnapshot(objectValue, threadObject, "lastTokenUsage", "last"),
+                totalTokenUsage = extractTokenUsageSnapshot(objectValue, threadObject, "totalTokenUsage", "total"),
             )
         }
+    }
+
+    fun mergedWith(previous: SessionInfo?): SessionInfo {
+        if (previous == null) return this
+        return copy(
+            title = title.ifBlank { previous.title },
+            preview = preview.ifBlank { previous.preview },
+            model = model.ifBlank { previous.model },
+            backend = backend.ifBlank { previous.backend },
+            cwd = cwd.ifBlank { previous.cwd },
+            updatedAt = updatedAt.ifBlank { previous.updatedAt },
+            approvalPolicy = approvalPolicy.ifBlank { previous.approvalPolicy },
+            sandbox = sandbox ?: cloneJsonValue(previous.sandbox),
+            permissions = permissions?.let { JSONObject(it.toString()) } ?: previous.permissions?.let { JSONObject(it.toString()) },
+            contextWindow = contextWindow ?: previous.contextWindow,
+            lastTokenUsage = lastTokenUsage ?: previous.lastTokenUsage,
+            totalTokenUsage = totalTokenUsage ?: previous.totalTokenUsage,
+        )
     }
 
     fun titleLine(): String {
@@ -5681,7 +6002,10 @@ private data class SessionInfo(
     }
 
     fun permissionsSummary(): String {
-        val id = permissions?.optString("id", "")?.trim().orEmpty()
+        val id = firstNonEmpty(
+            permissions?.optString("id", "") ?: "",
+            permissions?.optString("type", "") ?: "",
+        ).trim()
         return id.ifBlank { "默认" }
     }
 
