@@ -156,7 +156,7 @@ internal fun MainActivity.CodeBrowserPage(
                             selected = state.selectedPath == entry.browsePath(),
                             onClick = {
                                 selectCodeBrowserPath(entry.browsePath())
-                                setCodeBrowserMode(CodeBrowserMode.File)
+                                setCodeBrowserMode(CodeBrowserMode.Diff)
                             },
                         )
                         if (index < state.diffEntries.lastIndex) {

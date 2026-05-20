@@ -16,7 +16,7 @@ internal fun MainActivity.openCodeBrowser(itemId: String, selectedPath: String?,
                         diffEntries = item.diffEntries,
                         fallbackDiff = item.fallbackDiff,
                         selectedPath = selectedPath ?: item.diffEntries.firstOrNull()?.browsePath(),
-                        mode = if (selectedPath.isNullOrBlank()) CodeBrowserMode.Diff else CodeBrowserMode.File,
+                        mode = CodeBrowserMode.Diff,
                     )
 
                 else -> null
@@ -39,7 +39,7 @@ internal fun MainActivity.selectCodeBrowserPath(path: String) {
         if (state.selectedPath == path) return
         codeBrowserState = state.copy(
             selectedPath = path,
-            mode = CodeBrowserMode.File,
+            mode = CodeBrowserMode.Diff,
             fileReadState = CodeBrowserFileReadState.Idle,
         )
     }
