@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
@@ -72,8 +73,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -145,6 +144,7 @@ class MainActivity : ComponentActivity() {
         private const val CODE_BROWSER_RENDER_CACHE_SIZE = 16
         private const val CODE_BROWSER_FULL_HIGHLIGHT_MAX_CHARS = 60000
         private const val CODE_BROWSER_FULL_HIGHLIGHT_MAX_LINES = 1200
+        private const val SESSION_SYNC_INTERVAL_MS = 5000L
     }
 
     private val uiBackground = Color(0xFFF6FBF7)
@@ -205,8 +205,6 @@ class MainActivity : ComponentActivity() {
     private var liveTurnStatus by mutableStateOf<String?>(null)
     private var chatRestoreScrollY by mutableStateOf<Int?>(null)
     private var codeBrowserState by mutableStateOf<CodeBrowserState?>(null)
-    private var transientNotice by mutableStateOf<String?>(null)
-    private var transientNonce by mutableStateOf(0)
     private var disconnectRequested = false
     private var bootSyncRequested = false
     private var lastSyncedSeq = 0
@@ -215,6 +213,7 @@ class MainActivity : ComponentActivity() {
     private var autoReconnectEnabled = false
     private var reconnectAttempt = 0
     private var reconnectScheduled = false
+    private var noticeToast: Toast? = null
 
     private val syncRunnable = object : Runnable {
         override fun run() {
@@ -224,7 +223,7 @@ class MainActivity : ComponentActivity() {
                 return
             }
             requestSessionContent(sessionId)
-            mainHandler.postDelayed(this, 1500L)
+            mainHandler.postDelayed(this, SESSION_SYNC_INTERVAL_MS)
         }
     }
 
@@ -270,6 +269,8 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         stopSessionSyncLoop()
         cancelReconnectSchedule(resetAttempt = false)
+        noticeToast?.cancel()
+        noticeToast = null
         bridgeClient?.let {
             disconnectRequested = true
             it.close()
@@ -280,16 +281,9 @@ class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun RemoteApp() {
-        val snackbarHostState = remember { SnackbarHostState() }
         val drawerState = androidx.compose.material3.rememberDrawerState(initialValue = DrawerValue.Closed)
         val codeBrowserSheetState = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
         val scope = rememberCoroutineScope()
-
-        LaunchedEffect(transientNonce) {
-            val message = transientNotice ?: return@LaunchedEffect
-            snackbarHostState.showSnackbar(message)
-            transientNotice = null
-        }
 
         BackHandler(enabled = drawerState.isOpen) {
             scope.launch {
@@ -337,7 +331,6 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     containerColor = uiBackground,
                     contentWindowInsets = WindowInsets(0, 0, 0, 0),
-                    snackbarHost = { SnackbarHost(snackbarHostState) },
                     topBar = {
                         AppTopBar(
                             onOpenDrawer = {
@@ -393,17 +386,28 @@ class MainActivity : ComponentActivity() {
                     NewChatSheet(
                         draft = draft,
                         onDismiss = { newChatDraft = null },
-                        onModelChange = { model -> newChatDraft = draft.copy(model = model) },
+                        onModelChange = { model ->
+                            newChatDraft =
+                                draft.copy(
+                                    model = model,
+                                    reasoningEffort = normalizeReasoningEffortForModel(model, draft.reasoningEffort),
+                                )
+                        },
+                        onReasoningEffortChange = { effort -> newChatDraft = draft.copy(reasoningEffort = effort) },
                         onApprovalPolicyChange = { policy -> newChatDraft = draft.copy(approvalPolicy = policy) },
                         onSandboxChange = { sandbox -> newChatDraft = draft.copy(sandbox = sandbox) },
                         onConfirm = {
                             startNewSession(
                                 projectPath = draft.projectPath,
                                 model = draft.model,
+                                reasoningEffort = draft.reasoningEffort,
                                 approvalPolicy = draft.approvalPolicy,
                                 sandbox = draft.sandbox,
                             )
                             newChatDraft = null
+                            scope.launch {
+                                drawerState.close()
+                            }
                         },
                     )
                 }
@@ -879,10 +883,15 @@ class MainActivity : ComponentActivity() {
         draft: NewChatDraft,
         onDismiss: () -> Unit,
         onModelChange: (String) -> Unit,
+        onReasoningEffortChange: (String) -> Unit,
         onApprovalPolicyChange: (String) -> Unit,
         onSandboxChange: (String) -> Unit,
         onConfirm: () -> Unit,
     ) {
+        var modelExpanded by remember { mutableStateOf(false) }
+        var effortExpanded by remember { mutableStateOf(false) }
+        var approvalExpanded by remember { mutableStateOf(false) }
+        var sandboxExpanded by remember { mutableStateOf(false) }
         val modelOptions = availableModels.ifEmpty {
             listOfNotNull(
                 selectedModel.takeIf { it.isNotBlank() }?.let {
@@ -893,10 +902,21 @@ class MainActivity : ComponentActivity() {
                         description = "",
                         hidden = false,
                         isDefault = true,
+                        supportedReasoningEfforts = emptyList(),
+                        defaultReasoningEffort = "medium",
                     )
                 },
             )
         }
+        val selectedModelInfo =
+            modelOptions.firstOrNull { it.model == draft.model || it.id == draft.model }
+                ?: modelInfoFor(draft.model)
+        val reasoningOptions = reasoningEffortOptionsForModel(draft.model)
+        val selectedReasoningOption =
+            reasoningOptions.firstOrNull { it.value == draft.reasoningEffort }
+                ?: reasoningOptionFor(draft.reasoningEffort)
+        val approvalOptions = approvalPolicyMenuOptions()
+        val sandboxOptions = sandboxMenuOptions()
 
         Column(
             modifier = Modifier
@@ -912,7 +932,7 @@ class MainActivity : ComponentActivity() {
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    text = draft.projectPath ?: "先选项目，再选模型、审批策略和沙箱。",
+                    text = draft.projectPath ?: "先选项目，再选模型、思考强度、审批策略和沙箱。",
                     color = uiMuted,
                     fontSize = 12.sp,
                     maxLines = 2,
@@ -921,44 +941,62 @@ class MainActivity : ComponentActivity() {
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Label("模型")
+                SelectionMenuField(
+                    label = "模型",
+                    selectedLabel = selectedModelInfo?.displayName ?: draft.model.ifBlank { "请选择模型" },
+                    expanded = modelExpanded,
+                    onExpandedChange = { modelExpanded = it },
+                    enabled = modelOptions.isNotEmpty(),
+                    options = modelOptions.map { model ->
+                        SelectionMenuOption(
+                            value = model.model,
+                            label = model.displayName,
+                            supporting = model.description.takeIf { it.isNotBlank() },
+                        )
+                    },
+                    onSelect = onModelChange,
+                )
                 if (modelOptions.isEmpty()) {
                     BodyText("模型列表还没加载完成。")
                 } else {
-                    Row(
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        modelOptions.forEach { model ->
-                            SelectablePill(
-                                label = model.displayName,
-                                selected = draft.model == model.model || (draft.model.isBlank() && model.isDefault),
-                                onClick = { onModelChange(model.model) },
-                            )
-                        }
+                    selectedModelInfo?.description?.takeIf { it.isNotBlank() }?.let { description ->
+                        Text(
+                            text = description,
+                            color = uiMuted,
+                            fontSize = 11.sp,
+                            lineHeight = 16.sp,
+                        )
                     }
                 }
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Label("审批策略")
-                Row(
-                    modifier = Modifier.horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    listOf(
-                        "untrusted" to "untrusted",
-                        "on-request" to "on-request",
-                        "on-failure" to "on-failure",
-                        "never" to "never",
-                    ).forEach { (policy, label) ->
-                        SelectablePill(
-                            label = label,
-                            selected = draft.approvalPolicy == policy,
-                            onClick = { onApprovalPolicyChange(policy) },
-                        )
-                    }
-                }
+                SelectionMenuField(
+                    label = "思考强度",
+                    selectedLabel = selectedReasoningOption.label,
+                    expanded = effortExpanded,
+                    onExpandedChange = { effortExpanded = it },
+                    enabled = reasoningOptions.isNotEmpty(),
+                    options = reasoningOptions,
+                    onSelect = onReasoningEffortChange,
+                )
+                Text(
+                    text = selectedReasoningOption.supporting.orEmpty(),
+                    color = uiMuted,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                )
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SelectionMenuField(
+                    label = "审批策略",
+                    selectedLabel = approvalOptions.firstOrNull { it.value == draft.approvalPolicy }?.label ?: draft.approvalPolicy,
+                    expanded = approvalExpanded,
+                    onExpandedChange = { approvalExpanded = it },
+                    options = approvalOptions,
+                    onSelect = onApprovalPolicyChange,
+                )
                 Text(
                     text = approvalPolicyDescription(draft.approvalPolicy),
                     color = uiMuted,
@@ -974,30 +1012,16 @@ class MainActivity : ComponentActivity() {
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Label("沙箱")
-                Row(
-                    modifier = Modifier.horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    listOf(
-                        "read-only" to "read-only",
-                        "danger-full-access" to "full-access",
-                        "workspace-write" to "workspace-write",
-                    ).forEach { (sandbox, label) ->
-                        SelectablePill(
-                            label = label,
-                            selected = draft.sandbox == sandbox,
-                            onClick = { onSandboxChange(sandbox) },
-                        )
-                    }
-                }
+                SelectionMenuField(
+                    label = "沙箱",
+                    selectedLabel = sandboxOptions.firstOrNull { it.value == draft.sandbox }?.label ?: draft.sandbox,
+                    expanded = sandboxExpanded,
+                    onExpandedChange = { sandboxExpanded = it },
+                    options = sandboxOptions,
+                    onSelect = onSandboxChange,
+                )
                 Text(
-                    text =
-                        when (draft.sandbox) {
-                            "read-only" -> "只读模式。不能改文件，适合纯查看、检索和解释。"
-                            "workspace-write" -> "仅允许写当前项目工作区；更稳妥，适合日常改代码。"
-                            else -> "允许完整文件系统访问；能力最强，但风险也最高。"
-                        },
+                    text = sandboxDescription(draft.sandbox),
                     color = uiMuted,
                     fontSize = 11.sp,
                     lineHeight = 16.sp,
@@ -1021,25 +1045,74 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun SelectablePill(
+    private fun SelectionMenuField(
         label: String,
-        selected: Boolean,
-        onClick: () -> Unit,
+        selectedLabel: String,
+        expanded: Boolean,
+        onExpandedChange: (Boolean) -> Unit,
+        options: List<SelectionMenuOption>,
+        onSelect: (String) -> Unit,
+        enabled: Boolean = true,
     ) {
-        Surface(
-            shape = RoundedCornerShape(999.dp),
-            color = if (selected) uiPrimary else uiSurfaceAlt,
-            border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) uiPrimary else uiBorder),
-            modifier = Modifier.clickable(onClick = onClick),
-        ) {
-            Text(
-                text = label,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                color = if (selected) Color.White else uiText,
-                fontSize = 12.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Label(label)
+            Box(modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { onExpandedChange(!expanded) },
+                    enabled = enabled,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = selectedLabel,
+                            color = uiText,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = if (expanded) "▲" else "▼",
+                            color = uiMuted,
+                            fontSize = 11.sp,
+                        )
+                    }
+                }
+                DropdownMenu(
+                    expanded = enabled && expanded,
+                    onDismissRequest = { onExpandedChange(false) },
+                    modifier = Modifier.fillMaxWidth(),
+                    containerColor = uiSurface,
+                    tonalElevation = 0.dp,
+                    shadowElevation = 10.dp,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
+                ) {
+                    options.forEach { option ->
+                        DropdownMenuItem(
+                            text = {
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(option.label)
+                                    option.supporting?.takeIf { it.isNotBlank() }?.let { supporting ->
+                                        Text(
+                                            text = supporting,
+                                            color = uiMuted,
+                                            fontSize = 11.sp,
+                                            lineHeight = 15.sp,
+                                        )
+                                    }
+                                }
+                            },
+                            onClick = {
+                                onExpandedChange(false)
+                                onSelect(option.value)
+                            },
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -1410,6 +1483,10 @@ class MainActivity : ComponentActivity() {
                     expanded = actionsExpanded,
                     onDismissRequest = { actionsExpanded = false },
                     modifier = Modifier.align(Alignment.TopEnd),
+                    containerColor = uiSurfaceAlt,
+                    tonalElevation = 0.dp,
+                    shadowElevation = 10.dp,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
                 ) {
                     DropdownMenuItem(
                         text = { Text("重命名") },
@@ -2503,7 +2580,6 @@ class MainActivity : ComponentActivity() {
                 selectedTab = AppTab.Chat
                 requestSessionList()
                 requestModelList()
-                startSessionSyncLoop()
             }
 
             "event" -> handleEvent(message)
@@ -2520,8 +2596,10 @@ class MainActivity : ComponentActivity() {
             if (!ok) {
                 val errorText = extractErrorText(message.optJSONObject("error")).ifBlank { formatJson(message.optJSONObject("error")) }
                 callback.onError(errorText)
-                appendSystemNote("请求失败: $errorText")
-                showNotice("请求失败: $errorText")
+                if (!callback.suppressDefaultErrorUi()) {
+                    appendSystemNote("请求失败: $errorText")
+                    showNotice("请求失败: $errorText")
+                }
                 return
             }
             try {
@@ -2549,7 +2627,7 @@ class MainActivity : ComponentActivity() {
             if (info != null) {
                 upsertSession(info)
                 if (activeSessionId == null) {
-                    selectSession(info.sessionId, syncHistory = true)
+                    selectSession(info.sessionId, syncHistory = false)
                 }
             }
             return
@@ -2716,6 +2794,7 @@ class MainActivity : ComponentActivity() {
             }
             replaceSessions(newSessions)
             if (activeSessionId != null && sessions.none { it.sessionId == activeSessionId }) {
+                stopSessionSyncLoop()
                 activeSessionId = null
                 prefs.edit().remove(KEY_SESSION).apply()
             }
@@ -2757,6 +2836,7 @@ class MainActivity : ComponentActivity() {
     private fun startNewSession(
         projectPath: String?,
         model: String,
+        reasoningEffort: String,
         approvalPolicy: String,
         sandbox: String,
     ) {
@@ -2776,21 +2856,30 @@ class MainActivity : ComponentActivity() {
             put("model", model)
             put("approvalPolicy", approvalPolicy)
             put("sandbox", sandbox)
+            put(
+                "config",
+                JSONObject().apply {
+                    put("model_reasoning_effort", reasoningEffort)
+                },
+            )
         }
 
-        sendRequest("session.start", payload) { response ->
-            val info = response.optJSONObject("payload")?.optJSONObject("session")?.let { SessionInfo.fromSession(it) }
-            if (info != null) {
-                upsertSession(info)
-                selectSession(info.sessionId, syncHistory = false)
-                selectedTab = AppTab.Chat
-                selectedWorkspace = info.cwd.takeIf { it.isNotBlank() } ?: projectPath
-                if (info.model.isNotBlank()) {
-                    selectModel(info.model)
+        if (sendRequest("session.start", payload) { response ->
+                val info = response.optJSONObject("payload")?.optJSONObject("session")?.let { SessionInfo.fromSession(it) }
+                if (info != null) {
+                    upsertSession(info)
+                    selectSession(info.sessionId, syncHistory = false)
+                    selectedTab = AppTab.Chat
+                    selectedWorkspace = info.cwd.takeIf { it.isNotBlank() } ?: projectPath
+                    if (info.model.isNotBlank()) {
+                        selectModel(info.model)
+                    }
+                    appendSystemNote("新会话已创建: ${shortId(info.sessionId)}")
+                    showNotice("新对话已创建")
                 }
-                appendSystemNote("新会话已创建: ${shortId(info.sessionId)}")
-                showNotice("新会话已创建")
             }
+        ) {
+            selectedTab = AppTab.Chat
         }
     }
 
@@ -2827,6 +2916,7 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        startSessionSyncLoop()
         composerText = ""
     }
 
@@ -2864,6 +2954,10 @@ class MainActivity : ComponentActivity() {
         if (!sendRequest("session.content", payload, object : ResponseHandler {
             override fun onResponse(response: JSONObject) {
                 syncInFlight = false
+                if (activeSessionId != requestedSessionId) {
+                    sessionContentDirty = false
+                    return
+                }
                 val responsePayload = response.optJSONObject("payload")
                 responsePayload?.optJSONObject("session")
                     ?.let(SessionInfo::fromSession)
@@ -2874,8 +2968,14 @@ class MainActivity : ComponentActivity() {
 
             override fun onError(errorText: String) {
                 syncInFlight = false
+                if (activeSessionId != requestedSessionId) {
+                    sessionContentDirty = false
+                    return
+                }
                 flushPendingSessionRefresh(requestedSessionId)
             }
+
+            override fun suppressDefaultErrorUi(): Boolean = true
         })) {
             syncInFlight = false
         }
@@ -2954,8 +3054,10 @@ class MainActivity : ComponentActivity() {
         clearConversation()
         if (syncHistory) {
             requestSessionContent(sessionId)
+            startSessionSyncLoop()
+        } else {
+            stopSessionSyncLoop()
         }
-        startSessionSyncLoop()
     }
 
     private fun replaceSessions(newSessions: List<SessionInfo>) {
@@ -4466,9 +4568,119 @@ class MainActivity : ComponentActivity() {
         prefs.edit().putString(KEY_MODEL, selectedModel).apply()
     }
 
+    private fun modelInfoFor(modelId: String): ModelInfo? {
+        val target = modelId.trim()
+        if (target.isBlank()) return null
+        return availableModels.firstOrNull { it.model == target || it.id == target }
+    }
+
     private fun replaceModels(newModels: List<ModelInfo>) {
         availableModels.clear()
         availableModels.addAll(newModels.sortedWith(compareByDescending<ModelInfo> { it.isDefault }.thenBy { it.displayName.lowercase(Locale.getDefault()) }))
+    }
+
+    private fun reasoningEffortOptionsForModel(modelId: String): List<SelectionMenuOption> {
+        val model = modelInfoFor(modelId)
+        val declared = model?.supportedReasoningEfforts.orEmpty()
+        if (declared.isNotEmpty()) {
+            return declared.map { option ->
+                SelectionMenuOption(
+                    value = option.effort,
+                    label = reasoningEffortMenuLabel(option.effort),
+                    supporting = option.description.ifBlank { reasoningEffortDescription(option.effort) },
+                )
+            }
+        }
+        return reasoningEffortFallbackOptions()
+    }
+
+    private fun reasoningEffortFallbackOptions(): List<SelectionMenuOption> {
+        return listOf("minimal", "low", "medium", "high", "xhigh", "none").map { effort ->
+            reasoningOptionFor(effort)
+        }
+    }
+
+    private fun reasoningOptionFor(effort: String): SelectionMenuOption {
+        return SelectionMenuOption(
+            value = effort,
+            label = reasoningEffortMenuLabel(effort),
+            supporting = reasoningEffortDescription(effort),
+        )
+    }
+
+    private fun defaultReasoningEffortForModel(modelId: String): String {
+        val model = modelInfoFor(modelId)
+        val availableEfforts = reasoningEffortOptionsForModel(modelId).map { it.value }.toSet()
+        val preferred = model?.defaultReasoningEffort?.trim().orEmpty()
+        if (preferred.isNotBlank() && preferred in availableEfforts) {
+            return preferred
+        }
+        return when {
+            "medium" in availableEfforts -> "medium"
+            availableEfforts.isNotEmpty() -> reasoningEffortOptionsForModel(modelId).first().value
+            else -> "medium"
+        }
+    }
+
+    private fun normalizeReasoningEffortForModel(
+        modelId: String,
+        preferred: String,
+    ): String {
+        val normalized = preferred.trim()
+        val options = reasoningEffortOptionsForModel(modelId)
+        return when {
+            normalized.isNotBlank() && options.any { it.value == normalized } -> normalized
+            else -> defaultReasoningEffortForModel(modelId)
+        }
+    }
+
+    private fun reasoningEffortMenuLabel(effort: String): String {
+        return when (effort.trim()) {
+            "none" -> "关闭思考 (none)"
+            "minimal" -> "极低 (minimal)"
+            "low" -> "低 (low)"
+            "medium" -> "中 (medium)"
+            "high" -> "高 (high)"
+            "xhigh" -> "极高 (xhigh)"
+            else -> effort.ifBlank { "未提供" }
+        }
+    }
+
+    private fun reasoningEffortDescription(effort: String): String {
+        return when (effort.trim()) {
+            "none" -> "尽量不做额外推理，返回会更直接。"
+            "minimal" -> "保留极少推理，适合很轻的任务。"
+            "low" -> "较轻推理，适合常规问答和小改动。"
+            "medium" -> "速度和质量更平衡，适合大多数任务。"
+            "high" -> "更多推理，适合复杂实现和排查。"
+            "xhigh" -> "最深推理，适合难题，但通常更慢。"
+            else -> "按该模型支持的思考强度原样下发。"
+        }
+    }
+
+    private fun approvalPolicyMenuOptions(): List<SelectionMenuOption> {
+        return listOf(
+            SelectionMenuOption("untrusted", "最保守 (untrusted)"),
+            SelectionMenuOption("on-request", "按需审批 (on-request)"),
+            SelectionMenuOption("on-failure", "失败后审批 (on-failure)"),
+            SelectionMenuOption("never", "不审批 (never)"),
+        )
+    }
+
+    private fun sandboxMenuOptions(): List<SelectionMenuOption> {
+        return listOf(
+            SelectionMenuOption("read-only", "只读 (read-only)"),
+            SelectionMenuOption("workspace-write", "工作区可写 (workspace-write)"),
+            SelectionMenuOption("danger-full-access", "完整访问 (danger-full-access)"),
+        )
+    }
+
+    private fun sandboxDescription(sandbox: String): String {
+        return when (sandbox.trim()) {
+            "read-only" -> "只读模式。不能改文件，适合纯查看、检索和解释。"
+            "workspace-write" -> "仅允许写当前项目工作区；更稳妥，适合日常改代码。"
+            else -> "允许完整文件系统访问；能力最强，但风险也最高。"
+        }
     }
 
     private fun currentSessionModel(): String {
@@ -4620,6 +4832,7 @@ class MainActivity : ComponentActivity() {
             NewChatDraft(
                 projectPath = projectPath?.takeIf { it.isNotBlank() },
                 model = defaultModel,
+                reasoningEffort = defaultReasoningEffortForModel(defaultModel),
                 approvalPolicy = "never",
                 sandbox = "danger-full-access",
             )
@@ -4656,14 +4869,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showNotice(message: String) {
-        transientNotice = message
-        transientNonce += 1
+        noticeToast?.cancel()
+        noticeToast = Toast.makeText(this, message, Toast.LENGTH_SHORT)
+        noticeToast?.show()
     }
 
     private fun startSessionSyncLoop() {
         stopSessionSyncLoop()
         if (!connected || activeSessionId.isNullOrBlank()) return
-        mainHandler.postDelayed(syncRunnable, 1500L)
+        mainHandler.postDelayed(syncRunnable, SESSION_SYNC_INTERVAL_MS)
     }
 
     private fun stopSessionSyncLoop() {
@@ -5748,6 +5962,7 @@ private data class ProjectGroup(
 private data class NewChatDraft(
     val projectPath: String?,
     val model: String,
+    val reasoningEffort: String,
     val approvalPolicy: String,
     val sandbox: String,
 )
@@ -5757,6 +5972,17 @@ private data class SessionInfoSheetState(
     val rows: List<Pair<String, String>>,
 )
 
+private data class SelectionMenuOption(
+    val value: String,
+    val label: String,
+    val supporting: String? = null,
+)
+
+private data class ReasoningEffortInfo(
+    val effort: String,
+    val description: String,
+)
+
 private data class ModelInfo(
     val id: String,
     val model: String,
@@ -5764,11 +5990,27 @@ private data class ModelInfo(
     val description: String,
     val hidden: Boolean,
     val isDefault: Boolean,
+    val supportedReasoningEfforts: List<ReasoningEffortInfo>,
+    val defaultReasoningEffort: String,
 ) {
     companion object {
         fun fromJson(objectValue: JSONObject): ModelInfo? {
             val id = objectValue.optString("id", "").trim()
             if (id.isBlank()) return null
+            val reasoningOptions = buildList {
+                val array = objectValue.optJSONArray("supportedReasoningEfforts") ?: return@buildList
+                for (i in 0 until array.length()) {
+                    val item = array.optJSONObject(i) ?: continue
+                    val effort = item.optString("reasoningEffort", "").trim()
+                    if (effort.isBlank()) continue
+                    add(
+                        ReasoningEffortInfo(
+                            effort = effort,
+                            description = item.optString("description", "").trim(),
+                        ),
+                    )
+                }
+            }
             return ModelInfo(
                 id = id,
                 model = objectValue.optString("model", "").trim().ifBlank { id },
@@ -5776,6 +6018,8 @@ private data class ModelInfo(
                 description = objectValue.optString("description", "").trim(),
                 hidden = objectValue.optBoolean("hidden", false),
                 isDefault = objectValue.optBoolean("isDefault", false),
+                supportedReasoningEfforts = reasoningOptions,
+                defaultReasoningEffort = objectValue.optString("defaultReasoningEffort", "").trim(),
             )
         }
     }
@@ -6075,6 +6319,8 @@ private fun interface ResponseHandler {
     fun onResponse(response: JSONObject)
 
     fun onError(errorText: String) {}
+
+    fun suppressDefaultErrorUi(): Boolean = false
 }
 
 private fun ClipData.firstText(): String? {
