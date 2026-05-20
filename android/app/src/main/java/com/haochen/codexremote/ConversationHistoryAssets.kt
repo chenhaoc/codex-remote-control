@@ -50,6 +50,11 @@ internal fun buildConversationCss(): String =
         width: 100%;
     }
 
+    .cr-rendered-item {
+        content-visibility: auto;
+        contain-intrinsic-size: 96px;
+    }
+
     .cr-message.user {
         justify-content: flex-end;
     }

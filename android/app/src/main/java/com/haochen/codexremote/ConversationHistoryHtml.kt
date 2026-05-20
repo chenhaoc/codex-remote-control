@@ -3,8 +3,12 @@ package com.haochen.codexremote
 internal fun buildConversationPageHtml(
     items: List<ConversationItem>,
     displayBasePath: String?,
+): String = buildConversationPageHtml(buildConversationRenderedItems(items, displayBasePath))
+
+internal fun buildConversationPageHtml(
+    renderedItems: List<ConversationRenderedItem>,
 ): String {
-    val bodyHtml = buildConversationItemsHtml(items, displayBasePath)
+    val bodyHtml = renderedItems.joinToString("") { it.html }
     val style = buildConversationCss()
     val script = buildConversationScript()
     return """
@@ -33,19 +37,108 @@ internal fun buildConversationPageHtml(
     """.trimIndent()
 }
 
+internal data class ConversationRenderedItem(
+    val id: String,
+    val type: String,
+    val html: String,
+)
+
+internal data class ConversationRenderCacheEntry(
+    val signature: String,
+    val renderedItem: ConversationRenderedItem,
+)
+
+internal fun buildConversationRenderedItems(
+    items: List<ConversationItem>,
+    displayBasePath: String?,
+): List<ConversationRenderedItem> =
+    items.map { item -> buildConversationRenderedItem(item, displayBasePath) }
+
+internal fun buildConversationRenderedItem(
+    item: ConversationItem,
+    displayBasePath: String?,
+): ConversationRenderedItem {
+    val type =
+        when (item) {
+            is ConversationItem.Bubble -> if (item.right) "user" else "assistant"
+            is ConversationItem.SystemNote -> "system"
+            is ConversationItem.FileChange -> "fileChange"
+        }
+    val contentHtml =
+        when (item) {
+            is ConversationItem.Bubble -> item.toHtml()
+            is ConversationItem.SystemNote -> item.toHtml()
+            is ConversationItem.FileChange -> item.toHtml(displayBasePath)
+        }
+    return ConversationRenderedItem(
+        id = item.id,
+        type = type,
+        html = wrapConversationRenderedItem(item.id, type, contentHtml),
+    )
+}
+
+internal fun buildConversationRenderSignature(
+    item: ConversationItem,
+    displayBasePath: String?,
+): String =
+    when (item) {
+        is ConversationItem.Bubble ->
+            listOf(
+                "bubble",
+                item.id,
+                item.right.toString(),
+                item.text,
+                item.backgroundColor.toString(),
+                item.textColor.toString(),
+                item.turnKey.orEmpty(),
+                item.assistantKey.orEmpty(),
+            ).joinToString("\u001F")
+
+        is ConversationItem.SystemNote ->
+            listOf(
+                "system",
+                item.id,
+                item.text,
+                item.itemKey.orEmpty(),
+            ).joinToString("\u001F")
+
+        is ConversationItem.FileChange ->
+            listOf(
+                "fileChange",
+                item.id,
+                item.title,
+                item.summary,
+                item.status,
+                item.fallbackDiff.orEmpty(),
+                item.sourceItemId.orEmpty(),
+                item.turnId.orEmpty(),
+                displayBasePath.orEmpty(),
+                item.diffEntries.joinToString("\u001E") { entry ->
+                    listOf(entry.path, entry.kind, entry.diff, entry.movePath.orEmpty()).joinToString("\u001D")
+                },
+            ).joinToString("\u001F")
+    }
+
 internal fun buildConversationItemsHtml(
     items: List<ConversationItem>,
     displayBasePath: String?,
 ): String =
-    buildString {
-        items.forEach { item ->
-            when (item) {
-                is ConversationItem.Bubble -> append(item.toHtml())
-                is ConversationItem.SystemNote -> append(item.toHtml())
-                is ConversationItem.FileChange -> append(item.toHtml(displayBasePath))
-            }
-        }
-    }
+    buildConversationRenderedItems(items, displayBasePath).joinToString("") { it.html }
+
+internal fun wrapConversationRenderedItem(
+    id: String,
+    type: String,
+    contentHtml: String,
+): String =
+    """
+    <div
+        class="cr-rendered-item"
+        data-cr-item-id="${escapeConversationHtmlAttribute(id)}"
+        data-cr-item-type="${escapeConversationHtmlAttribute(type)}"
+    >
+        $contentHtml
+    </div>
+    """.trimIndent()
 
 internal fun ConversationItem.Bubble.toHtml(): String {
     return if (right) {

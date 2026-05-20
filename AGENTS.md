@@ -115,12 +115,25 @@ npm run bridge
 
 - Compose UI and connection/session behavior are intentionally split across page and controller files. Keep that split intact.
 - Chat rendering is partly HTML/CSS inside `ConversationHistoryWebView.kt`; markdown/code-block UI changes usually belong there, not in Compose.
+- Chat history rendering may be optimized incrementally, but it must never bypass the session-authoritative `conversationItems` model.
 - WebSocket transport lifecycle lives in `BridgeClient.java` plus reconnect/state logic in `MainActivityBridgeController.kt`.
 - For UI changes, prefer small targeted updates and keep mobile layout behavior in mind:
   - keyboard/insets
   - scroll restoration
   - dialog vs sheet ergonomics
   - connection feedback
+
+## Conversation History Rules
+
+- The session snapshot returned by `session.content` is the source of truth for conversation history. Treat realtime events as a temporary projection only.
+- Realtime events must flow through Activity-owned state such as `conversationItems`, pending approvals, and related item-id maps. Do not write realtime events directly into WebView DOM as an independent message store.
+- Snapshot reconciliation must be preserved. When a session snapshot arrives, it must be able to replace, correct, reorder, or remove any realtime-projected UI state.
+- Any WebView rendering optimization must keep this rule:
+  - initial load and session switch may render the full snapshot;
+  - simple tail appends or assistant deltas may use incremental DOM updates only if they are derived from the current `conversationItems`;
+  - if item ids, order, count, session id, or rendered item type diverge from the previous rendered state, fall back to a full snapshot render.
+- Do not trade correctness for smoother scrolling. If there is doubt, prefer session-authoritative rendering over realtime-only rendering.
+- Avoid duplicating message classification, markdown parsing, or code rendering as a separate JavaScript truth layer. Kotlin remains responsible for turning `ConversationItem` data into trusted HTML or HTML fragments.
 
 ## Validation Expectations
 

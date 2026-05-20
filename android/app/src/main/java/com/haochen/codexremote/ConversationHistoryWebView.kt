@@ -18,6 +18,8 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.viewinterop.AndroidView
+import org.json.JSONArray
+import org.json.JSONObject
 
 private sealed interface ConversationScrollMode {
     data object Bottom : ConversationScrollMode
@@ -40,13 +42,16 @@ internal fun ConversationHistoryWebView(
 ) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
-    val pageHtml = buildConversationPageHtml(items, displayBasePath)
+    val renderCache = remember(sessionId) { mutableMapOf<String, ConversationRenderCacheEntry>() }
+    val renderedItems = buildCachedConversationRenderedItems(items, displayBasePath, renderCache)
+    val renderSnapshot = ConversationRenderSnapshot.from(renderedItems)
     var pendingScrollMode by remember(sessionId, restoreScrollY) {
         mutableStateOf<ConversationScrollMode>(
             restoreScrollY?.let { ConversationScrollMode.Restore(it) } ?: ConversationScrollMode.Bottom,
         )
     }
     var lastLoadedHtml by remember(sessionId) { mutableStateOf<String?>(null) }
+    var lastRenderSnapshot by remember(sessionId) { mutableStateOf<ConversationRenderSnapshot?>(null) }
     var expectedHtmlTag by remember(sessionId) { mutableStateOf<String?>(null) }
     var restoreAnnounced by remember(sessionId, restoreScrollY) { mutableStateOf(false) }
 
@@ -91,36 +96,179 @@ internal fun ConversationHistoryWebView(
             },
         factory = { webView },
         update = { view ->
-            if (lastLoadedHtml == pageHtml) return@AndroidView
+            if (lastRenderSnapshot == renderSnapshot) return@AndroidView
+            val renderTag = renderSnapshot.tag()
             val sessionChanged = lastLoadedHtml == null
             val wasAtBottom = isConversationNearBottom(view)
+            val scrollY = view.scrollY
             pendingScrollMode =
                 when {
                     restoreScrollY != null && sessionChanged -> ConversationScrollMode.Restore(restoreScrollY)
                     sessionChanged -> ConversationScrollMode.Bottom
                     wasAtBottom -> ConversationScrollMode.Bottom
-                    else -> ConversationScrollMode.Restore(view.scrollY)
+                    else -> ConversationScrollMode.Restore(scrollY)
                 }
-            lastLoadedHtml = pageHtml
-            expectedHtmlTag = pageHtml
-            view.tag = pageHtml
-            view.loadDataWithBaseURL(
-                null,
-                pageHtml,
-                "text/html",
-                "utf-8",
-                null,
-            )
+            val lastSnapshot = lastRenderSnapshot
+            if (
+                !sessionChanged &&
+                lastSnapshot != null &&
+                canPatchConversationIncrementally(lastSnapshot, renderSnapshot)
+            ) {
+                lastLoadedHtml = renderTag
+                lastRenderSnapshot = renderSnapshot
+                expectedHtmlTag = renderTag
+                view.tag = renderTag
+                applyConversationIncrementalPatch(
+                    webView = view,
+                    fallbackHtml = { buildConversationPageHtml(renderedItems) },
+                    previous = lastSnapshot,
+                    current = renderSnapshot,
+                    scrollMode = pendingScrollMode,
+                )
+            } else {
+                val pageHtml = buildConversationPageHtml(renderedItems)
+                lastLoadedHtml = renderTag
+                lastRenderSnapshot = renderSnapshot
+                expectedHtmlTag = renderTag
+                view.tag = renderTag
+                view.loadDataWithBaseURL(
+                    null,
+                    pageHtml,
+                    "text/html",
+                    "utf-8",
+                    null,
+                )
+            }
         },
     )
 }
 
+private fun buildCachedConversationRenderedItems(
+    items: List<ConversationItem>,
+    displayBasePath: String?,
+    cache: MutableMap<String, ConversationRenderCacheEntry>,
+): List<ConversationRenderedItem> {
+    val liveIds = items.mapTo(mutableSetOf()) { it.id }
+    cache.keys.removeAll { it !in liveIds }
+    return items.map { item ->
+        val signature = buildConversationRenderSignature(item, displayBasePath)
+        val cached = cache[item.id]
+        if (cached != null && cached.signature == signature) {
+            cached.renderedItem
+        } else {
+            val renderedItem = buildConversationRenderedItem(item, displayBasePath)
+            cache[item.id] = ConversationRenderCacheEntry(
+                signature = signature,
+                renderedItem = renderedItem,
+            )
+            renderedItem
+        }
+    }
+}
+
+private data class ConversationRenderSnapshot(
+    val ids: List<String>,
+    val types: List<String>,
+    val htmlById: Map<String, String>,
+) {
+    companion object {
+        fun from(items: List<ConversationRenderedItem>): ConversationRenderSnapshot =
+            ConversationRenderSnapshot(
+                ids = items.map { it.id },
+                types = items.map { it.type },
+                htmlById = items.associate { item -> item.id to item.html },
+            )
+    }
+
+    fun tag(): String = "${ids.size}:${ids.hashCode()}:${types.hashCode()}:${htmlById.hashCode()}"
+}
+
 private fun isConversationNearBottom(webView: WebView): Boolean {
-    val scaledContentHeight = (webView.contentHeight * webView.scale).toInt()
-    if (scaledContentHeight <= 0) return true
-    val viewportBottom = webView.scrollY + webView.height
-    val distanceToBottom = scaledContentHeight - viewportBottom
-    return distanceToBottom <= 96
+    return !webView.canScrollVertically(1)
+}
+
+private fun canPatchConversationIncrementally(
+    previous: ConversationRenderSnapshot,
+    current: ConversationRenderSnapshot,
+): Boolean {
+    if (previous.ids.size > current.ids.size) return false
+    previous.ids.forEachIndexed { index, id ->
+        if (current.ids.getOrNull(index) != id) return false
+        if (current.types.getOrNull(index) != previous.types[index]) return false
+    }
+    val changedIndexes =
+        current.ids.mapIndexedNotNull { index, id ->
+            if (previous.htmlById[id] != current.htmlById[id]) index else null
+        }
+    if (changedIndexes.isEmpty()) return true
+    val firstNewIndex = previous.ids.size
+    val lastExistingIndex = previous.ids.lastIndex
+    if (changedIndexes.any { index -> index < lastExistingIndex }) return false
+    if (changedIndexes.any { index -> index < firstNewIndex && index != lastExistingIndex }) return false
+    return true
+}
+
+private fun applyConversationIncrementalPatch(
+    webView: WebView,
+    fallbackHtml: () -> String,
+    previous: ConversationRenderSnapshot,
+    current: ConversationRenderSnapshot,
+    scrollMode: ConversationScrollMode,
+) {
+    val updates = JSONArray()
+    current.ids.forEachIndexed { index, id ->
+        if (previous.htmlById[id] != current.htmlById[id]) {
+            updates.put(
+                JSONObject().apply {
+                    put("id", id)
+                    put("type", current.types[index])
+                    put("append", index >= previous.ids.size)
+                    put("html", current.htmlById[id].orEmpty())
+                },
+            )
+        }
+    }
+    if (updates.length() == 0) return
+    val script =
+        """
+        (function() {
+          var updates = $updates;
+          var root = document.querySelector('.cr-conversation');
+          if (!root) return false;
+          for (var i = 0; i < updates.length; i++) {
+            var update = updates[i];
+            var existing = null;
+            var renderedItems = root.querySelectorAll('[data-cr-item-id]');
+            for (var j = 0; j < renderedItems.length; j++) {
+              if (renderedItems[j].getAttribute('data-cr-item-id') === update.id) {
+                existing = renderedItems[j];
+                break;
+              }
+            }
+            if (existing) {
+              if (existing.getAttribute('data-cr-item-type') !== update.type) return false;
+              existing.outerHTML = update.html;
+            } else {
+              if (!update.append) return false;
+              root.insertAdjacentHTML('beforeend', update.html);
+            }
+          }
+          return true;
+        })();
+        """.trimIndent()
+    webView.evaluateJavascript(script) { result ->
+        if (result == "true") {
+            applyConversationScrollMode(webView, scrollMode)
+        } else {
+            webView.loadDataWithBaseURL(
+                null,
+                fallbackHtml(),
+                "text/html",
+                "utf-8",
+                null,
+            )
+        }
+    }
 }
 
 private fun buildConversationWebView(

@@ -212,6 +212,9 @@ internal fun MainActivity.applySessionContentSnapshot(payload: JSONObject?) {
         if (snapshotItems.isEmpty() && snapshotApprovals.isEmpty() && conversationItems.isNotEmpty()) {
             return
         }
+        if (conversationItems.matchesSnapshot(snapshotItems) && pendingApprovals.matchesSnapshot(snapshotApprovals)) {
+            return
+        }
         assistantItemIds.clear()
         toolItemIds.clear()
         fileChangeItemIds.clear()
@@ -243,6 +246,11 @@ internal fun MainActivity.applySessionContentSnapshot(payload: JSONObject?) {
             }
         }
     }
+
+private fun <T> List<T>.matchesSnapshot(snapshot: List<T>): Boolean {
+    if (size != snapshot.size) return false
+    return indices.all { index -> this[index] == snapshot[index] }
+}
 
 internal fun MainActivity.replacePendingApprovals(approvals: List<ApprovalDialogState>) {
         pendingApprovals.clear()
