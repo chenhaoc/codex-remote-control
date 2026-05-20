@@ -1260,6 +1260,122 @@ test('bridge file.read resolves relative paths from session cwd', async () => {
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test('bridge preserves stored session metadata in session.list and session.content', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-session-meta-test-'));
+  const sessionId = 'stored_meta_thread_1';
+  const thread = {
+    id: sessionId,
+    sessionId,
+    forkedFromId: null,
+    preview: '已有会话',
+    ephemeral: false,
+    model: 'gpt-5',
+    modelProvider: 'custom',
+    createdAt: 1,
+    updatedAt: 2,
+    status: { type: 'idle' },
+    path: null,
+    cwd: '/tmp/meta-workspace',
+    cliVersion: 'mock',
+    source: 'app-server',
+    threadSource: null,
+    agentNickname: null,
+    agentRole: null,
+    gitInfo: null,
+    name: '已有会话',
+    turns: [],
+  };
+
+  class SessionMetadataBackend extends EventEmitter {
+    async start() {}
+
+    async stop() {}
+
+    async listThreads() {
+      return [structuredClone(thread)];
+    }
+
+    async readThread() {
+      return { thread: structuredClone(thread) };
+    }
+
+    async interruptTurn() {}
+
+    async respondRequest() {}
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  await store.load();
+  await store.upsertSession({
+    session_id: sessionId,
+    thread_id: sessionId,
+    title: '已有会话',
+    cwd: '/tmp/meta-workspace',
+    model: 'gpt-5',
+    backend: 'custom',
+    preview: '已有会话',
+    active: true,
+    approvalPolicy: 'on-request',
+    permissions: { type: 'profile', id: ':workspace' },
+    sandbox: { type: 'workspaceWrite', writableRoots: ['/tmp/meta-workspace'], networkAccess: false },
+    contextWindow: 123456,
+    lastTokenUsage: {
+      totalTokens: 120,
+      inputTokens: 70,
+      cachedInputTokens: 10,
+      outputTokens: 50,
+      reasoningOutputTokens: 5,
+    },
+    totalTokenUsage: {
+      totalTokens: 900,
+      inputTokens: 450,
+      cachedInputTokens: 100,
+      outputTokens: 450,
+      reasoningOutputTokens: 30,
+    },
+    thread,
+  });
+
+  const backend = new SessionMetadataBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'session.list', payload: {} }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+  const sessionList = messages.find((m) => m.type === 'response' && m.id === '1');
+  assert.equal(sessionList.ok, true);
+  assert.equal(sessionList.payload.sessions.length, 1);
+  assert.equal(sessionList.payload.sessions[0].approvalPolicy, 'on-request');
+  assert.deepEqual(sessionList.payload.sessions[0].permissions, { type: 'profile', id: ':workspace' });
+  assert.equal(sessionList.payload.sessions[0].contextWindow, 123456);
+  assert.equal(sessionList.payload.sessions[0].lastTokenUsage.totalTokens, 120);
+  assert.equal(sessionList.payload.sessions[0].totalTokenUsage.totalTokens, 900);
+
+  ws.send(JSON.stringify({ id: '2', type: 'session.content', payload: { session_id: sessionId } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '2'));
+  const sessionContent = messages.find((m) => m.type === 'response' && m.id === '2');
+  assert.equal(sessionContent.ok, true);
+  assert.equal(sessionContent.payload.session.session_id, sessionId);
+  assert.equal(sessionContent.payload.session.approvalPolicy, 'on-request');
+  assert.equal(sessionContent.payload.session.contextWindow, 123456);
+  assert.equal(sessionContent.payload.session.lastTokenUsage.totalTokens, 120);
+  assert.equal(sessionContent.payload.session.totalTokenUsage.totalTokens, 900);
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 async function waitFor(predicate, timeoutMs = 8000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {

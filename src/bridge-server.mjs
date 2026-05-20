@@ -10,6 +10,71 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function firstNonEmptyString(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value;
+    }
+  }
+  return '';
+}
+
+function mergeSessionSummary(summary, stored) {
+  if (!stored) return clone(summary);
+  const merged = {
+    ...clone(summary),
+    session_id: summary.session_id ?? stored.session_id,
+    thread_id: summary.thread_id ?? stored.thread_id ?? summary.session_id,
+    title: firstNonEmptyString(summary.title, stored.title),
+    cwd: firstNonEmptyString(summary.cwd, stored.cwd),
+    model: firstNonEmptyString(summary.model, stored.model),
+    preview: firstNonEmptyString(summary.preview, stored.preview),
+    backend: firstNonEmptyString(summary.backend, stored.backend),
+    createdAt: firstNonEmptyString(summary.createdAt, stored.createdAt),
+    updatedAt: firstNonEmptyString(summary.updatedAt, stored.updatedAt),
+    active: summary.active ?? stored.active ?? true,
+    thread: clone(summary.thread ?? stored.thread ?? null),
+  };
+
+  if (summary.approvalPolicy != null && !(typeof summary.approvalPolicy === 'string' && summary.approvalPolicy.trim() === '')) {
+    merged.approvalPolicy = clone(summary.approvalPolicy);
+  } else if (stored.approvalPolicy != null) {
+    merged.approvalPolicy = clone(stored.approvalPolicy);
+  }
+
+  if (summary.permissions != null) {
+    merged.permissions = clone(summary.permissions);
+  } else if (stored.permissions != null) {
+    merged.permissions = clone(stored.permissions);
+  }
+
+  if (summary.sandbox != null) {
+    merged.sandbox = clone(summary.sandbox);
+  } else if (stored.sandbox != null) {
+    merged.sandbox = clone(stored.sandbox);
+  }
+
+  if (Number.isFinite(summary.contextWindow) && summary.contextWindow > 0) {
+    merged.contextWindow = summary.contextWindow;
+  } else if (Number.isFinite(stored.contextWindow) && stored.contextWindow > 0) {
+    merged.contextWindow = stored.contextWindow;
+  }
+
+  if (summary.lastTokenUsage != null) {
+    merged.lastTokenUsage = clone(summary.lastTokenUsage);
+  } else if (stored.lastTokenUsage != null) {
+    merged.lastTokenUsage = clone(stored.lastTokenUsage);
+  }
+
+  if (summary.totalTokenUsage != null) {
+    merged.totalTokenUsage = clone(summary.totalTokenUsage);
+  } else if (stored.totalTokenUsage != null) {
+    merged.totalTokenUsage = clone(stored.totalTokenUsage);
+  }
+
+  return merged;
+}
+
 function normalizePermissionSelection(activePermissionProfile) {
   if (!activePermissionProfile || typeof activePermissionProfile !== 'object') return null;
   const id = typeof activePermissionProfile.id === 'string' ? activePermissionProfile.id.trim() : '';
@@ -212,7 +277,8 @@ export class BridgeServer extends EventEmitter {
         const backendThreads = await this.backend.listThreads(payload);
         const sessions = backendThreads.map((thread) => {
           const summary = normalizeThreadSummary(thread, this.backend.constructor.name.replace('Backend', '').toLowerCase() || 'mock');
-          return summary;
+          const stored = summary?.session_id ? this.store.getSession(summary.session_id) : null;
+          return mergeSessionSummary(summary, stored);
         });
         for (const session of sessions) {
           await this.store.upsertSession(session);
@@ -327,7 +393,7 @@ export class BridgeServer extends EventEmitter {
           collaborationMode: payload.collaborationMode ?? null,
           turnId: payload.turn_id ?? null,
         };
-        if (session && (!session.approvalPolicy || !session.permissions || !session.sandbox)) {
+        if (session && typeof this.backend.resumeThread === 'function' && (!session.approvalPolicy || !session.permissions || !session.sandbox)) {
           const hydrated = await this.#resumeStoredSession(sessionId, {
             path: session.thread?.path ?? null,
             model: turnParams.model,
@@ -657,7 +723,7 @@ export class BridgeServer extends EventEmitter {
   }
 
   async #buildSessionContent(sessionId) {
-    const session = this.store.getSession(sessionId);
+    let session = this.store.getSession(sessionId);
     if (!session) {
       return {
         session_id: sessionId,
@@ -670,6 +736,7 @@ export class BridgeServer extends EventEmitter {
     let thread = null;
     try {
       thread = await this.#loadHydrationThread(sessionId, session);
+      session = this.store.getSession(sessionId) ?? session;
     } catch {
       thread = session.thread ?? null;
     }
@@ -684,6 +751,7 @@ export class BridgeServer extends EventEmitter {
     return {
       session_id: sessionId,
       thread_id: session.thread_id ?? sessionId,
+      session,
       entries,
       pending_approvals: this.store.getPendingApprovals(sessionId),
     };
