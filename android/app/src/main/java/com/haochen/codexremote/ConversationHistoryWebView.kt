@@ -139,6 +139,7 @@ internal fun ConversationHistoryWebView(
                 val previousHeight = lastViewportHeight
                 lastViewportHeight = size.height
                 if (previousHeight == null || previousHeight <= 0 || size.height <= 0) return@onSizeChanged
+                if (!followBottom) return@onSizeChanged
                 if (restoreScrollY != null || lastLoadedHtml == null) return@onSizeChanged
                 val delta = previousHeight - size.height
                 if (delta == 0) return@onSizeChanged
@@ -970,22 +971,44 @@ private fun buildConversationCss(): String =
         white-space: pre-wrap !important;
     }
 
+    .cr-md-code-block {
+        margin: 0.62em 0 !important;
+        border-radius: 16px;
+        overflow: hidden;
+        background: linear-gradient(180deg, #173326 0%, #10261B 100%) !important;
+        box-shadow: 0 10px 24px rgba(16, 38, 27, 0.18);
+    }
+
+    .cr-md-code-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 9px 14px;
+        background: rgba(255, 255, 255, 0.06) !important;
+        border-bottom: 1px solid rgba(232, 255, 240, 0.12);
+    }
+
     .cr-md pre {
-        background: #ECF7EF !important;
-        border: 1px solid #CFE2D3;
-        border-radius: 12px;
-        padding: 10px 12px !important;
+        margin: 0 !important;
+        background: transparent !important;
+        border: 0 !important;
+        border-radius: 0 !important;
+        padding: 14px 16px 16px !important;
         overflow-x: auto !important;
         white-space: pre !important;
     }
 
     .cr-md pre code {
         background: transparent !important;
-        color: inherit !important;
+        color: #E8FFF0 !important;
+        border: 0 !important;
         padding: 0 !important;
         border-radius: 0 !important;
         white-space: pre !important;
         display: block;
+        font-size: 0.92em !important;
+        line-height: 1.62 !important;
     }
 
     .cr-md blockquote {
@@ -1056,11 +1079,21 @@ private fun buildConversationCss(): String =
     }
 
     .cr-md-code-language {
-        margin: 0 0 6px !important;
-        color: #1A8F55 !important;
-        font-size: 0.8em !important;
-        font-weight: 600 !important;
-        letter-spacing: 0.02em !important;
+        margin: 0 !important;
+        color: #98F1BD !important;
+        font-size: 0.76em !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.08em !important;
+        text-transform: uppercase !important;
+    }
+
+    .cr-md-code-accent {
+        flex: 0 0 auto;
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: #98F1BD !important;
+        box-shadow: 0 0 0 4px rgba(152, 241, 189, 0.18);
     }
 
     .cr-md-task-marker {
@@ -1222,8 +1255,12 @@ private fun ConversationMarkdownBlock.toHtml(): String =
 
         is ConversationMarkdownBlock.CodeBlock ->
             buildString {
+                append("""<div class="cr-md-code-block">""")
                 language?.takeIf { it.isNotBlank() }?.let {
+                    append("""<div class="cr-md-code-header">""")
                     append(buildConversationHtmlTag("""div class="cr-md-code-language"""", escapeConversationHtml(it)))
+                    append("""<span class="cr-md-code-accent" aria-hidden="true"></span>""")
+                    append("</div>")
                 }
                 append(
                     "<pre><code" +
@@ -1232,6 +1269,7 @@ private fun ConversationMarkdownBlock.toHtml(): String =
                         }.orEmpty() +
                         ">${escapeConversationHtml(code)}</code></pre>",
                 )
+                append("</div>")
             }
 
         is ConversationMarkdownBlock.Divider -> "<hr />"

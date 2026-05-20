@@ -17,6 +17,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -54,11 +55,14 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DividerDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalDrawerSheet
@@ -89,6 +93,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -105,6 +110,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import java.io.IOException
@@ -133,11 +139,12 @@ class MainActivity : ComponentActivity() {
         private const val KEY_CONNECTION_HISTORY = "connection_history"
         private const val KEY_SESSION = "session"
         private const val KEY_MODEL = "model"
+        private const val KEY_AUTO_RECONNECT = "auto_reconnect"
         private const val MAX_CONNECTION_HISTORY = 8
-    private const val CODE_BROWSER_FILE_CACHE_SIZE = 24
-    private const val CODE_BROWSER_RENDER_CACHE_SIZE = 16
-    private const val CODE_BROWSER_FULL_HIGHLIGHT_MAX_CHARS = 60000
-    private const val CODE_BROWSER_FULL_HIGHLIGHT_MAX_LINES = 1200
+        private const val CODE_BROWSER_FILE_CACHE_SIZE = 24
+        private const val CODE_BROWSER_RENDER_CACHE_SIZE = 16
+        private const val CODE_BROWSER_FULL_HIGHLIGHT_MAX_CHARS = 60000
+        private const val CODE_BROWSER_FULL_HIGHLIGHT_MAX_LINES = 1200
     }
 
     private val uiBackground = Color(0xFFF6FBF7)
@@ -205,6 +212,9 @@ class MainActivity : ComponentActivity() {
     private var lastSyncedSeq = 0
     private var syncInFlight = false
     private var sessionContentDirty = false
+    private var autoReconnectEnabled = false
+    private var reconnectAttempt = 0
+    private var reconnectScheduled = false
 
     private val syncRunnable = object : Runnable {
         override fun run() {
@@ -218,6 +228,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val reconnectRunnable = object : Runnable {
+        override fun run() {
+            reconnectScheduled = false
+            if (!autoReconnectEnabled || connected || bridgeClient != null) return
+            val targetUrl = bridgeUrl.trim().takeIf { it.isNotBlank() } ?: currentBridgeUrl?.takeIf { it.isNotBlank() } ?: return
+            connectToBridge(targetUrl, isAutoReconnect = true)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -227,6 +246,7 @@ class MainActivity : ComponentActivity() {
         persistConnectionHistory()
         activeSessionId = prefs.getString(KEY_SESSION, null)
         selectedModel = prefs.getString(KEY_MODEL, "")?.trim().orEmpty()
+        autoReconnectEnabled = prefs.getBoolean(KEY_AUTO_RECONNECT, false)
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.statusBarColor = AndroidColor.TRANSPARENT
@@ -241,9 +261,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        resumeBridgeConnectionIfNeeded()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         stopSessionSyncLoop()
+        cancelReconnectSchedule(resetAttempt = false)
         bridgeClient?.let {
             disconnectRequested = true
             it.close()
@@ -363,12 +389,7 @@ class MainActivity : ComponentActivity() {
             }
 
             newChatDraft?.let { draft ->
-                ModalBottomSheet(
-                    onDismissRequest = { newChatDraft = null },
-                    containerColor = uiSurface,
-                    contentColor = uiText,
-                    dragHandle = null,
-                ) {
+                AppCenteredDialog(onDismiss = { newChatDraft = null }) {
                     NewChatSheet(
                         draft = draft,
                         onDismiss = { newChatDraft = null },
@@ -389,11 +410,7 @@ class MainActivity : ComponentActivity() {
             }
 
             sessionInfoSheetState?.let { state ->
-                ModalBottomSheet(
-                    onDismissRequest = { sessionInfoSheetState = null },
-                    containerColor = uiSurface,
-                    contentColor = uiText,
-                ) {
+                AppCenteredDialog(onDismiss = { sessionInfoSheetState = null }) {
                     SessionInfoSheet(
                         state = state,
                         onDismiss = { sessionInfoSheetState = null },
@@ -457,11 +474,15 @@ class MainActivity : ComponentActivity() {
                     ),
                 ) {
                     if (selectedTab == AppTab.Chat && activeSession() != null) {
-                        OutlinedButton(
+                        IconButton(
                             onClick = { openSessionInfoSheet() },
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                         ) {
-                            Text("Info", color = uiMuted, fontSize = 12.sp)
+                            Icon(
+                                painter = painterResource(id = android.R.drawable.ic_menu_info_details),
+                                contentDescription = "会话信息",
+                                tint = uiMuted,
+                                modifier = Modifier.size(20.dp),
+                            )
                         }
                     }
                     StatusDot(active = connected)
@@ -721,6 +742,53 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
+    private fun AppCenteredDialog(
+        onDismiss: () -> Unit,
+        content: @Composable () -> Unit,
+    ) {
+        val screenHeight = LocalConfiguration.current.screenHeightDp.dp
+        val maxDialogHeight = screenHeight * 0.84f
+
+        Dialog(
+            onDismissRequest = onDismiss,
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 20.dp, vertical = 28.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(28.dp),
+                    color = uiSurface,
+                    tonalElevation = 6.dp,
+                    shadowElevation = 12.dp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = 560.dp)
+                        .heightIn(max = maxDialogHeight),
+                ) {
+                    BoxWithConstraints(
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = maxHeight)
+                                .verticalScroll(rememberScrollState())
+                                .padding(20.dp),
+                            verticalArrangement = Arrangement.spacedBy(14.dp),
+                        ) {
+                            content()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
     private fun RenameConnectionDialog(
         state: ConnectionRenameDialogState,
         onDismiss: () -> Unit,
@@ -815,7 +883,7 @@ class MainActivity : ComponentActivity() {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 18.dp, vertical = 14.dp),
+                .padding(horizontal = 2.dp, vertical = 2.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -965,8 +1033,7 @@ class MainActivity : ComponentActivity() {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 18.dp, vertical = 14.dp)
-                .navigationBarsPadding(),
+                .padding(horizontal = 2.dp, vertical = 2.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Row(
@@ -1172,18 +1239,9 @@ class MainActivity : ComponentActivity() {
                         border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
                     ) {
                         Column(modifier = Modifier.padding(18.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                SectionTitle("历史连接")
-                                OutlinedButton(onClick = { clearConnectionHistory() }) {
-                                    Text("清空")
-                                }
-                            }
+                            SectionTitle("历史连接")
                             Spacer(modifier = Modifier.height(8.dp))
-                            BodyText("单击回填地址，长按重命名，也可以直接连接或切换。")
+                            BodyText("单击回填地址，长按可重命名或移除，也可以直接连接或切换。")
                             Spacer(modifier = Modifier.height(12.dp))
                             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                 connectionHistory.forEach { entry ->
@@ -1233,11 +1291,14 @@ class MainActivity : ComponentActivity() {
         onRename: () -> Unit,
         onDelete: () -> Unit,
     ) {
+        val isConnectedState = active && connected
+        val isConnectingState = active && !connected
         val connectLabel = when {
-            active && connected -> "当前"
+            isConnectedState -> "当前"
             connected -> "切换"
             else -> "连接"
         }
+        var actionsExpanded by remember(entry.url) { mutableStateOf(false) }
 
         Surface(
             modifier = Modifier.fillMaxWidth(),
@@ -1248,16 +1309,16 @@ class MainActivity : ComponentActivity() {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .combinedClickable(
+                        onClick = onApply,
+                        onLongClick = { actionsExpanded = true },
+                    )
                     .padding(horizontal = 12.dp, vertical = 10.dp),
             ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(end = 84.dp)
-                        .combinedClickable(
-                            onClick = onApply,
-                            onLongClick = onRename,
-                        ),
+                        .padding(end = 92.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
                     Text(
@@ -1285,16 +1346,73 @@ class MainActivity : ComponentActivity() {
                 Column(
                     modifier = Modifier
                         .align(Alignment.CenterEnd)
-                        .widthIn(min = 64.dp),
+                        .widthIn(min = 88.dp),
                     horizontalAlignment = Alignment.End,
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    FilledTonalButton(onClick = onConnect, enabled = !(active && connected)) {
-                        Text(connectLabel)
+                    if (isConnectedState) {
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = uiPrimarySoft,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, uiOnline),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(
+                                    painter = painterResource(id = android.R.drawable.checkbox_on_background),
+                                    contentDescription = "已连接",
+                                    tint = uiOnline,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                                Text(
+                                    text = "已连接",
+                                    color = uiText,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            }
+                        }
+                    } else {
+                        FilledTonalButton(onClick = onConnect, enabled = !isConnectingState) {
+                            if (isConnectingState) {
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    CircularProgressIndicator(
+                                        color = uiPrimary,
+                                        strokeWidth = 2.dp,
+                                        modifier = Modifier.size(14.dp),
+                                    )
+                                    Text(if (reconnectScheduled || reconnectAttempt > 0) "重连中" else "连接中")
+                                }
+                            } else {
+                                Text(connectLabel)
+                            }
+                        }
                     }
-                    TextButton(onClick = onDelete) {
-                        Text("移除", color = uiMuted)
-                    }
+                }
+                DropdownMenu(
+                    expanded = actionsExpanded,
+                    onDismissRequest = { actionsExpanded = false },
+                    modifier = Modifier.align(Alignment.TopEnd),
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("重命名") },
+                        onClick = {
+                            actionsExpanded = false
+                            onRename()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("移除") },
+                        onClick = {
+                            actionsExpanded = false
+                            onDelete()
+                        },
+                    )
                 }
             }
         }
@@ -1995,7 +2113,7 @@ class MainActivity : ComponentActivity() {
                         state = sessionListState,
                         modifier = Modifier.fillMaxSize(),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
-                        contentPadding = PaddingValues(12.dp),
+                        contentPadding = PaddingValues(start = 12.dp, top = 18.dp, end = 12.dp, bottom = 12.dp),
                     ) {
                         items(items = filteredSessions, key = { it.sessionId }) { session ->
                             SessionCard(
@@ -2126,6 +2244,8 @@ class MainActivity : ComponentActivity() {
         switchToConnectionPage: Boolean,
     ) {
         stopSessionSyncLoop()
+        cancelReconnectSchedule(resetAttempt = true)
+        setAutoReconnectEnabled(false)
         disconnectRequested = true
         bridgeClient?.close()
         bridgeClient = null
@@ -2142,10 +2262,20 @@ class MainActivity : ComponentActivity() {
         connectionDetail = detail
     }
 
-    private fun connectToBridge(url: String) {
+    private fun connectToBridge(url: String, isAutoReconnect: Boolean = false) {
         if (bridgeClient?.isOpen() == true && currentBridgeUrl == url) {
             selectedTab = AppTab.Chat
             connectionDetail = "已连接到 ${connectionHistory.firstOrNull { it.url == url }?.displayName() ?: BridgeHistoryEntry.fromUrl(url)?.displayName() ?: url}"
+            return
+        }
+
+        if (bridgeClient != null && currentBridgeUrl == url) {
+            connectionDetail =
+                if (isAutoReconnect || reconnectAttempt > 0) {
+                    "自动重连中: $url"
+                } else {
+                    "连接中: $url"
+                }
             return
         }
 
@@ -2153,18 +2283,29 @@ class MainActivity : ComponentActivity() {
             disconnectBridge(detail = "正在切换连接…", switchToConnectionPage = false)
         }
 
+        mainHandler.removeCallbacks(reconnectRunnable)
+        reconnectScheduled = false
         saveBridgeSettings(url)
+        setAutoReconnectEnabled(true)
         bridgeUrl = url
         disconnectRequested = false
         bootSyncRequested = false
         connected = false
         currentBridgeUrl = url
-        connectionDetail = "连接中: $url"
+        connectionDetail =
+            if (isAutoReconnect || reconnectAttempt > 0) {
+                "自动重连中${reconnectAttempt.takeIf { it > 0 }?.let { "($it)" }.orEmpty()}: $url"
+            } else {
+                "连接中: $url"
+            }
 
         bridgeClient = BridgeClient(URI.create(url), object : BridgeClient.Listener {
             override fun onOpen() {
                 mainHandler.post {
                     connected = true
+                    reconnectAttempt = 0
+                    cancelReconnectSchedule(resetAttempt = false)
+                    setAutoReconnectEnabled(true)
                     rememberConnectionHistory(url)
                     selectedTab = AppTab.Chat
                     connectionDetail = "已连接到 ${connectionHistory.firstOrNull { it.url == url }?.displayName() ?: BridgeHistoryEntry.fromUrl(url)?.displayName() ?: url}"
@@ -2184,10 +2325,20 @@ class MainActivity : ComponentActivity() {
                     pendingRequests.clear()
                     stopSessionSyncLoop()
                     bridgeClient = null
-                    currentBridgeUrl = null
-                    selectedWorkspace = null
-                    selectedTab = AppTab.Connection
-                    connectionDetail = reason + describeThrowable(error)
+                    val detailSuffix = describeThrowable(error)
+                    val targetUrl = currentBridgeUrl?.takeIf { it.isNotBlank() } ?: bridgeUrl.trim().takeIf { it.isNotBlank() }
+                    if (autoReconnectEnabled && !targetUrl.isNullOrBlank()) {
+                        scheduleReconnect(
+                            url = targetUrl,
+                            reason = reason,
+                            error = error,
+                        )
+                    } else {
+                        currentBridgeUrl = null
+                        selectedWorkspace = null
+                        selectedTab = AppTab.Connection
+                        connectionDetail = reason + detailSuffix
+                    }
                     disconnectRequested = false
                 }
             }
@@ -2197,9 +2348,13 @@ class MainActivity : ComponentActivity() {
             bridgeClient?.connect()
         } catch (error: RuntimeException) {
             bridgeClient = null
-            currentBridgeUrl = null
-            connectionDetail = "连接失败: ${error.message}"
-            showNotice(connectionDetail)
+            if (autoReconnectEnabled) {
+                scheduleReconnect(url = url, reason = "连接失败", error = error)
+            } else {
+                currentBridgeUrl = null
+                connectionDetail = "连接失败: ${error.message}"
+                showNotice(connectionDetail)
+            }
         }
     }
 
@@ -2987,11 +3142,6 @@ class MainActivity : ComponentActivity() {
         persistConnectionHistory()
     }
 
-    private fun clearConnectionHistory() {
-        connectionHistory.clear()
-        persistConnectionHistory()
-    }
-
     private fun renameConnectionHistory(url: String, name: String) {
         replaceConnectionHistory(
             connectionHistory.map { entry ->
@@ -3094,7 +3244,12 @@ class MainActivity : ComponentActivity() {
 
     private fun ensureConnected(): Boolean {
         if (bridgeClient?.isOpen() != true) {
-            connectionDetail = "请先连接 Linux Bridge"
+            connectionDetail =
+                if (autoReconnectEnabled && currentBridgeUrl != null) {
+                    "连接已断开，正在自动重连"
+                } else {
+                    "请先连接 Linux Bridge"
+                }
             showNotice(connectionDetail)
             return false
         }
@@ -3147,6 +3302,65 @@ class MainActivity : ComponentActivity() {
             normalizeBridgeUrl("ws://$host:${if (port.isBlank()) "8787" else port}/$tokenPart", requireToken = false)
         } catch (_: Exception) {
             ""
+        }
+    }
+
+    private fun setAutoReconnectEnabled(enabled: Boolean) {
+        autoReconnectEnabled = enabled
+        prefs.edit().putBoolean(KEY_AUTO_RECONNECT, enabled).apply()
+    }
+
+    private fun resumeBridgeConnectionIfNeeded() {
+        if (!autoReconnectEnabled || connected || bridgeClient != null) return
+        val targetUrl = bridgeUrl.trim().takeIf { it.isNotBlank() } ?: return
+        mainHandler.removeCallbacks(reconnectRunnable)
+        reconnectScheduled = false
+        mainHandler.post {
+            if (!connected && bridgeClient == null && autoReconnectEnabled) {
+                connectToBridge(targetUrl, isAutoReconnect = true)
+            }
+        }
+    }
+
+    private fun scheduleReconnect(
+        url: String,
+        reason: String,
+        error: Throwable?,
+    ) {
+        if (!autoReconnectEnabled) return
+        val normalizedUrl = url.trim()
+        if (normalizedUrl.isBlank()) return
+        if (connected || bridgeClient != null || reconnectScheduled) return
+        reconnectAttempt += 1
+        val delayMs = reconnectDelayMillis(reconnectAttempt)
+        reconnectScheduled = true
+        currentBridgeUrl = normalizedUrl
+        connectionDetail = buildString {
+            append(reason.ifBlank { "连接已断开" })
+            append(describeThrowable(error))
+            append("，")
+            append((delayMs / 1000L).coerceAtLeast(1L))
+            append(" 秒后自动重连")
+        }
+        showNotice(connectionDetail)
+        mainHandler.postDelayed(reconnectRunnable, delayMs)
+    }
+
+    private fun cancelReconnectSchedule(resetAttempt: Boolean) {
+        mainHandler.removeCallbacks(reconnectRunnable)
+        reconnectScheduled = false
+        if (resetAttempt) {
+            reconnectAttempt = 0
+        }
+    }
+
+    private fun reconnectDelayMillis(attempt: Int): Long {
+        return when {
+            attempt <= 1 -> 2_000L
+            attempt == 2 -> 4_000L
+            attempt == 3 -> 8_000L
+            attempt == 4 -> 15_000L
+            else -> 30_000L
         }
     }
 
@@ -4162,7 +4376,7 @@ class MainActivity : ComponentActivity() {
         if (!connected) {
             val name = entry?.displayName()?.takeIf { !currentBridgeUrl.isNullOrBlank() && it.isNotBlank() }
             return if (name != null) {
-                "正在连接：$name"
+                if (reconnectScheduled || reconnectAttempt > 0) "自动重连：$name" else "正在连接：$name"
             } else {
                 "当前未连接"
             }
@@ -4180,7 +4394,7 @@ class MainActivity : ComponentActivity() {
         if (!connected) {
             if (currentBridgeUrl.isNullOrBlank() || entry == null) return connectionDetail
             return buildList {
-                add("正在建立连接")
+                add(if (reconnectScheduled || reconnectAttempt > 0) "正在自动重连" else "正在建立连接")
                 entry.maskedUrl.takeIf { it.isNotBlank() }?.let(::add)
             }.joinToString("\n")
         }
