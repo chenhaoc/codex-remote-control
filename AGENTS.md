@@ -18,7 +18,11 @@ The project is intentionally small. Prefer focused changes over introducing larg
   - `backends/mock.mjs`: local mock backend for tests and UI/dev flows.
   - `generated/`: generated types. Do not hand-edit unless the task is explicitly about regeneration.
 - `android/`
-  - `app/src/main/java/com/haochen/codexremote/MainActivity.kt`: main Compose UI and most client state.
+  - `app/src/main/java/com/haochen/codexremote/MainActivity.kt`: Android lifecycle, top-level state holders, shared constants, and app setup only.
+  - `app/src/main/java/com/haochen/codexremote/MainActivityUi.kt`: Compose app shell, top bar, shared dialogs, and small shared UI primitives.
+  - `app/src/main/java/com/haochen/codexremote/*Page.kt`: page-level Compose UI such as chat, connection, code browser, and session history.
+  - `app/src/main/java/com/haochen/codexremote/MainActivity*Controller.kt`: focused Activity extension logic for bridge, protocol, sessions, approvals, conversation state, file changes, and code browser state.
+  - `app/src/main/java/com/haochen/codexremote/*Models.kt`: data models and parsing/formatting helpers.
   - `app/src/main/java/com/haochen/codexremote/ConversationHistoryWebView.kt`: chat HTML/CSS/markdown rendering.
   - `app/src/main/java/com/haochen/codexremote/BridgeClient.java`: OkHttp WebSocket wrapper.
   - `scripts/build-apk.sh`: debug APK build helper.
@@ -34,8 +38,36 @@ The project is intentionally small. Prefer focused changes over introducing larg
   - Kotlin + Jetpack Compose on Android
   - OkHttp WebSocket for Android transport
 - Avoid adding Room, Hilt, services, or major new dependencies unless the task clearly justifies them.
-- Prefer editing existing flows in `MainActivity.kt` over scattering state across many new files.
+- Keep code close to its existing responsibility. Do not put new UI, protocol, session, approval, or rendering logic into `MainActivity.kt` just because it is convenient.
+- Prefer extending the existing page/controller/model split over creating a new catch-all file.
 - Treat `src/generated/` as generated code.
+
+## Code Organization Rules
+
+- `MainActivity.kt` should stay small. It is the lifecycle/state container, not the home for new feature logic.
+- Compose UI belongs in page/shell files:
+  - app shell/top bar/shared dialog: `MainActivityUi.kt`
+  - drawer: `MainActivityDrawer.kt`
+  - chat UI: `ChatPage.kt`
+  - connection UI: `ConnectionPage.kt`
+  - code browser UI: `CodeBrowserPage.kt`
+  - session/model UI: `SessionPage.kt`
+- Activity-owned behavior belongs in focused extension-controller files:
+  - bridge URL, connection history, reconnect, request sending: `MainActivityBridgeController.kt`
+  - incoming bridge events and response dispatch: `MainActivityProtocolController.kt`
+  - approval presentation/actions: `MainActivityApprovalController.kt`
+  - session list/content/model selection/new chat: `MainActivitySessionController.kt`
+  - conversation item mutation and live status: `MainActivityConversationController.kt`
+  - snapshot restoration from session content: `MainActivitySnapshotController.kt`
+  - thread item/tool item parsing: `MainActivityThreadItemController.kt`
+  - file-change and diff conversation items: `MainActivityFileChangeController.kt`
+  - code-browser state and file-read cache: `MainActivityCodeBrowserController.kt`
+  - display labels, notices, and small pure helpers: `MainActivityPresentation.kt`
+- Chat HTML/CSS/markdown/code rendering belongs in the `ConversationHistory*`, `ConversationMarkdownHtml.kt`, `ConversationCodeHtml.kt`, and `ConversationHtmlUtils.kt` files, not in Compose page files.
+- Code browser syntax/rendering helpers belong in `CodeBrowserModels.kt` and `CodeBrowserRendering.kt`.
+- When a file approaches roughly 700-900 lines, pause before adding more and consider a responsibility-based split. Avoid moving a long block into a single new long file; split by page, protocol area, or model/helper boundary in the same change.
+- A useful split should make the next edit easier to locate. Avoid tiny arbitrary files, but prefer several cohesive 100-600 line files over one 2000-line file.
+- If a refactor requires exposing Activity state to extension functions, keep visibility no broader than needed and document the responsibility through the target filename rather than adding a generic utility bucket.
 
 ## Common Commands
 
@@ -81,9 +113,9 @@ npm run bridge
 
 ## Android Notes
 
-- Compose UI and connection/session state are centralized in `MainActivity.kt`.
+- Compose UI and connection/session behavior are intentionally split across page and controller files. Keep that split intact.
 - Chat rendering is partly HTML/CSS inside `ConversationHistoryWebView.kt`; markdown/code-block UI changes usually belong there, not in Compose.
-- WebSocket transport lifecycle lives in `BridgeClient.java` plus reconnect/state logic in `MainActivity.kt`.
+- WebSocket transport lifecycle lives in `BridgeClient.java` plus reconnect/state logic in `MainActivityBridgeController.kt`.
 - For UI changes, prefer small targeted updates and keep mobile layout behavior in mind:
   - keyboard/insets
   - scroll restoration

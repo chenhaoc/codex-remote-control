@@ -1,0 +1,94 @@
+package com.haochen.codexremote
+
+import org.json.JSONObject
+
+internal enum class AppTab {
+    Connection,
+    Sessions,
+    Chat,
+}
+
+internal data class ApprovalPresentation(
+    val title: String,
+    val detail: String,
+    val diffEntries: List<ConversationDiffEntry>,
+)
+
+internal data class ApprovalAction(
+    val label: String,
+    val responsePayload: JSONObject,
+    val isPrimary: Boolean = false,
+)
+
+internal data class ApprovalDialogState(
+    val requestId: String,
+    val title: String,
+    val detail: String,
+    val actions: List<ApprovalAction>,
+    val diffEntries: List<ConversationDiffEntry>,
+    val turnId: String? = null,
+)
+
+internal data class ConnectionRenameDialogState(
+    val url: String,
+    val currentName: String,
+)
+
+internal data class CodeBrowserState(
+    val conversationItemId: String,
+    val sessionId: String?,
+    val title: String,
+    val basePath: String?,
+    val diffEntries: List<ConversationDiffEntry>,
+    val fallbackDiff: String?,
+    val selectedPath: String?,
+    val mode: CodeBrowserMode = CodeBrowserMode.Diff,
+    val fileReadState: CodeBrowserFileReadState = CodeBrowserFileReadState.Idle,
+) {
+    fun selectedEntry(): ConversationDiffEntry? {
+        if (diffEntries.isEmpty()) return null
+        return diffEntries.firstOrNull { it.browsePath() == selectedPath } ?: diffEntries.first()
+    }
+}
+
+internal enum class CodeBrowserMode {
+    Diff,
+    File,
+}
+
+internal data class ProjectGroup(
+    val path: String?,
+    val sessions: List<SessionInfo>,
+) {
+    val displayName: String
+        get() = path?.let { it.substringAfterLast('/').ifBlank { it } } ?: "未分类历史"
+
+    fun key(): String = path ?: "__uncategorized__"
+}
+
+internal data class NewChatDraft(
+    val projectPath: String?,
+    val model: String,
+    val reasoningEffort: String,
+    val approvalPolicy: String,
+    val sandbox: String,
+)
+
+internal data class SessionInfoSheetState(
+    val title: String,
+    val rows: List<Pair<String, String>>,
+)
+
+internal data class SelectionMenuOption(
+    val value: String,
+    val label: String,
+    val supporting: String? = null,
+)
+
+internal fun interface ResponseHandler {
+    fun onResponse(response: JSONObject)
+
+    fun onError(errorText: String) {}
+
+    fun suppressDefaultErrorUi(): Boolean = false
+}

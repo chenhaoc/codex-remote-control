@@ -1,0 +1,560 @@
+package com.haochen.codexremote
+
+import java.util.Locale
+import org.json.JSONObject
+
+internal fun MainActivity.requestSessionList() {
+        if (!ensureConnected()) return
+        sendRequest("session.list", JSONObject()) { response ->
+            val payload = response.optJSONObject("payload")
+            val array = payload?.optJSONArray("sessions")
+            val newSessions = mutableListOf<SessionInfo>()
+            if (array != null) {
+                for (i in 0 until array.length()) {
+                    val info = array.optJSONObject(i)?.let { SessionInfo.fromSession(it) }
+                    if (info != null) newSessions.add(info)
+                }
+            }
+            replaceSessions(newSessions)
+            if (activeSessionId != null && sessions.none { it.sessionId == activeSessionId }) {
+                stopSessionSyncLoop()
+                activeSessionId = null
+                prefs.edit().remove(KEY_SESSION).apply()
+            }
+            if (!bootSyncRequested) {
+                val targetSession = activeSessionId ?: sessions.firstOrNull()?.sessionId
+                if (!targetSession.isNullOrBlank()) {
+                    bootSyncRequested = true
+                    selectSession(targetSession, syncHistory = true)
+                }
+            }
+        }
+    }
+
+internal fun MainActivity.requestModelList() {
+        if (!ensureConnected()) return
+        val payload = JSONObject().apply {
+            put("includeHidden", false)
+        }
+
+        sendRequest("model.list", payload) { response ->
+            val array = response.optJSONObject("payload")?.optJSONArray("data")
+            val newModels = mutableListOf<ModelInfo>()
+            if (array != null) {
+                for (i in 0 until array.length()) {
+                    array.optJSONObject(i)?.let { json ->
+                        val info = ModelInfo.fromJson(json)
+                        if (info != null) newModels.add(info)
+                    }
+                }
+            }
+            replaceModels(newModels)
+            val defaultModel = newModels.firstOrNull { it.isDefault } ?: newModels.firstOrNull()
+            if (!isKnownModel(selectedModel)) {
+                defaultModel?.let { selectModel(it.model) }
+            }
+        }
+    }
+
+internal fun MainActivity.startNewSession(
+        projectPath: String?,
+        model: String,
+        reasoningEffort: String,
+        approvalPolicy: String,
+        sandbox: String,
+    ) {
+        if (!ensureConnected()) return
+        if (model.isBlank()) {
+            showNotice("请先选择一个模型")
+            return
+        }
+
+        val payload = JSONObject().apply {
+            put("title", workspaceDisplayName(projectPath, fallback = "新对话"))
+            if (!projectPath.isNullOrBlank()) {
+                put("cwd", projectPath)
+            }
+            put("sessionStartSource", "startup")
+            put("threadSource", "user")
+            put("model", model)
+            put("approvalPolicy", approvalPolicy)
+            put("sandbox", toSandboxModeValue(sandbox))
+            put(
+                "config",
+                JSONObject().apply {
+                    put("model_reasoning_effort", reasoningEffort)
+                },
+            )
+        }
+
+        if (sendRequest("session.start", payload) { response ->
+                val info = response.optJSONObject("payload")?.optJSONObject("session")?.let { SessionInfo.fromSession(it) }
+                if (info != null) {
+                    upsertSession(info)
+                    selectSession(info.sessionId, syncHistory = false)
+                    selectedTab = AppTab.Chat
+                    selectedWorkspace = info.cwd.takeIf { it.isNotBlank() } ?: projectPath
+                    if (info.model.isNotBlank()) {
+                        selectModel(info.model)
+                    }
+                    appendSystemNote("新会话已创建: ${shortId(info.sessionId)}")
+                    showNotice("新对话已创建")
+                }
+            }
+        ) {
+            selectedTab = AppTab.Chat
+        }
+    }
+
+internal fun MainActivity.sendComposerText() {
+        val text = composerText.trim()
+        if (text.isEmpty()) return
+        if (!ensureConnected()) return
+        if (activeSessionId.isNullOrBlank()) {
+            appendSystemNote("先创建或选择一个会话")
+            return
+        }
+
+        val model = resolveModelForSend()
+        val payload = JSONObject().apply {
+            put("session_id", activeSessionId)
+            put("text", text)
+            if (model.isNotBlank()) {
+                put("model", model)
+            }
+            activeSession()?.approvalPolicy?.takeIf { it.isNotBlank() }?.let { put("approvalPolicy", it) }
+        }
+
+        if (!sendRequest("turn.send", payload) { response ->
+            val turn = response.optJSONObject("payload")?.optJSONObject("turn")
+            if (turn != null) {
+                activeTurnId = turn.optString("id", activeTurnId.orEmpty())
+            }
+        }) {
+            return
+        }
+
+        startSessionSyncLoop()
+        composerText = ""
+    }
+
+internal fun MainActivity.interruptCurrentTurn() {
+        if (!ensureConnected()) return
+        if (activeSessionId.isNullOrBlank() || activeTurnId.isNullOrBlank()) {
+            appendSystemNote("当前没有可中断的回合")
+            return
+        }
+
+        val payload = JSONObject().apply {
+            put("session_id", activeSessionId)
+            put("turn_id", activeTurnId)
+        }
+
+        sendRequest("turn.interrupt", payload) {
+            appendSystemNote("已请求中断")
+            activeTurnId = null
+        }
+    }
+
+internal fun MainActivity.requestSessionContent(sessionId: String) {
+        if (sessionId.isBlank()) return
+        if (!ensureConnected()) return
+        if (syncInFlight) {
+            sessionContentDirty = true
+            return
+        }
+        syncInFlight = true
+        val requestedSessionId = sessionId
+        val payload = JSONObject().apply {
+            put("session_id", sessionId)
+        }
+
+        if (!sendRequest("session.content", payload, object : ResponseHandler {
+            override fun onResponse(response: JSONObject) {
+                syncInFlight = false
+                if (activeSessionId != requestedSessionId) {
+                    sessionContentDirty = false
+                    return
+                }
+                val responsePayload = response.optJSONObject("payload")
+                responsePayload?.optJSONObject("session")
+                    ?.let(SessionInfo::fromSession)
+                    ?.let(::upsertSession)
+                applySessionContentSnapshot(responsePayload)
+                flushPendingSessionRefresh(requestedSessionId)
+            }
+
+            override fun onError(errorText: String) {
+                syncInFlight = false
+                if (activeSessionId != requestedSessionId) {
+                    sessionContentDirty = false
+                    return
+                }
+                flushPendingSessionRefresh(requestedSessionId)
+            }
+
+            override fun suppressDefaultErrorUi(): Boolean = true
+        })) {
+            syncInFlight = false
+        }
+    }
+
+internal fun MainActivity.flushPendingSessionRefresh(sessionId: String) {
+        if (!sessionContentDirty) return
+        if (!connected || activeSessionId != sessionId) return
+        sessionContentDirty = false
+        mainHandler.post { requestSessionContent(sessionId) }
+    }
+
+internal fun MainActivity.applySessionContentSnapshot(payload: JSONObject?) {
+        val snapshotItems = buildConversationItemsFromSnapshot(payload)
+        val snapshotApprovals = buildPendingApprovalsFromSnapshot(payload)
+        if (snapshotItems.isEmpty() && snapshotApprovals.isEmpty() && conversationItems.isNotEmpty()) {
+            return
+        }
+        assistantItemIds.clear()
+        toolItemIds.clear()
+        fileChangeItemIds.clear()
+        fileChangeTurnIds.clear()
+        turnDiffItemIds.clear()
+        turnDiffs.clear()
+
+        conversationItems.clear()
+        conversationItems.addAll(snapshotItems)
+        replacePendingApprovals(snapshotApprovals)
+
+        snapshotItems.forEach { item ->
+            when (item) {
+                is ConversationItem.FileChange -> {
+                    item.sourceItemId?.takeIf { it.isNotBlank() }?.let { sourceId ->
+                        fileChangeItemIds[sourceId] = item.id
+                    }
+                    item.turnId?.takeIf { it.isNotBlank() }?.let { turnId ->
+                        item.sourceItemId?.takeIf { it.isNotBlank() }?.let { sourceId -> fileChangeTurnIds[sourceId] = turnId }
+                    }
+                }
+                else -> Unit
+            }
+        }
+
+        codeBrowserState?.let { state ->
+            if (!state.conversationItemId.startsWith("approval_") && snapshotItems.none { it.id == state.conversationItemId }) {
+                codeBrowserState = null
+            }
+        }
+    }
+
+internal fun MainActivity.replacePendingApprovals(approvals: List<ApprovalDialogState>) {
+        pendingApprovals.clear()
+        pendingApprovals.addAll(approvals)
+    }
+
+internal fun MainActivity.upsertPendingApproval(approval: ApprovalDialogState) {
+        val index = pendingApprovals.indexOfFirst { it.requestId == approval.requestId }
+        if (index >= 0) {
+            pendingApprovals[index] = approval
+        } else {
+            pendingApprovals.add(approval)
+        }
+    }
+
+internal fun MainActivity.removePendingApproval(requestId: String) {
+        pendingApprovals.removeAll { it.requestId == requestId }
+    }
+
+internal fun MainActivity.selectSession(sessionId: String, syncHistory: Boolean) {
+        if (sessionId.isBlank()) return
+        activeSessionId = sessionId
+        prefs.edit().putString(KEY_SESSION, sessionId).apply()
+        sessions.firstOrNull { it.sessionId == sessionId }?.model
+            ?.takeIf { it.isNotBlank() && isKnownModel(it) }
+            ?.let { selectModel(it) }
+        clearConversation()
+        if (syncHistory) {
+            requestSessionContent(sessionId)
+            startSessionSyncLoop()
+        } else {
+            stopSessionSyncLoop()
+        }
+    }
+
+internal fun MainActivity.replaceSessions(newSessions: List<SessionInfo>) {
+        val existingSessions = sessions.associateBy { it.sessionId }
+        sessions.clear()
+        sessions.addAll(
+            newSessions
+                .map { it.mergedWith(existingSessions[it.sessionId]) }
+                .sortedByDescending { it.updatedAt },
+        )
+        if (selectedWorkspace != null && sessions.none { it.cwd == selectedWorkspace }) {
+            selectedWorkspace = null
+        }
+    }
+
+internal fun MainActivity.upsertSession(info: SessionInfo) {
+        val merged = info.mergedWith(sessions.firstOrNull { it.sessionId == info.sessionId })
+        sessions.removeAll { it.sessionId == info.sessionId }
+        sessions.add(0, merged)
+    }
+
+internal fun MainActivity.clearConversation() {
+        conversationItems.clear()
+        assistantItemIds.clear()
+        toolItemIds.clear()
+        fileChangeItemIds.clear()
+        fileChangeTurnIds.clear()
+        turnDiffItemIds.clear()
+        turnDiffs.clear()
+        renderedEventKeys.clear()
+        activeTurnId = null
+        chatRestoreScrollY = null
+        codeBrowserState = null
+        lastSyncedSeq = 0
+        syncInFlight = false
+        sessionContentDirty = false
+        pendingApprovals.clear()
+    }
+
+
+internal fun MainActivity.selectModel(modelId: String) {
+        selectedModel = modelId.trim()
+        prefs.edit().putString(KEY_MODEL, selectedModel).apply()
+    }
+
+internal fun MainActivity.modelInfoFor(modelId: String): ModelInfo? {
+        val target = modelId.trim()
+        if (target.isBlank()) return null
+        return availableModels.firstOrNull { it.model == target || it.id == target }
+    }
+
+internal fun MainActivity.replaceModels(newModels: List<ModelInfo>) {
+        availableModels.clear()
+        availableModels.addAll(newModels.sortedWith(compareByDescending<ModelInfo> { it.isDefault }.thenBy { it.displayName.lowercase(Locale.getDefault()) }))
+    }
+
+internal fun MainActivity.reasoningEffortOptionsForModel(modelId: String): List<SelectionMenuOption> {
+        val model = modelInfoFor(modelId)
+        val declared = model?.supportedReasoningEfforts.orEmpty()
+        if (declared.isNotEmpty()) {
+            return declared.map { option ->
+                SelectionMenuOption(
+                    value = option.effort,
+                    label = reasoningEffortMenuLabel(option.effort),
+                    supporting = option.description.ifBlank { reasoningEffortDescription(option.effort) },
+                )
+            }
+        }
+        return reasoningEffortFallbackOptions()
+    }
+
+internal fun MainActivity.reasoningEffortFallbackOptions(): List<SelectionMenuOption> {
+        return listOf("minimal", "low", "medium", "high", "xhigh", "none").map { effort ->
+            reasoningOptionFor(effort)
+        }
+    }
+
+internal fun MainActivity.reasoningOptionFor(effort: String): SelectionMenuOption {
+        return SelectionMenuOption(
+            value = effort,
+            label = reasoningEffortMenuLabel(effort),
+            supporting = reasoningEffortDescription(effort),
+        )
+    }
+
+internal fun MainActivity.defaultReasoningEffortForModel(modelId: String): String {
+        val model = modelInfoFor(modelId)
+        val availableEfforts = reasoningEffortOptionsForModel(modelId).map { it.value }.toSet()
+        val preferred = model?.defaultReasoningEffort?.trim().orEmpty()
+        if (preferred.isNotBlank() && preferred in availableEfforts) {
+            return preferred
+        }
+        return when {
+            "medium" in availableEfforts -> "medium"
+            availableEfforts.isNotEmpty() -> reasoningEffortOptionsForModel(modelId).first().value
+            else -> "medium"
+        }
+    }
+
+internal fun MainActivity.normalizeReasoningEffortForModel(
+        modelId: String,
+        preferred: String,
+    ): String {
+        val normalized = preferred.trim()
+        val options = reasoningEffortOptionsForModel(modelId)
+        return when {
+            normalized.isNotBlank() && options.any { it.value == normalized } -> normalized
+            else -> defaultReasoningEffortForModel(modelId)
+        }
+    }
+
+internal fun MainActivity.reasoningEffortMenuLabel(effort: String): String {
+        return when (effort.trim()) {
+            "none" -> "关闭思考 (none)"
+            "minimal" -> "极低 (minimal)"
+            "low" -> "低 (low)"
+            "medium" -> "中 (medium)"
+            "high" -> "高 (high)"
+            "xhigh" -> "极高 (xhigh)"
+            else -> effort.ifBlank { "未提供" }
+        }
+    }
+
+internal fun MainActivity.reasoningEffortDescription(effort: String): String {
+        return when (effort.trim()) {
+            "none" -> "尽量不做额外推理，返回会更直接。"
+            "minimal" -> "保留极少推理，适合很轻的任务。"
+            "low" -> "较轻推理，适合常规问答和小改动。"
+            "medium" -> "速度和质量更平衡，适合大多数任务。"
+            "high" -> "更多推理，适合复杂实现和排查。"
+            "xhigh" -> "最深推理，适合难题，但通常更慢。"
+            else -> "按该模型支持的思考强度原样下发。"
+        }
+    }
+
+internal fun MainActivity.approvalPolicyMenuOptions(): List<SelectionMenuOption> {
+        return listOf(
+            SelectionMenuOption("untrusted", "最保守 (untrusted)"),
+            SelectionMenuOption("on-request", "按需审批 (on-request)"),
+            SelectionMenuOption("on-failure", "失败后审批 (on-failure)"),
+            SelectionMenuOption("never", "不审批 (never)"),
+        )
+    }
+
+internal fun MainActivity.sandboxMenuOptions(): List<SelectionMenuOption> {
+        return listOf(
+            SelectionMenuOption("readOnly", "只读 (readOnly)"),
+            SelectionMenuOption("workspaceWrite", "工作区可写 (workspaceWrite)"),
+            SelectionMenuOption("dangerFullAccess", "完整访问 (dangerFullAccess)"),
+        )
+    }
+
+internal fun MainActivity.sandboxDescription(sandbox: String): String {
+        return when (sandbox.trim()) {
+            "readOnly" -> "只读模式。不能改文件，适合纯查看、检索和解释。"
+            "workspaceWrite" -> "仅允许写当前项目工作区；更稳妥，适合日常改代码。"
+            else -> "允许完整文件系统访问；能力最强，但风险也最高。"
+        }
+    }
+
+internal fun MainActivity.currentSessionModel(): String {
+        val sessionId = activeSessionId ?: return ""
+        return sessions.firstOrNull { it.sessionId == sessionId }?.model.orEmpty().trim()
+            .takeIf { isKnownModel(it) }
+            .orEmpty()
+    }
+
+internal fun MainActivity.resolveModelForSend(): String {
+        val candidates = listOf(
+            selectedModel.trim(),
+            currentSessionModel(),
+            availableModels.firstOrNull()?.model.orEmpty(),
+            availableModels.firstOrNull()?.id.orEmpty(),
+        )
+        return candidates.firstOrNull { isKnownModel(it) } ?: ""
+    }
+
+internal fun MainActivity.isKnownModel(modelId: String): Boolean {
+        val target = modelId.trim()
+        if (target.isBlank()) return false
+        return availableModels.any { it.model == target || it.id == target }
+    }
+
+
+internal fun MainActivity.activeSession(): SessionInfo? = activeSessionId?.let { sessionId -> sessions.firstOrNull { it.sessionId == sessionId } }
+
+internal fun MainActivity.currentWorkspacePath(): String? {
+        return selectedWorkspace
+            ?: activeSession()?.cwd?.takeIf { it.isNotBlank() }
+            ?: sessions.firstOrNull { it.cwd.isNotBlank() }?.cwd
+    }
+
+internal fun MainActivity.workspacePaths(): List<String> {
+        return sessions.mapNotNull { it.cwd.takeIf(String::isNotBlank) }.distinct().sorted()
+    }
+
+internal fun MainActivity.sessionsForSelectedWorkspace(): List<SessionInfo> {
+        val workspace = selectedWorkspace
+        return if (workspace.isNullOrBlank()) {
+            sessions.sortedByDescending { it.updatedAt }
+        } else {
+            sessions.filter { it.cwd == workspace }.sortedByDescending { it.updatedAt }
+        }
+    }
+
+internal fun MainActivity.workspaceDisplayName(path: String?, fallback: String): String {
+        val normalized = path?.trim().orEmpty()
+        if (normalized.isBlank()) return fallback
+        return normalized.substringAfterLast('/').ifBlank { normalized }
+    }
+
+internal fun MainActivity.projectBuckets(): List<ProjectGroup> {
+        val groups =
+            workspacePaths().map { path ->
+                ProjectGroup(
+                    path = path,
+                    sessions = sessions.filter { it.cwd == path }.sortedByDescending { it.updatedAt },
+                )
+            }
+        val uncategorized = sessions.filter { it.cwd.isBlank() }.sortedByDescending { it.updatedAt }
+        return buildList {
+            addAll(groups.sortedByDescending { it.sessions.firstOrNull()?.updatedAt.orEmpty() })
+            if (uncategorized.isNotEmpty()) {
+                add(
+                    ProjectGroup(
+                        path = null,
+                        sessions = uncategorized,
+                    ),
+                )
+            }
+        }
+    }
+
+internal fun MainActivity.openNewChatDialog(projectPath: String?) {
+        if (!connected) {
+            showNotice("请先连接 Linux Bridge")
+            return
+        }
+        val defaultModel =
+            resolveModelForSend().ifBlank {
+                availableModels.firstOrNull()?.model.orEmpty()
+            }
+        newChatDraft =
+            NewChatDraft(
+                projectPath = projectPath?.takeIf { it.isNotBlank() },
+                model = defaultModel,
+                reasoningEffort = defaultReasoningEffortForModel(defaultModel),
+                approvalPolicy = "never",
+                sandbox = "dangerFullAccess",
+            )
+    }
+
+internal fun MainActivity.openSessionInfoSheet() {
+        val session = activeSession() ?: return
+        sessionInfoSheetState =
+            SessionInfoSheetState(
+                title = session.titleLine(),
+                rows =
+                    buildList {
+                        add("目录" to session.cwd.ifBlank { "未提供" })
+                        add("模型" to session.modelSummary())
+                        add("审批策略" to session.approvalPolicy.ifBlank { "未提供" })
+                        add("沙箱" to session.sandboxSummary())
+                        add("上下文窗口" to session.contextWindowSummary())
+                        add("最近 token" to session.lastTokenUsageSummary())
+                        add("累计 token" to session.totalTokenUsageSummary())
+                        add("会话 ID" to session.sessionId)
+                    },
+            )
+    }
+
+
+internal fun MainActivity.startSessionSyncLoop() {
+        stopSessionSyncLoop()
+        if (!connected || activeSessionId.isNullOrBlank()) return
+        mainHandler.postDelayed(syncRunnable, SESSION_SYNC_INTERVAL_MS)
+    }
+
+internal fun MainActivity.stopSessionSyncLoop() {
+        mainHandler.removeCallbacks(syncRunnable)
+        syncInFlight = false
+    }

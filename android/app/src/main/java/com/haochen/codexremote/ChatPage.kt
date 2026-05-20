@@ -1,0 +1,310 @@
+package com.haochen.codexremote
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+
+@Composable
+internal fun MainActivity.ChatPage() {
+    val activeSession = activeSession()
+    val density = LocalDensity.current
+    val imeBottom = WindowInsets.ime.getBottom(density)
+    val shouldFollowBottom = activeTurnId != null || imeBottom > 0
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.White)
+            .imePadding()
+            .navigationBarsPadding(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+        ) {
+            if (conversationItems.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 12.dp, vertical = 18.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    BodyText(
+                        text = if (activeSession == null) "先新建或选择一个项目里的会话，再开始聊天。" else "这里会显示当前会话的消息流。",
+                        modifier = Modifier.fillMaxWidth(0.8f),
+                    )
+                }
+            } else {
+                ConversationHistoryWebView(
+                    items = conversationItems,
+                    sessionId = activeSessionId,
+                    displayBasePath = activeSession?.cwd,
+                    followBottom = shouldFollowBottom,
+                    restoreScrollY = chatRestoreScrollY,
+                    onScrollRestored = {
+                        chatRestoreScrollY = null
+                    },
+                    onOpenCodeBrowser = { itemId, path, scrollY ->
+                        openCodeBrowser(itemId, path, scrollY)
+                    },
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.White),
+                )
+            }
+        }
+
+        liveTurnStatus?.takeIf { it.isNotBlank() }?.let { status ->
+            Text(
+                text = status,
+                color = uiMuted,
+                fontSize = 11.sp,
+                lineHeight = 16.sp,
+                modifier = Modifier.padding(start = 4.dp, end = 4.dp),
+            )
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 2.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedTextField(
+                value = composerText,
+                onValueChange = { composerText = it },
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 48.dp),
+                singleLine = false,
+                minLines = 1,
+                maxLines = 5,
+                shape = RoundedCornerShape(18.dp),
+                placeholder = { Text("输入消息") },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(onSend = { sendComposerText() }),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = uiPrimary,
+                    unfocusedBorderColor = uiBorder,
+                    focusedTextColor = uiText,
+                    unfocusedTextColor = uiText,
+                    cursorColor = uiPrimary,
+                ),
+            )
+
+            Button(
+                onClick = { sendComposerText() },
+                enabled = connected && activeSessionId != null,
+                modifier = Modifier.size(46.dp),
+                shape = CircleShape,
+                contentPadding = PaddingValues(0.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = uiPrimary),
+            ) {
+                Icon(
+                    painter = painterResource(id = android.R.drawable.ic_menu_send),
+                    contentDescription = "发送",
+                    tint = Color.White,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+internal fun MainActivity.ApprovalDialog(
+    approval: ApprovalDialogState,
+    onDecision: (ApprovalAction) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = uiSurface,
+            tonalElevation = 6.dp,
+            shadowElevation = 10.dp,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                Text(
+                    text = approval.title,
+                    color = uiText,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                approval.detail.takeIf { it.isNotBlank() }?.let { detail ->
+                    Text(
+                        text = detail,
+                        color = uiMuted,
+                        fontSize = 14.sp,
+                        lineHeight = 20.sp,
+                    )
+                }
+                if (approval.diffEntries.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "涉及文件: ${approval.diffEntries.size} 个",
+                            color = uiMuted,
+                            fontSize = 13.sp,
+                        )
+                        Column {
+                            approval.diffEntries.forEachIndexed { index, entry ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 6.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = entry.displayPath(basePath = currentWorkspacePath(), maxLength = 72),
+                                        color = uiText,
+                                        fontSize = 13.sp,
+                                        modifier = Modifier.weight(1f),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        text = entry.diffStatsLabel().orEmpty(),
+                                        color = uiMuted,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                    )
+                                }
+                                if (index < approval.diffEntries.lastIndex) {
+                                    HorizontalDivider(color = uiBorder.copy(alpha = 0.7f))
+                                }
+                            }
+                        }
+                    }
+                }
+                HorizontalDivider(color = uiBorder.copy(alpha = 0.8f))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                ) {
+                    approval.actions.forEach { action ->
+                        val accepted = action.isPrimary
+                        val buttonColors =
+                            if (accepted) {
+                                ButtonDefaults.buttonColors(containerColor = uiPrimary, contentColor = Color.White)
+                            } else {
+                                ButtonDefaults.outlinedButtonColors(contentColor = uiText)
+                            }
+                        if (accepted) {
+                            Button(onClick = { onDecision(action) }, colors = buttonColors) {
+                                Text(action.label)
+                            }
+                        } else {
+                            OutlinedButton(
+                                onClick = { onDecision(action) },
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = uiText),
+                            ) {
+                                Text(action.label)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
