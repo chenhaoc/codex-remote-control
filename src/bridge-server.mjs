@@ -72,6 +72,12 @@ function mergeSessionSummary(summary, stored) {
     merged.totalTokenUsage = clone(stored.totalTokenUsage);
   }
 
+  if (summary.reasoningEffort != null && !(typeof summary.reasoningEffort === 'string' && summary.reasoningEffort.trim() === '')) {
+    merged.reasoningEffort = clone(summary.reasoningEffort);
+  } else if (stored.reasoningEffort != null) {
+    merged.reasoningEffort = clone(stored.reasoningEffort);
+  }
+
   return merged;
 }
 
@@ -137,6 +143,7 @@ function normalizeThreadSummary(thread, backend = 'mock') {
   const permissions = normalizePermissionSelection(envelope.activePermissionProfile ?? raw.activePermissionProfile);
   const sandbox = envelope.sandbox ?? raw.sandbox ?? raw.sandboxPolicy;
   const tokenUsage = envelope.tokenUsage ?? raw.tokenUsage ?? null;
+  const reasoningEffort = envelope.reasoningEffort ?? raw.reasoningEffort ?? null;
   return {
     session_id: id,
     thread_id: id,
@@ -154,6 +161,7 @@ function normalizeThreadSummary(thread, backend = 'mock') {
     ...(tokenUsage?.modelContextWindow != null ? { contextWindow: tokenUsage.modelContextWindow } : {}),
     ...(tokenUsage?.last ? { lastTokenUsage: clone(tokenUsage.last) } : {}),
     ...(tokenUsage?.total ? { totalTokenUsage: clone(tokenUsage.total) } : {}),
+    ...(firstNonEmptyString(reasoningEffort ?? '') ? { reasoningEffort } : {}),
     thread: clone(raw),
   };
 }
@@ -196,6 +204,74 @@ function safeJsonLineParse(text) {
 function isThreadNotFoundError(error) {
   const message = String(error?.message ?? '');
   return /thread not found/i.test(message);
+}
+
+function normalizeTokenUsageSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+
+  const normalized = {
+    totalTokens: Number(snapshot.totalTokens ?? snapshot.total_tokens ?? 0),
+    inputTokens: Number(snapshot.inputTokens ?? snapshot.input_tokens ?? 0),
+    cachedInputTokens: Number(snapshot.cachedInputTokens ?? snapshot.cached_input_tokens ?? 0),
+    outputTokens: Number(snapshot.outputTokens ?? snapshot.output_tokens ?? 0),
+    reasoningOutputTokens: Number(snapshot.reasoningOutputTokens ?? snapshot.reasoning_output_tokens ?? 0),
+  };
+
+  if (!Object.values(normalized).some((value) => Number.isFinite(value) && value > 0)) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function hasMissingSessionMetadata(session) {
+  if (!session) return false;
+  return !firstNonEmptyString(session.model)
+    || !firstNonEmptyString(session.approvalPolicy)
+    || session.sandbox == null
+    || !Number.isFinite(session.contextWindow)
+    || session.contextWindow <= 0;
+}
+
+function mergeMetadataIntoSession(session, metadata = {}) {
+  if (!session) return null;
+  const next = {
+    ...clone(session),
+  };
+
+  if (firstNonEmptyString(metadata.model) && !firstNonEmptyString(next.model)) {
+    next.model = metadata.model;
+  }
+
+  if (firstNonEmptyString(metadata.approvalPolicy) && !firstNonEmptyString(next.approvalPolicy)) {
+    next.approvalPolicy = metadata.approvalPolicy;
+  }
+
+  if (metadata.permissions != null && next.permissions == null) {
+    next.permissions = clone(metadata.permissions);
+  }
+
+  if (metadata.sandbox != null && next.sandbox == null) {
+    next.sandbox = clone(metadata.sandbox);
+  }
+
+  if (Number.isFinite(metadata.contextWindow) && metadata.contextWindow > 0 && (!Number.isFinite(next.contextWindow) || next.contextWindow <= 0)) {
+    next.contextWindow = metadata.contextWindow;
+  }
+
+  if (metadata.lastTokenUsage != null && next.lastTokenUsage == null) {
+    next.lastTokenUsage = clone(metadata.lastTokenUsage);
+  }
+
+  if (metadata.totalTokenUsage != null && next.totalTokenUsage == null) {
+    next.totalTokenUsage = clone(metadata.totalTokenUsage);
+  }
+
+  if (firstNonEmptyString(metadata.reasoningEffort) && !firstNonEmptyString(next.reasoningEffort)) {
+    next.reasoningEffort = metadata.reasoningEffort;
+  }
+
+  return next;
 }
 
 export class BridgeServer extends EventEmitter {
@@ -759,6 +835,114 @@ export class BridgeServer extends EventEmitter {
     }
   }
 
+  async #backfillSessionMetadataFromLocalState(session) {
+    if (!session || !hasMissingSessionMetadata(session)) {
+      return session;
+    }
+
+    let next = mergeMetadataIntoSession(session, this.#extractSessionMetadataFromEvents(session));
+    next = mergeMetadataIntoSession(next, await this.#extractSessionMetadataFromRollout(next));
+
+    if (JSON.stringify(next) === JSON.stringify(session)) {
+      return session;
+    }
+
+    return this.store.upsertSession(next);
+  }
+
+  #extractSessionMetadataFromEvents(session) {
+    const metadata = {};
+    const events = Array.isArray(session?.events) ? session.events : [];
+
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (event?.event !== 'thread/tokenUsage/updated') continue;
+      const tokenUsage = event?.payload?.tokenUsage;
+      if (!tokenUsage || typeof tokenUsage !== 'object') continue;
+      if (tokenUsage.modelContextWindow != null) {
+        metadata.contextWindow = tokenUsage.modelContextWindow;
+      }
+      if (tokenUsage.last != null) {
+        metadata.lastTokenUsage = tokenUsage.last;
+      }
+      if (tokenUsage.total != null) {
+        metadata.totalTokenUsage = tokenUsage.total;
+      }
+      break;
+    }
+
+    return metadata;
+  }
+
+  async #extractSessionMetadataFromRollout(session) {
+    const rolloutPath = session?.thread?.path;
+    if (typeof rolloutPath !== 'string' || !rolloutPath.trim()) {
+      return {};
+    }
+
+    try {
+      const raw = await fs.readFile(rolloutPath, 'utf8');
+      const metadata = {};
+      const lines = raw.split('\n').map((line) => line.trim()).filter(Boolean);
+
+      for (const line of lines) {
+        const record = safeJsonLineParse(line);
+        if (!record || typeof record !== 'object') continue;
+        const payload = record.payload ?? {};
+
+        if (record.type === 'session_meta' && firstNonEmptyString(payload.model)) {
+          metadata.model = payload.model;
+        }
+
+        if (record.type === 'turn_context') {
+          if (firstNonEmptyString(payload.model) && !firstNonEmptyString(metadata.model)) {
+            metadata.model = payload.model;
+          }
+          if (firstNonEmptyString(payload.effort)) {
+            metadata.reasoningEffort = payload.effort;
+          }
+          if (firstNonEmptyString(payload.approval_policy)) {
+            metadata.approvalPolicy = payload.approval_policy;
+          }
+          if (payload.sandbox_policy != null) {
+            metadata.sandbox = clone(payload.sandbox_policy);
+          }
+          if (payload.permission_profile != null) {
+            metadata.permissions = clone(payload.permission_profile);
+          }
+          if (Number.isFinite(payload.model_context_window) && payload.model_context_window > 0) {
+            metadata.contextWindow = payload.model_context_window;
+          }
+        }
+
+        if (record.type === 'event_msg' && payload.type === 'task_started') {
+          if (Number.isFinite(payload.model_context_window) && payload.model_context_window > 0) {
+            metadata.contextWindow = payload.model_context_window;
+          }
+        }
+
+        if (record.type === 'event_msg' && payload.type === 'token_count') {
+          const info = payload.info ?? {};
+          if (Number.isFinite(info.model_context_window) && info.model_context_window > 0) {
+            metadata.contextWindow = info.model_context_window;
+          }
+          const lastTokenUsage = normalizeTokenUsageSnapshot(info.last_token_usage ?? info.lastTokenUsage ?? null);
+          if (lastTokenUsage != null) {
+            metadata.lastTokenUsage = lastTokenUsage;
+          }
+          const totalTokenUsage = normalizeTokenUsageSnapshot(info.total_token_usage ?? info.totalTokenUsage ?? null);
+          if (totalTokenUsage != null) {
+            metadata.totalTokenUsage = totalTokenUsage;
+          }
+        }
+      }
+
+      return metadata;
+    } catch {
+      return {};
+    }
+  }
+
   async #buildSessionContent(sessionId) {
     let session = this.store.getSession(sessionId);
     if (!session) {
@@ -770,10 +954,13 @@ export class BridgeServer extends EventEmitter {
       };
     }
 
+    session = await this.#backfillSessionMetadataFromLocalState(session);
+
     let thread = null;
     try {
       thread = await this.#loadHydrationThread(sessionId, session);
       session = this.store.getSession(sessionId) ?? session;
+      session = await this.#backfillSessionMetadataFromLocalState(session);
     } catch {
       thread = session.thread ?? null;
     }

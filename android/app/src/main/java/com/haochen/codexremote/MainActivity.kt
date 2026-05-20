@@ -145,6 +145,7 @@ class MainActivity : ComponentActivity() {
         private const val CODE_BROWSER_FULL_HIGHLIGHT_MAX_CHARS = 60000
         private const val CODE_BROWSER_FULL_HIGHLIGHT_MAX_LINES = 1200
         private const val SESSION_SYNC_INTERVAL_MS = 5000L
+        private val clientDirectiveLineRegex = Regex("""^::[a-z][a-z0-9-]*\{.*}$""")
     }
 
     private val uiBackground = Color(0xFFF6FBF7)
@@ -3965,9 +3966,11 @@ class MainActivity : ComponentActivity() {
     private fun extractThreadItemText(item: JSONObject): String {
         return when (item.optString("type", "")) {
             "userMessage" -> extractPlainTextContent(item.optJSONArray("content"))
-            "agentMessage" -> firstNonEmpty(
-                item.optString("text", "").trim(),
-                extractPlainTextContent(item.optJSONArray("content")),
+            "agentMessage" -> stripClientDirectivesFromAssistantText(
+                firstNonEmpty(
+                    item.optString("text", "").trim(),
+                    extractPlainTextContent(item.optJSONArray("content")),
+                ),
             )
             "plan" -> item.optString("text", "").trim()
             "reasoning" -> {
@@ -4360,7 +4363,7 @@ class MainActivity : ComponentActivity() {
         return ConversationItem.Bubble(
             id = "assistant_${UUID.randomUUID()}",
             right = false,
-            text = text,
+            text = stripClientDirectivesFromAssistantText(text),
             backgroundColor = 0xFFF1F8F2.toInt(),
             textColor = 0xFF183326.toInt(),
             turnKey = turnKey,
@@ -4432,7 +4435,18 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun normalizeAssistantText(text: String): String {
-        return text.replace("\r\n", "\n").trim()
+        return stripClientDirectivesFromAssistantText(text).replace("\r\n", "\n").trim()
+    }
+
+    private fun stripClientDirectivesFromAssistantText(text: String): String {
+        if (text.isBlank()) return text
+        val filteredLines =
+            text.replace("\r\n", "\n")
+                .lines()
+                .filterNot { line ->
+                    clientDirectiveLineRegex.matches(line.trim())
+                }
+        return filteredLines.joinToString("\n").trim()
     }
 
     private fun updateLiveTurnStatusFromItem(eventName: String, item: JSONObject?) {
@@ -4856,9 +4870,11 @@ class MainActivity : ComponentActivity() {
                 rows =
                     buildList {
                         add("目录" to session.cwd.ifBlank { "未提供" })
-                        add("模型" to session.model.ifBlank { "未提供" })
+                        add("模型" to session.modelSummary())
                         add("审批策略" to session.approvalPolicy.ifBlank { "未提供" })
-                        add("权限配置" to session.permissionsSummary())
+                        session.permissionsSummary()
+                            .takeIf { it != "默认" }
+                            ?.let { add("权限配置" to it) }
                         add("沙箱" to session.sandboxSummary())
                         add("上下文窗口" to session.contextWindowSummary())
                         add("最近 token" to session.lastTokenUsageSummary())
@@ -6030,6 +6046,7 @@ private data class SessionInfo(
     val title: String,
     val preview: String,
     val model: String,
+    val reasoningEffort: String,
     val backend: String,
     val cwd: String,
     val updatedAt: String,
@@ -6129,6 +6146,7 @@ private data class SessionInfo(
                 title = title,
                 preview = firstNonEmpty(objectValue.optString("preview", ""), threadObject.optString("preview", "")),
                 model = firstNonEmpty(objectValue.optString("model", ""), threadObject.optString("model", "")),
+                reasoningEffort = firstNonEmpty(objectValue.optString("reasoningEffort", ""), threadObject.optString("reasoningEffort", "")),
                 backend = firstNonEmpty(
                     objectValue.optString("backend", ""),
                     objectValue.optString("modelProvider", ""),
@@ -6176,6 +6194,7 @@ private data class SessionInfo(
                 title = title,
                 preview = firstNonEmpty(objectValue.optString("preview", ""), threadObject.optString("preview", "")),
                 model = firstNonEmpty(objectValue.optString("model", ""), threadObject.optString("model", "")),
+                reasoningEffort = firstNonEmpty(objectValue.optString("reasoningEffort", ""), threadObject.optString("reasoningEffort", "")),
                 backend = firstNonEmpty(objectValue.optString("backend", ""), objectValue.optString("modelProvider", ""), threadObject.optString("modelProvider", "")),
                 cwd = firstNonEmpty(
                     objectValue.optString("cwd", ""),
@@ -6202,6 +6221,7 @@ private data class SessionInfo(
             title = title.ifBlank { previous.title },
             preview = preview.ifBlank { previous.preview },
             model = model.ifBlank { previous.model },
+            reasoningEffort = reasoningEffort.ifBlank { previous.reasoningEffort },
             backend = backend.ifBlank { previous.backend },
             cwd = cwd.ifBlank { previous.cwd },
             updatedAt = updatedAt.ifBlank { previous.updatedAt },
@@ -6270,6 +6290,25 @@ private data class SessionInfo(
         }
     }
 
+    fun reasoningEffortSummary(): String {
+        val effort = reasoningEffort.trim()
+        return if (effort.isBlank()) {
+            "未提供"
+        } else {
+            labelReasoningEffort(effort)
+        }
+    }
+
+    fun modelSummary(): String {
+        val modelValue = model.trim().ifBlank { "未提供" }
+        val effortValue = reasoningEffort.trim()
+        return if (effortValue.isBlank()) {
+            modelValue
+        } else {
+            "$modelValue · ${labelReasoningEffort(effortValue)}"
+        }
+    }
+
     fun contextWindowSummary(): String = contextWindow?.let(::formatCountLabel) ?: "未提供"
 
     fun lastTokenUsageSummary(): String = lastTokenUsage?.summary() ?: "未提供"
@@ -6312,6 +6351,18 @@ private fun formatCountLabel(value: Int): String {
         value >= 1_000_000 -> String.format(Locale.US, "%.1fM", value / 1_000_000f)
         value >= 1_000 -> String.format(Locale.US, "%.1fk", value / 1_000f)
         else -> value.toString()
+    }
+}
+
+private fun labelReasoningEffort(effort: String): String {
+    return when (effort.trim()) {
+        "none" -> "关闭思考 (none)"
+        "minimal" -> "极低 (minimal)"
+        "low" -> "低 (low)"
+        "medium" -> "中 (medium)"
+        "high" -> "高 (high)"
+        "xhigh" -> "极高 (xhigh)"
+        else -> effort.ifBlank { "未提供" }
     }
 }
 

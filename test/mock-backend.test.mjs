@@ -1916,6 +1916,195 @@ test('bridge preserves stored session metadata in session.list and session.conte
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test('bridge backfills historical session metadata from local rollout without remote resume', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-local-metadata-test-'));
+  const rolloutPath = path.join(dir, 'history-rollout.jsonl');
+  const sessionId = 'local_metadata_thread_1';
+
+  await fs.writeFile(rolloutPath, [
+    JSON.stringify({
+      timestamp: '2026-05-20T04:02:58.578Z',
+      type: 'session_meta',
+      payload: {
+        id: sessionId,
+        cwd: '/tmp/local-metadata-workspace',
+        model: 'gpt-5.4',
+      },
+    }),
+    JSON.stringify({
+      timestamp: '2026-05-20T04:03:33.705Z',
+      type: 'turn_context',
+      payload: {
+        turn_id: 'turn_local_metadata_1',
+        cwd: '/tmp/local-metadata-workspace',
+        approval_policy: 'on-request',
+        sandbox_policy: { type: 'danger-full-access' },
+        permission_profile: { type: 'disabled' },
+        model: 'gpt-5.4',
+        model_context_window: 950000,
+        effort: 'xhigh',
+      },
+    }),
+    JSON.stringify({
+      timestamp: '2026-05-20T04:03:43.870Z',
+      type: 'event_msg',
+      payload: {
+        type: 'token_count',
+        info: {
+          total_token_usage: {
+            total_tokens: 14833,
+            input_tokens: 14446,
+            cached_input_tokens: 9600,
+            output_tokens: 387,
+            reasoning_output_tokens: 121,
+          },
+          last_token_usage: {
+            total_tokens: 14833,
+            input_tokens: 14446,
+            cached_input_tokens: 9600,
+            output_tokens: 387,
+            reasoning_output_tokens: 121,
+          },
+          model_context_window: 950000,
+        },
+      },
+    }),
+    '',
+  ].join('\n'), 'utf8');
+
+  class NoRemoteMetadataBackend extends EventEmitter {
+    constructor() {
+      super();
+      this.resumeCalls = 0;
+      this.readCalls = 0;
+    }
+
+    async start() {}
+
+    async stop() {}
+
+    async listThreads() {
+      return [{
+        id: sessionId,
+        sessionId,
+        forkedFromId: null,
+        preview: 'Local metadata session',
+        ephemeral: false,
+        modelProvider: 'custom',
+        createdAt: 1,
+        updatedAt: 2,
+        status: { type: 'idle' },
+        path: rolloutPath,
+        cwd: '/tmp/local-metadata-workspace',
+        cliVersion: 'mock',
+        source: 'app-server',
+        threadSource: null,
+        agentNickname: null,
+        agentRole: null,
+        gitInfo: null,
+        name: 'Local metadata session',
+        turns: [],
+      }];
+    }
+
+    async readThread() {
+      this.readCalls += 1;
+      return {
+        thread: {
+          id: sessionId,
+          sessionId,
+          forkedFromId: null,
+          preview: 'Local metadata session',
+          ephemeral: false,
+          modelProvider: 'custom',
+          createdAt: 1,
+          updatedAt: 2,
+          status: { type: 'idle' },
+          path: rolloutPath,
+          cwd: '/tmp/local-metadata-workspace',
+          cliVersion: 'mock',
+          source: 'app-server',
+          threadSource: null,
+          agentNickname: null,
+          agentRole: null,
+          gitInfo: null,
+          name: 'Local metadata session',
+          turns: [],
+        },
+      };
+    }
+
+    async resumeThread() {
+      this.resumeCalls += 1;
+      throw new Error('resume should not be needed for local metadata backfill');
+    }
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  await store.load();
+  await store.upsertSession({
+    session_id: sessionId,
+    thread_id: sessionId,
+    title: 'Local metadata session',
+    cwd: '/tmp/local-metadata-workspace',
+    model: '',
+    backend: 'custom',
+    preview: 'Local metadata session',
+    active: true,
+    thread: {
+      id: sessionId,
+      sessionId,
+      path: rolloutPath,
+      cwd: '/tmp/local-metadata-workspace',
+      status: { type: 'idle' },
+      turns: [],
+    },
+  });
+
+  const backend = new NoRemoteMetadataBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'session.content', payload: { session_id: sessionId } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+  const contentResponse = messages.find((m) => m.type === 'response' && m.id === '1');
+  assert.equal(contentResponse.ok, true);
+  assert.equal(contentResponse.payload.session.model, 'gpt-5.4');
+  assert.equal(contentResponse.payload.session.reasoningEffort, 'xhigh');
+  assert.equal(contentResponse.payload.session.approvalPolicy, 'on-request');
+  assert.deepEqual(contentResponse.payload.session.sandbox, { type: 'danger-full-access' });
+  assert.equal(contentResponse.payload.session.contextWindow, 950000);
+  assert.deepEqual(contentResponse.payload.session.lastTokenUsage, {
+    totalTokens: 14833,
+    inputTokens: 14446,
+    cachedInputTokens: 9600,
+    outputTokens: 387,
+    reasoningOutputTokens: 121,
+  });
+  assert.deepEqual(contentResponse.payload.session.totalTokenUsage, {
+    totalTokens: 14833,
+    inputTokens: 14446,
+    cachedInputTokens: 9600,
+    outputTokens: 387,
+    reasoningOutputTokens: 121,
+  });
+  assert.equal(backend.resumeCalls, 0);
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 async function waitFor(predicate, timeoutMs = 8000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
