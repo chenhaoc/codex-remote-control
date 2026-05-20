@@ -145,7 +145,6 @@ class MainActivity : ComponentActivity() {
         private const val CODE_BROWSER_FULL_HIGHLIGHT_MAX_CHARS = 60000
         private const val CODE_BROWSER_FULL_HIGHLIGHT_MAX_LINES = 1200
         private const val SESSION_SYNC_INTERVAL_MS = 5000L
-        private val clientDirectiveLineRegex = Regex("""^::[a-z][a-z0-9-]*\{.*}$""")
     }
 
     private val uiBackground = Color(0xFFF6FBF7)
@@ -4444,9 +4443,19 @@ class MainActivity : ComponentActivity() {
             text.replace("\r\n", "\n")
                 .lines()
                 .filterNot { line ->
-                    clientDirectiveLineRegex.matches(line.trim())
+                    isClientDirectiveLine(line.trim())
                 }
         return filteredLines.joinToString("\n").trim()
+    }
+
+    private fun isClientDirectiveLine(line: String): Boolean {
+        if (!line.startsWith("::")) return false
+        val braceIndex = line.indexOf('{')
+        if (braceIndex <= 2 || !line.endsWith("}")) return false
+        val name = line.substring(2, braceIndex)
+        if (name.isBlank()) return false
+        if (!name.first().isLowerCase()) return false
+        return name.all { it.isLowerCase() || it.isDigit() || it == '-' }
     }
 
     private fun updateLiveTurnStatusFromItem(eventName: String, item: JSONObject?) {

@@ -44,13 +44,57 @@ ws://HOST:PORT/?token=YOUR_TOKEN
 
 ## Client Messages
 
+- `model.list`
 - `session.list`
 - `session.start`
 - `session.resume`
+- `session.content`
 - `turn.send`
 - `turn.interrupt`
 - `approval.response`
 - `session.sync`
+- `file.read`
+
+## Session Data
+
+bridge 会同时维护两类会话数据：
+
+- `session.list` 返回的轻量摘要，适合列表页和快速切换
+- `session.content` 返回的完整内容快照，包含 `session`、`entries` 和 `pending_approvals`
+
+当前 `session.content` 还承担 Android 客户端的历史恢复与详情展示职责：
+
+- 对 brand-new session，如果只有 `thread/started` 元数据且还没有实际 turn，不会过早触发 `thread.read`
+- 如果 thread 还没有内联 turns，会优先使用 bridge 已存 events 和 rollout 文件补历史内容
+- 历史会话的 metadata 会先从本地 rollout / events 做只读回填，不触发新的用户消息或远端续跑
+
+本地 metadata backfill 目前会尝试恢复：
+
+- `model`
+- `reasoningEffort`
+- `approvalPolicy`
+- `permissions`
+- `sandbox`
+- `contextWindow`
+- `lastTokenUsage`
+- `totalTokenUsage`
+
+数据来源仅限：
+
+- rollout 里的 `session_meta`
+- rollout 里的 `turn_context`
+- rollout 里的 `event_msg.token_count`
+- bridge state 已存的 `thread/tokenUsage/updated` 事件
+
+如果这些本地来源本身不存在，对应字段仍会显示为“未提供”。
+
+## File Reading
+
+bridge 提供了一个轻量 `file.read` 能力，供 Android 代码浏览器按会话目录读取文件：
+
+- 绝对路径会直接读取
+- 相对路径会基于当前 session 的 `cwd` 解析
+- 响应会返回 `resolved_path`、`content`、`truncated` 和 `bytes`
 
 ## Events
 
@@ -83,3 +127,12 @@ android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 Android 侧使用 Kotlin + Jetpack Compose + OkHttp WebSocket。UI 采用 Compose 是为了解决键盘遮挡、会话列表和消息流布局这类真实体验问题；仍暂时不引入 Room / Hilt，以保持自用最小工程。
+
+当前 Android 客户端已经支持：
+
+- 会话列表、会话切换和新会话创建
+- `model.list` 拉取模型列表
+- 新会话时配置模型、思考强度、审批策略和沙箱
+- `session.content` 快照恢复聊天历史和待审批项
+- `file.read` 驱动的代码/补丁浏览
+- 会话信息页展示模型、思考强度、审批策略、沙箱、上下文窗口和 token 统计
