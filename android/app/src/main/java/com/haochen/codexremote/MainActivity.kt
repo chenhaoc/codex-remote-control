@@ -2855,7 +2855,7 @@ class MainActivity : ComponentActivity() {
             put("threadSource", "user")
             put("model", model)
             put("approvalPolicy", approvalPolicy)
-            put("sandbox", sandbox)
+            put("sandbox", toSandboxModeValue(sandbox))
             put(
                 "config",
                 JSONObject().apply {
@@ -2900,11 +2900,6 @@ class MainActivity : ComponentActivity() {
                 put("model", model)
             }
             activeSession()?.approvalPolicy?.takeIf { it.isNotBlank() }?.let { put("approvalPolicy", it) }
-            val sandboxValue = activeSession()?.sandbox
-            if (sandboxValue != null) {
-                put("sandboxPolicy", cloneJsonValue(sandboxValue))
-            }
-            activeSession()?.permissions?.let { put("permissions", cloneJsonValue(it)) }
         }
 
         if (!sendRequest("turn.send", payload) { response ->
@@ -4692,16 +4687,16 @@ class MainActivity : ComponentActivity() {
 
     private fun sandboxMenuOptions(): List<SelectionMenuOption> {
         return listOf(
-            SelectionMenuOption("read-only", "只读 (read-only)"),
-            SelectionMenuOption("workspace-write", "工作区可写 (workspace-write)"),
-            SelectionMenuOption("danger-full-access", "完整访问 (danger-full-access)"),
+            SelectionMenuOption("readOnly", "只读 (readOnly)"),
+            SelectionMenuOption("workspaceWrite", "工作区可写 (workspaceWrite)"),
+            SelectionMenuOption("dangerFullAccess", "完整访问 (dangerFullAccess)"),
         )
     }
 
     private fun sandboxDescription(sandbox: String): String {
         return when (sandbox.trim()) {
-            "read-only" -> "只读模式。不能改文件，适合纯查看、检索和解释。"
-            "workspace-write" -> "仅允许写当前项目工作区；更稳妥，适合日常改代码。"
+            "readOnly" -> "只读模式。不能改文件，适合纯查看、检索和解释。"
+            "workspaceWrite" -> "仅允许写当前项目工作区；更稳妥，适合日常改代码。"
             else -> "允许完整文件系统访问；能力最强，但风险也最高。"
         }
     }
@@ -4857,7 +4852,7 @@ class MainActivity : ComponentActivity() {
                 model = defaultModel,
                 reasoningEffort = defaultReasoningEffortForModel(defaultModel),
                 approvalPolicy = "never",
-                sandbox = "danger-full-access",
+                sandbox = "dangerFullAccess",
             )
     }
 
@@ -4881,9 +4876,6 @@ class MainActivity : ComponentActivity() {
                         add("目录" to session.cwd.ifBlank { "未提供" })
                         add("模型" to session.modelSummary())
                         add("审批策略" to session.approvalPolicy.ifBlank { "未提供" })
-                        session.permissionsSummary()
-                            .takeIf { it != "默认" }
-                            ?.let { add("权限配置" to it) }
                         add("沙箱" to session.sandboxSummary())
                         add("上下文窗口" to session.contextWindowSummary())
                         add("最近 token" to session.lastTokenUsageSummary())
@@ -6008,6 +6000,15 @@ private data class ReasoningEffortInfo(
     val description: String,
 )
 
+private fun toSandboxModeValue(value: String): String {
+    return when (value.trim()) {
+        "readOnly" -> "read-only"
+        "workspaceWrite" -> "workspace-write"
+        "dangerFullAccess" -> "danger-full-access"
+        else -> value
+    }
+}
+
 private data class ModelInfo(
     val id: String,
     val model: String,
@@ -6287,15 +6288,15 @@ private data class SessionInfo(
         val type =
             when (raw) {
                 is String -> raw
-                is JSONObject -> raw.optString("type", "").ifBlank { raw.toString() }
+                is JSONObject -> raw.optString("type", "")
                 else -> raw?.toString().orEmpty()
             }.trim()
         return when (type) {
-            "danger-full-access", "dangerFullAccess" -> "full-access"
-            "workspace-write", "workspaceWrite" -> "workspace-write"
-            "read-only", "readOnly" -> "read-only"
+            "dangerFullAccess", "danger-full-access" -> "dangerFullAccess"
+            "workspaceWrite", "workspace-write" -> "workspaceWrite"
+            "readOnly", "read-only" -> "readOnly"
             "externalSandbox" -> "external sandbox"
-            else -> raw?.toString().orEmpty().ifBlank { "未提供" }
+            else -> "未提供"
         }
     }
 

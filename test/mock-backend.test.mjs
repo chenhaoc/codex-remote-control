@@ -709,75 +709,60 @@ test('bridge resumes notLoaded threads before send and hydrates history', async 
   await fs.rm(dir, { recursive: true, force: true });
 });
 
-test('bridge normalizes stored sandbox policy when resuming notLoaded session content', async () => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-resume-sandbox-test-'));
-  const sessionId = 'resume_sandbox_thread_1';
+test('bridge normalizes sandbox metadata for session content', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-session-sandbox-meta-test-'));
+  const sessionId = 'session_sandbox_meta_thread_1';
+  const thread = {
+    id: sessionId,
+    sessionId,
+    forkedFromId: null,
+    preview: 'Sandbox meta session',
+    ephemeral: false,
+    model: 'gpt-5',
+    modelProvider: 'custom',
+    createdAt: 1,
+    updatedAt: 2,
+    status: { type: 'idle' },
+    path: null,
+    cwd: '/tmp/meta-workspace',
+    cliVersion: 'mock',
+    source: 'app-server',
+    threadSource: null,
+    agentNickname: null,
+    agentRole: null,
+    gitInfo: null,
+    name: 'Sandbox meta session',
+    turns: [],
+  };
 
-  class ResumeSandboxBackend extends EventEmitter {
-    constructor() {
-      super();
-      this.resumeSandbox = null;
-    }
-
+  class SessionSandboxMetadataBackend extends EventEmitter {
     async start() {}
 
     async stop() {}
 
-    async resumeThread(threadId, params = {}) {
-      this.resumeSandbox = params.sandbox;
+    async listThreads() {
+      return [{
+        thread: structuredClone(thread),
+        sandbox: { type: 'dangerFullAccess' },
+      }];
+    }
+
+    async readThread() {
       return {
-        thread: {
-          id: threadId,
-          sessionId: threadId,
-          forkedFromId: null,
-          preview: 'Sandbox session',
-          ephemeral: false,
-          model: 'gpt-5',
-          modelProvider: 'custom',
-          createdAt: 1,
-          updatedAt: 2,
-          status: { type: 'idle' },
-          path: null,
-          cwd: '/tmp',
-          cliVersion: 'mock',
-          source: 'app-server',
-          threadSource: null,
-          agentNickname: null,
-          agentRole: null,
-          gitInfo: null,
-          name: 'Sandbox session',
-          turns: [],
-        },
-        model: 'gpt-5',
+        thread: structuredClone(thread),
         sandbox: { type: 'dangerFullAccess' },
       };
     }
+
+    async interruptTurn() {}
+
+    async respondRequest() {}
   }
 
   const store = new StateStore(path.join(dir, 'state.json'));
   await store.load();
-  await store.upsertSession({
-    session_id: sessionId,
-    thread_id: sessionId,
-    title: 'Sandbox session',
-    cwd: '/tmp',
-    model: 'gpt-5',
-    backend: 'custom',
-    preview: 'Sandbox session',
-    active: true,
-    approvalPolicy: 'never',
-    permissions: { type: 'profile', id: ':workspace' },
-    sandbox: { type: 'dangerFullAccess' },
-    thread: {
-      id: sessionId,
-      sessionId,
-      cwd: '/tmp',
-      status: { type: 'notLoaded' },
-      turns: [],
-    },
-  });
 
-  const backend = new ResumeSandboxBackend();
+  const backend = new SessionSandboxMetadataBackend();
   const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
   await bridge.start();
   const { port } = bridge.address();
@@ -790,11 +775,15 @@ test('bridge normalizes stored sandbox policy when resuming notLoaded session co
     messages.push(JSON.parse(buffer.toString('utf8')));
   });
 
-  ws.send(JSON.stringify({ id: '1', type: 'session.content', payload: { session_id: sessionId } }));
+  ws.send(JSON.stringify({ id: '1', type: 'session.list', payload: {} }));
   await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
-  const contentResponse = messages.find((m) => m.type === 'response' && m.id === '1');
-  assert.equal(contentResponse.ok, true);
-  assert.equal(backend.resumeSandbox, 'danger-full-access');
+  const sessionList = messages.find((m) => m.type === 'response' && m.id === '1');
+  assert.deepEqual(sessionList.payload.sessions[0].sandbox, { type: 'dangerFullAccess' });
+
+  ws.send(JSON.stringify({ id: '2', type: 'session.content', payload: { session_id: sessionId } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '2'));
+  const sessionContent = messages.find((m) => m.type === 'response' && m.id === '2');
+  assert.deepEqual(sessionContent.payload.session.sandbox, { type: 'dangerFullAccess' });
 
   ws.close();
   await once(ws, 'close');
@@ -1938,7 +1927,7 @@ test('bridge backfills historical session metadata from local rollout without re
         turn_id: 'turn_local_metadata_1',
         cwd: '/tmp/local-metadata-workspace',
         approval_policy: 'on-request',
-        sandbox_policy: { type: 'danger-full-access' },
+        sandbox_policy: { type: 'dangerFullAccess' },
         permission_profile: { type: 'disabled' },
         model: 'gpt-5.4',
         model_context_window: 950000,
@@ -2081,7 +2070,7 @@ test('bridge backfills historical session metadata from local rollout without re
   assert.equal(contentResponse.payload.session.model, 'gpt-5.4');
   assert.equal(contentResponse.payload.session.reasoningEffort, 'xhigh');
   assert.equal(contentResponse.payload.session.approvalPolicy, 'on-request');
-  assert.deepEqual(contentResponse.payload.session.sandbox, { type: 'danger-full-access' });
+  assert.deepEqual(contentResponse.payload.session.sandbox, { type: 'dangerFullAccess' });
   assert.equal(contentResponse.payload.session.contextWindow, 950000);
   assert.deepEqual(contentResponse.payload.session.lastTokenUsage, {
     totalTokens: 14833,

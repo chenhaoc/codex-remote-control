@@ -10,6 +10,9 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+const SANDBOX_POLICY_TYPES = new Set(['readOnly', 'workspaceWrite', 'dangerFullAccess', 'externalSandbox']);
+const SANDBOX_MODE_TYPES = new Set(['readOnly', 'workspaceWrite', 'dangerFullAccess']);
+
 function firstNonEmptyString(...values) {
   for (const value of values) {
     if (typeof value === 'string' && value.trim()) {
@@ -81,51 +84,84 @@ function mergeSessionSummary(summary, stored) {
   return merged;
 }
 
-function normalizeSandboxMode(value) {
-  if (typeof value === 'string') {
-    const normalized = value.trim();
-    switch (normalized) {
-      case 'read-only':
-      case 'readOnly':
-        return 'read-only';
-      case 'workspace-write':
-      case 'workspaceWrite':
-        return 'workspace-write';
-      case 'danger-full-access':
-      case 'dangerFullAccess':
-      case 'full-access':
-        return 'danger-full-access';
-      default:
-        return normalized || null;
-    }
-  }
+function canonicalizeSandboxType(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const candidate = trimmed.includes('-')
+    ? trimmed.split('-').map((part, index) => (index === 0 ? part : `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)).join('')
+    : trimmed;
+  return SANDBOX_POLICY_TYPES.has(candidate) ? candidate : null;
+}
 
-  if (value && typeof value === 'object') {
-    const type = typeof value.type === 'string' ? value.type.trim() : '';
-    switch (type) {
-      case 'read-only':
-      case 'readOnly':
-        return 'read-only';
-      case 'workspace-write':
-      case 'workspaceWrite':
-        return 'workspace-write';
-      case 'danger-full-access':
+function toSandboxMode(value) {
+  const type = typeof value === 'string'
+    ? canonicalizeSandboxType(value)
+    : canonicalizeSandboxType(value?.type);
+  if (!type || !SANDBOX_MODE_TYPES.has(type)) return null;
+  return type.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
+}
+
+function normalizeSandboxPolicy(value) {
+  if (value == null) return null;
+
+  if (typeof value === 'string') {
+    switch (canonicalizeSandboxType(value)) {
       case 'dangerFullAccess':
-        return 'danger-full-access';
+        return { type: 'dangerFullAccess' };
+      case 'readOnly':
+        return { type: 'readOnly', networkAccess: false };
+      case 'workspaceWrite':
+        return {
+          type: 'workspaceWrite',
+          writableRoots: [],
+          networkAccess: false,
+          excludeTmpdirEnvVar: false,
+          excludeSlashTmp: false,
+        };
       default:
         return null;
     }
   }
 
-  return null;
+  if (typeof value !== 'object') return null;
+  const type = canonicalizeSandboxType(value.type);
+  if (!type) return null;
+
+  const next = clone(value);
+  next.type = type;
+
+  switch (type) {
+    case 'dangerFullAccess':
+      return { type };
+    case 'readOnly':
+      return {
+        ...next,
+        networkAccess: Boolean(next.networkAccess),
+      };
+    case 'workspaceWrite':
+      return {
+        ...next,
+        writableRoots: Array.isArray(next.writableRoots) ? clone(next.writableRoots) : [],
+        networkAccess: Boolean(next.networkAccess),
+        excludeTmpdirEnvVar: Boolean(next.excludeTmpdirEnvVar),
+        excludeSlashTmp: Boolean(next.excludeSlashTmp),
+      };
+    case 'externalSandbox':
+      return next.networkAccess != null ? next : null;
+    default:
+      return null;
+  }
 }
 
-function normalizePermissionSelection(activePermissionProfile) {
-  if (!activePermissionProfile || typeof activePermissionProfile !== 'object') return null;
-  const id = typeof activePermissionProfile.id === 'string' ? activePermissionProfile.id.trim() : '';
+function normalizePermissionSelection(value) {
+  if (!value || typeof value !== 'object') return null;
+  const type = typeof value.type === 'string' ? value.type.trim() : '';
+  if (type && type !== 'profile') return null;
+  const id = typeof value.id === 'string' ? value.id.trim() : '';
   if (!id) return null;
-  const modifications = Array.isArray(activePermissionProfile.modifications)
-    ? activePermissionProfile.modifications.filter(Boolean)
+  const modifications = Array.isArray(value.modifications)
+    ? value.modifications.filter(Boolean)
     : [];
   return {
     type: 'profile',
@@ -141,7 +177,7 @@ function normalizeThreadSummary(thread, backend = 'mock') {
   const id = raw.id ?? raw.threadId ?? raw.sessionId;
   const approvalPolicy = envelope.approvalPolicy ?? raw.approvalPolicy;
   const permissions = normalizePermissionSelection(envelope.activePermissionProfile ?? raw.activePermissionProfile);
-  const sandbox = envelope.sandbox ?? raw.sandbox ?? raw.sandboxPolicy;
+  const sandbox = normalizeSandboxPolicy(envelope.sandbox ?? raw.sandbox ?? raw.sandboxPolicy);
   const tokenUsage = envelope.tokenUsage ?? raw.tokenUsage ?? null;
   const reasoningEffort = envelope.reasoningEffort ?? raw.reasoningEffort ?? null;
   return {
@@ -157,7 +193,7 @@ function normalizeThreadSummary(thread, backend = 'mock') {
     updatedAt: raw.updatedAt ? new Date(raw.updatedAt * 1000).toISOString() : nowIso(),
     ...(approvalPolicy != null ? { approvalPolicy } : {}),
     ...(permissions != null ? { permissions } : {}),
-    ...(sandbox != null ? { sandbox: clone(sandbox) } : {}),
+    ...(sandbox != null ? { sandbox } : {}),
     ...(tokenUsage?.modelContextWindow != null ? { contextWindow: tokenUsage.modelContextWindow } : {}),
     ...(tokenUsage?.last ? { lastTokenUsage: clone(tokenUsage.last) } : {}),
     ...(tokenUsage?.total ? { totalTokenUsage: clone(tokenUsage.total) } : {}),
@@ -429,8 +465,8 @@ export class BridgeServer extends EventEmitter {
           model: payload.model ?? null,
           approvalPolicy: payload.approvalPolicy ?? null,
           approvalsReviewer: payload.approvalsReviewer ?? null,
-          sandbox: normalizeSandboxMode(payload.sandbox),
-          permissions: payload.permissions ?? null,
+          sandbox: payload.sandbox ?? null,
+          permissions: normalizePermissionSelection(payload.permissions),
           config: payload.config ?? null,
           serviceName: payload.serviceName ?? null,
           baseInstructions: payload.baseInstructions ?? null,
@@ -461,8 +497,8 @@ export class BridgeServer extends EventEmitter {
           cwd: payload.cwd ?? null,
           approvalPolicy: payload.approvalPolicy ?? null,
           approvalsReviewer: payload.approvalsReviewer ?? null,
-          sandbox: normalizeSandboxMode(payload.sandbox),
-          permissions: payload.permissions ?? null,
+          sandbox: payload.sandbox ?? null,
+          permissions: normalizePermissionSelection(payload.permissions),
           config: payload.config ?? null,
           baseInstructions: payload.baseInstructions ?? null,
           developerInstructions: payload.developerInstructions ?? null,
@@ -502,16 +538,20 @@ export class BridgeServer extends EventEmitter {
         }
         const storedInputEvent = await this.store.appendEvent(sessionId, inputEvent);
         this.#broadcast(storedInputEvent);
+        const requestedPermissions = normalizePermissionSelection(payload.permissions);
+        const requestedSandboxPolicy = Object.prototype.hasOwnProperty.call(payload, 'sandboxPolicy')
+          ? normalizeSandboxPolicy(payload.sandboxPolicy)
+          : normalizeSandboxPolicy(session?.sandbox ?? null);
         const turnParams = {
           text: payload.text ?? '',
           input: payload.input ?? null,
           responsesapiClientMetadata: payload.responsesapiClientMetadata ?? null,
           environments: payload.environments ?? null,
           cwd: payload.cwd ?? null,
-          approvalPolicy: payload.approvalPolicy ?? session?.approvalPolicy ?? null,
+          approvalPolicy: payload.approvalPolicy ?? null,
           approvalsReviewer: payload.approvalsReviewer ?? null,
-          sandboxPolicy: payload.sandboxPolicy ?? session?.sandbox ?? null,
-          permissions: payload.permissions ?? session?.permissions ?? null,
+          sandboxPolicy: payload.sandboxPolicy ?? null,
+          permissions: requestedPermissions,
           model: payload.model ?? null,
           serviceTier: payload.serviceTier ?? null,
           effort: payload.effort ?? null,
@@ -526,7 +566,7 @@ export class BridgeServer extends EventEmitter {
           cwd: turnParams.cwd,
           approvalPolicy: turnParams.approvalPolicy,
           approvalsReviewer: turnParams.approvalsReviewer,
-          sandbox: turnParams.sandboxPolicy,
+          sandbox: null,
           permissions: turnParams.permissions,
           personality: turnParams.personality,
           excludeTurns: true,
@@ -783,14 +823,14 @@ export class BridgeServer extends EventEmitter {
       threadId: session.thread_id ?? sessionId,
       path: explicitPath,
       model: params.model ?? session.model ?? null,
-          cwd: params.cwd ?? session.cwd ?? null,
-          approvalPolicy: params.approvalPolicy ?? session.approvalPolicy ?? null,
-          approvalsReviewer: params.approvalsReviewer ?? null,
-          sandbox: normalizeSandboxMode(params.sandbox ?? session.sandbox ?? null),
-          permissions: params.permissions ?? session.permissions ?? null,
-          personality: params.personality ?? null,
-          excludeTurns: params.excludeTurns ?? null,
-          persistExtendedHistory: false,
+      cwd: params.cwd ?? session.cwd ?? null,
+      approvalPolicy: params.approvalPolicy ?? null,
+      approvalsReviewer: params.approvalsReviewer ?? null,
+      sandbox: toSandboxMode(params.sandbox),
+      permissions: normalizePermissionSelection(params.permissions),
+      personality: params.personality ?? null,
+      excludeTurns: params.excludeTurns ?? null,
+      persistExtendedHistory: false,
     });
     const normalized = normalizeThreadSummary(resumed, this.backend.constructor.name.replace('Backend', '').toLowerCase() || 'mock');
     await this.store.upsertSession(normalized);
