@@ -134,5 +134,8 @@ Android 侧使用 Kotlin + Jetpack Compose + OkHttp WebSocket。UI 采用 Compos
 - `model.list` 拉取模型列表
 - 新会话时配置模型、思考强度、审批策略和沙箱
 - `session.content` 快照恢复聊天历史和待审批项
+- 基于 `conversationItems` 的聊天 WebView 增量渲染，避免简单消息追加时整页重载
+- 会话切换和历史恢复时按快照回填滚动位置
+- 输入法弹出或视口高度变化时保持当前阅读锚点，避免消息区被顶跳
 - `file.read` 驱动的代码/补丁浏览
 - 会话信息页展示模型、思考强度、审批策略、沙箱、上下文窗口和 token 统计

@@ -3,14 +3,20 @@ package com.haochen.codexremote
 internal fun buildConversationPageHtml(
     items: List<ConversationItem>,
     displayBasePath: String?,
-): String = buildConversationPageHtml(buildConversationRenderedItems(items, displayBasePath))
+): String = buildConversationRenderedPageHtml(buildConversationRenderedItems(items, displayBasePath))
 
-internal fun buildConversationPageHtml(
+internal fun buildConversationRenderedPageHtml(
     renderedItems: List<ConversationRenderedItem>,
+    renderTag: String? = null,
 ): String {
     val bodyHtml = renderedItems.joinToString("") { it.html }
     val style = buildConversationCss()
     val script = buildConversationScript()
+    val renderTagAttribute =
+        renderTag
+            ?.takeIf { it.isNotBlank() }
+            ?.let { """ data-cr-render-tag="${escapeConversationHtmlAttribute(it)}"""" }
+            .orEmpty()
     return """
         <!DOCTYPE html>
         <html dir="auto">
@@ -24,7 +30,7 @@ internal fun buildConversationPageHtml(
             $script
             </script>
         </head>
-        <body>
+        <body$renderTagAttribute>
             <main>
                 <article>
                     <section class="cr-conversation">

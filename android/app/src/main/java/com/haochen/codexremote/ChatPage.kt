@@ -73,7 +73,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
@@ -98,9 +97,6 @@ import kotlinx.coroutines.withContext
 @Composable
 internal fun MainActivity.ChatPage() {
     val activeSession = activeSession()
-    val density = LocalDensity.current
-    val imeBottom = WindowInsets.ime.getBottom(density)
-    val shouldFollowBottom = activeTurnId != null || imeBottom > 0
 
     Column(
         modifier = Modifier
@@ -132,7 +128,6 @@ internal fun MainActivity.ChatPage() {
                     items = conversationItems,
                     sessionId = activeSessionId,
                     displayBasePath = activeSession?.cwd,
-                    followBottom = shouldFollowBottom,
                     restoreScrollY = chatRestoreScrollY,
                     onScrollRestored = {
                         chatRestoreScrollY = null
