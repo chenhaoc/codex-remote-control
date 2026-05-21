@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Codex Remote Control icon option 2C</title>
+  <desc id="desc">A minimal remote command cursor mark for an Android app icon.</desc>
+  <defs>
+    <linearGradient id="bg" x1="76" y1="70" x2="436" y2="442" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="0.55" stop-color="#12395a"/>
+      <stop offset="1" stop-color="#0f766e"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <rect x="106" y="132" width="300" height="248" rx="56" fill="#f8fafc"/>
+  <rect x="132" y="160" width="248" height="192" rx="34" fill="#0f172a"/>
+
+  <path d="M178 226l48 30-48 30" fill="none" stroke="#5eead4" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M254 292h80" fill="none" stroke="#f8fafc" stroke-width="30" stroke-linecap="round"/>
+
+  <circle cx="106" cy="256" r="18" fill="#fbbf24"/>
+  <circle cx="406" cy="256" r="18" fill="#fbbf24"/>
+  <path d="M124 256h48M340 256h48" fill="none" stroke="#fbbf24" stroke-width="14" stroke-linecap="round"/>
+</svg>

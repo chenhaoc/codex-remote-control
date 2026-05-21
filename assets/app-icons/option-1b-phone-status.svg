@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Codex Remote Control icon option 1B</title>
+  <desc id="desc">A simplified phone icon with a small remote status mark.</desc>
+  <defs>
+    <linearGradient id="bg" x1="78" y1="60" x2="434" y2="452" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0f766e"/>
+      <stop offset="0.55" stop-color="#155e75"/>
+      <stop offset="1" stop-color="#1e293b"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="174" y1="126" x2="338" y2="374" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#dbeafe"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <rect x="148" y="82" width="216" height="348" rx="48" fill="#0f172a"/>
+  <rect x="172" y="128" width="168" height="244" rx="26" fill="url(#screen)"/>
+  <rect x="224" y="106" width="64" height="8" rx="4" fill="#475569"/>
+  <circle cx="256" cy="398" r="13" fill="#475569"/>
+
+  <path d="M214 214l36 32-36 32" fill="none" stroke="#0f172a" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M270 280h46" fill="none" stroke="#0f172a" stroke-width="24" stroke-linecap="round"/>
+
+  <circle cx="316" cy="154" r="15" fill="#14b8a6"/>
+  <circle cx="316" cy="154" r="7" fill="#ccfbf1"/>
+</svg>

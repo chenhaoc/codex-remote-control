@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Codex Remote Control icon option 1A</title>
+  <desc id="desc">A simplified phone command icon.</desc>
+  <rect width="512" height="512" fill="#E0F2FE"/>
+  <rect x="148" y="112" width="216" height="288" rx="40" fill="#38BDF8"/>
+  <rect x="178" y="166" width="156" height="190" rx="24" fill="#FFFFFF"/>
+  <rect x="224" y="130" width="64" height="8" rx="4" fill="#E0F2FE"/>
+  <circle cx="256" cy="374" r="12" fill="#E0F2FE"/>
+
+  <path d="M216 250L220 246L230 254L220 262L216 258L222 254Z" fill="#0369A1"/>
+  <path d="M228 246L242 256L228 266L224 262L232 256L224 250Z" fill="#0369A1"/>
+  <rect x="270" y="274" width="44" height="20" rx="10" fill="#0369A1"/>
+  <circle cx="312" cy="174" r="12" fill="#14B8A6"/>
+</svg>
