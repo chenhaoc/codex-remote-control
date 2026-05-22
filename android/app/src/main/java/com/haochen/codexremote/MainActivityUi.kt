@@ -108,6 +108,12 @@ internal fun MainActivity.RemoteApp() {
         }
     }
 
+    BackHandler(enabled = !drawerState.isOpen && currentPage != AppPage.Chat) {
+        if (!handleTopLevelBack()) {
+            finish()
+        }
+    }
+
     val scheme = lightColorScheme(
         primary = uiPrimary,
         secondary = uiMuted,
@@ -151,6 +157,7 @@ internal fun MainActivity.RemoteApp() {
                 topBar = {
                     AppTopBar(
                         onOpenDrawer = {
+                            requestSessionList()
                             scope.launch {
                                 drawerState.open()
                             }
@@ -400,7 +407,7 @@ internal fun MainActivity.SectionTitle(text: String) {
 
 @Composable
 internal fun MainActivity.Label(text: String) {
-    Text(text = text, fontSize = 12.sp, color = uiMuted)
+    Text(text = text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = uiText)
 }
 
 @Composable

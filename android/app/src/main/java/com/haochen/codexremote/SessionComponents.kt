@@ -30,8 +30,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -213,13 +215,18 @@ internal fun MainActivity.SelectionMenuField(
     onSelect: (String) -> Unit,
     enabled: Boolean = true,
 ) {
+    var anchorWidthPx by remember { mutableStateOf(0) }
+    val density = LocalDensity.current
+
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Label(label)
         Box(modifier = Modifier.fillMaxWidth()) {
             OutlinedButton(
                 onClick = { onExpandedChange(!expanded) },
                 enabled = enabled,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onSizeChanged { anchorWidthPx = it.width },
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -243,7 +250,9 @@ internal fun MainActivity.SelectionMenuField(
             DropdownMenu(
                 expanded = enabled && expanded,
                 onDismissRequest = { onExpandedChange(false) },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = with(density) {
+                    Modifier.widthIn(min = anchorWidthPx.toDp(), max = anchorWidthPx.toDp())
+                },
                 containerColor = uiSurface,
                 tonalElevation = 0.dp,
                 shadowElevation = 10.dp,

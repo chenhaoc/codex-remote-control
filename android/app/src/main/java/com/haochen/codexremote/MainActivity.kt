@@ -11,6 +11,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -30,10 +31,11 @@ internal const val KEY_MODEL = "model"
 internal const val KEY_AUTO_RECONNECT = "auto_reconnect"
 internal const val KEY_AUTO_RECONNECT_MAX_ATTEMPTS = "auto_reconnect_max_attempts"
 internal const val KEY_STARTUP_PAGE = "startup_page"
+internal const val KEY_SESSION_SYNC_INTERVAL_SECONDS = "session_sync_interval_seconds"
 internal const val MAX_CONNECTION_HISTORY = 8
 internal const val CODE_BROWSER_FILE_CACHE_SIZE = 24
 internal const val CODE_BROWSER_RENDER_CACHE_SIZE = 16
-internal const val SESSION_SYNC_INTERVAL_MS = 5000L
+internal const val DEFAULT_SESSION_SYNC_INTERVAL_SECONDS = 5
 
 class MainActivity : ComponentActivity() {
     internal val uiBackground = Color(0xFFF6FBF7)
@@ -63,6 +65,7 @@ class MainActivity : ComponentActivity() {
     internal val turnDiffs = mutableMapOf<String, String>()
     internal val connectionHistory = mutableStateListOf<BridgeHistoryEntry>()
     internal val pendingApprovals = mutableStateListOf<ApprovalDialogState>()
+    internal val projectGroupExpanded = mutableStateMapOf<String, Boolean>()
     internal val codeBrowserFileCache =
         object : LinkedHashMap<String, CodeBrowserFileContent>(CODE_BROWSER_FILE_CACHE_SIZE, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CodeBrowserFileContent>?): Boolean {
@@ -99,9 +102,10 @@ class MainActivity : ComponentActivity() {
     internal var lastSyncedSeq = 0
     internal var syncInFlight = false
     internal var sessionContentDirty = false
-    internal var autoReconnectEnabled = false
+    internal var autoReconnectEnabled by mutableStateOf(false)
     internal var autoReconnectMaxAttempts by mutableStateOf(0)
     internal var startupPagePreference by mutableStateOf(AppPage.Chat)
+    internal var sessionSyncIntervalSeconds by mutableStateOf(DEFAULT_SESSION_SYNC_INTERVAL_SECONDS)
     internal var reconnectAttempt = 0
     internal var reconnectScheduled = false
     internal var noticeToast: Toast? = null
@@ -114,7 +118,7 @@ class MainActivity : ComponentActivity() {
                 return
             }
             requestSessionContent(sessionId)
-            mainHandler.postDelayed(this, SESSION_SYNC_INTERVAL_MS)
+            mainHandler.postDelayed(this, sessionSyncIntervalMs())
         }
     }
 
@@ -139,6 +143,7 @@ class MainActivity : ComponentActivity() {
         autoReconnectEnabled = prefs.getBoolean(KEY_AUTO_RECONNECT, false)
         autoReconnectMaxAttempts = loadAutoReconnectMaxAttempts()
         startupPagePreference = loadStartupPagePreference()
+        sessionSyncIntervalSeconds = loadSessionSyncIntervalSeconds()
         currentPage = startupPagePreference
 
         WindowCompat.setDecorFitsSystemWindows(window, false)

@@ -4,6 +4,64 @@ internal fun MainActivity.openSettingsPage() {
     currentPage = AppPage.Settings
 }
 
+internal fun MainActivity.hasNavigableChatTarget(): Boolean {
+    return connected && !activeSessionId.isNullOrBlank()
+}
+
+internal fun MainActivity.handleTopLevelBack(): Boolean {
+    return when (currentPage) {
+        AppPage.Settings -> {
+            currentPage = if (hasNavigableChatTarget()) AppPage.Chat else AppPage.Connection
+            true
+        }
+        AppPage.Connection -> {
+            if (hasNavigableChatTarget()) {
+                currentPage = AppPage.Chat
+                true
+            } else {
+                false
+            }
+        }
+        AppPage.Chat -> false
+    }
+}
+
+internal fun MainActivity.loadSessionSyncIntervalSeconds(): Int {
+    val value = prefs.getInt(KEY_SESSION_SYNC_INTERVAL_SECONDS, DEFAULT_SESSION_SYNC_INTERVAL_SECONDS)
+    return value.coerceIn(1, 60)
+}
+
+internal fun MainActivity.updateSessionSyncIntervalSeconds(seconds: Int) {
+    val normalized = seconds.coerceIn(1, 60)
+    sessionSyncIntervalSeconds = normalized
+    prefs.edit().putInt(KEY_SESSION_SYNC_INTERVAL_SECONDS, normalized).apply()
+    if (connected && !activeSessionId.isNullOrBlank()) {
+        startSessionSyncLoop()
+    }
+}
+
+internal fun MainActivity.sessionSyncIntervalMs(): Long {
+    return sessionSyncIntervalSeconds * 1000L
+}
+
+internal fun MainActivity.sessionSyncIntervalMenuOptions(): List<SelectionMenuOption> {
+    return listOf(5, 15, 30, 60).map { seconds ->
+        SelectionMenuOption(
+            value = seconds.toString(),
+            label = "${seconds} 秒",
+            supporting = if (seconds == 5) "默认频率，响应更及时。" else "降低请求频率，适合稳定查看历史内容。",
+        )
+    }
+}
+
+internal fun MainActivity.sessionSyncIntervalLabel(): String {
+    return "${sessionSyncIntervalSeconds} 秒"
+}
+
+internal fun MainActivity.sessionSyncIntervalDescription(): String {
+    return "当前打开会话的内容轮询间隔。只影响 active session，不影响项目和历史列表刷新。"
+}
+
 internal fun MainActivity.loadStartupPagePreference(): AppPage {
     return appPageFromPreference(prefs.getString(KEY_STARTUP_PAGE, null))
 }

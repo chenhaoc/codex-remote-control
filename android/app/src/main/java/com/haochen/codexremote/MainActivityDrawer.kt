@@ -62,13 +62,8 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -98,6 +93,7 @@ import kotlinx.coroutines.withContext
 @Composable
 internal fun MainActivity.AppDrawerContent(onCloseDrawer: () -> Unit) {
     val projectGroups = projectBuckets()
+    syncProjectGroupExpansion(projectGroups)
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -218,7 +214,36 @@ internal fun MainActivity.AppDrawerContent(onCloseDrawer: () -> Unit) {
         }
 
         item {
-            SectionTitle("项目")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SectionTitle("项目")
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        onClick = { requestSessionList() },
+                        enabled = connected,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        Text("刷新", fontSize = 12.sp)
+                    }
+                    TextButton(
+                        onClick = { expandAllProjectGroups(projectGroups) },
+                        enabled = projectGroups.isNotEmpty(),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        Text("全部展开", fontSize = 12.sp)
+                    }
+                    TextButton(
+                        onClick = { collapseAllProjectGroups(projectGroups) },
+                        enabled = projectGroups.isNotEmpty(),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        Text("全部折叠", fontSize = 12.sp)
+                    }
+                }
+            }
         }
 
         if (projectGroups.isEmpty()) {
@@ -264,12 +289,7 @@ internal fun MainActivity.ProjectGroupCard(
     onNewChat: () -> Unit,
     onSelectSession: (SessionInfo) -> Unit,
 ) {
-    val containsActiveSession = group.sessions.any { it.sessionId == activeSessionId }
-    var expanded by remember(group.key()) { mutableStateOf(containsActiveSession) }
-
-    LaunchedEffect(containsActiveSession) {
-        if (containsActiveSession) expanded = true
-    }
+    val expanded = isProjectGroupExpanded(group)
 
     Card(
         colors = CardDefaults.cardColors(containerColor = uiSurface),
@@ -291,7 +311,7 @@ internal fun MainActivity.ProjectGroupCard(
                 Row(
                     modifier = Modifier
                         .weight(1f)
-                        .clickable { expanded = !expanded },
+                        .clickable { setProjectGroupExpanded(group.key(), !expanded) },
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -341,6 +361,38 @@ internal fun MainActivity.ProjectGroupCard(
                 }
             }
         }
+    }
+}
+
+internal fun MainActivity.syncProjectGroupExpansion(projectGroups: List<ProjectGroup>) {
+    val nextKeys = projectGroups.mapTo(linkedSetOf()) { it.key() }
+    projectGroupExpanded.keys.toList().forEach { key ->
+        if (key !in nextKeys) {
+            projectGroupExpanded.remove(key)
+        }
+    }
+    projectGroups.forEach { group ->
+        projectGroupExpanded.putIfAbsent(group.key(), group.sessions.any { it.sessionId == activeSessionId })
+    }
+}
+
+internal fun MainActivity.isProjectGroupExpanded(group: ProjectGroup): Boolean {
+    return projectGroupExpanded[group.key()] ?: group.sessions.any { it.sessionId == activeSessionId }
+}
+
+internal fun MainActivity.setProjectGroupExpanded(groupKey: String, expanded: Boolean) {
+    projectGroupExpanded[groupKey] = expanded
+}
+
+internal fun MainActivity.expandAllProjectGroups(projectGroups: List<ProjectGroup>) {
+    projectGroups.forEach { group ->
+        projectGroupExpanded[group.key()] = true
+    }
+}
+
+internal fun MainActivity.collapseAllProjectGroups(projectGroups: List<ProjectGroup>) {
+    projectGroups.forEach { group ->
+        projectGroupExpanded[group.key()] = false
     }
 }
 

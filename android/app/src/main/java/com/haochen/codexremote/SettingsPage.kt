@@ -33,8 +33,10 @@ internal fun MainActivity.SettingsPage() {
     val scrollState = rememberScrollState()
     var startupPageExpanded by remember { mutableStateOf(false) }
     var reconnectAttemptsExpanded by remember { mutableStateOf(false) }
+    var sessionSyncIntervalExpanded by remember { mutableStateOf(false) }
     val startupPageOptions = startupPageMenuOptions()
     val reconnectAttemptOptions = autoReconnectAttemptMenuOptions()
+    val sessionSyncIntervalOptions = sessionSyncIntervalMenuOptions()
 
     Column(
         modifier = Modifier
@@ -71,12 +73,7 @@ internal fun MainActivity.SettingsPage() {
                             modifier = Modifier.weight(1f),
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
-                            Text(
-                                text = "使能自动重连",
-                                color = uiText,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold,
-                            )
+                            Label("自动重连")
                             BodyText("连接意外断开时，按设置自动重试连接。")
                         }
                         Switch(
@@ -98,6 +95,31 @@ internal fun MainActivity.SettingsPage() {
                     },
                 )
                 BodyText(autoReconnectMaxAttemptsDescription())
+            }
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = uiSurface),
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(22.dp),
+            border = BorderStroke(1.dp, uiBorder),
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                SectionTitle("同步")
+                SelectionMenuField(
+                    label = "会话同步间隔",
+                    selectedLabel = sessionSyncIntervalLabel(),
+                    expanded = sessionSyncIntervalExpanded,
+                    onExpandedChange = { sessionSyncIntervalExpanded = it },
+                    options = sessionSyncIntervalOptions,
+                    onSelect = { value ->
+                        updateSessionSyncIntervalSeconds(value.toIntOrNull() ?: DEFAULT_SESSION_SYNC_INTERVAL_SECONDS)
+                    },
+                )
+                BodyText(sessionSyncIntervalDescription())
             }
         }
 

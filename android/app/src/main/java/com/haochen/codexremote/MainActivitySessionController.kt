@@ -274,6 +274,9 @@ internal fun MainActivity.selectSession(sessionId: String, syncHistory: Boolean)
         if (sessionId.isBlank()) return
         activeSessionId = sessionId
         prefs.edit().putString(KEY_SESSION, sessionId).apply()
+        projectBuckets().firstOrNull { group -> group.sessions.any { it.sessionId == sessionId } }?.let { group ->
+            setProjectGroupExpanded(group.key(), true)
+        }
         sessions.firstOrNull { it.sessionId == sessionId }?.model
             ?.takeIf { it.isNotBlank() && isKnownModel(it) }
             ?.let { selectModel(it) }
@@ -559,7 +562,7 @@ internal fun MainActivity.openSessionInfoSheet() {
 internal fun MainActivity.startSessionSyncLoop() {
         stopSessionSyncLoop()
         if (!connected || activeSessionId.isNullOrBlank()) return
-        mainHandler.postDelayed(syncRunnable, SESSION_SYNC_INTERVAL_MS)
+        mainHandler.postDelayed(syncRunnable, sessionSyncIntervalMs())
     }
 
 internal fun MainActivity.stopSessionSyncLoop() {
