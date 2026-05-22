@@ -102,6 +102,8 @@ class MainActivity : ComponentActivity() {
     internal var lastSyncedSeq = 0
     internal var syncInFlight = false
     internal var sessionContentDirty = false
+    internal var lastSnapshotSignature: String? = null
+    internal var lastSnapshotItemCount = 0
     internal var autoReconnectEnabled by mutableStateOf(false)
     internal var autoReconnectMaxAttempts by mutableStateOf(0)
     internal var startupPagePreference by mutableStateOf(AppPage.Chat)

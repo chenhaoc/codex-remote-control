@@ -136,22 +136,24 @@ internal fun MainActivity.appendStandaloneAssistantBubble(turnKey: String, text:
         conversationItems.add(createAssistantBubble(turnKey, text))
     }
 
-internal fun MainActivity.appendUserInputBubble(turnKey: String, text: String) {
+internal fun MainActivity.appendUserInputBubble(turnKey: String, itemKey: String, text: String) {
         val normalizedText = text.trim()
         if (normalizedText.isBlank()) return
+        val normalizedItemKey = itemKey.trim()
+        val normalizedTurnKey = turnKey.trim()
         val existing = conversationItems.asReversed().firstOrNull { item ->
             val bubble = item as? ConversationItem.Bubble ?: return@firstOrNull false
-            bubble.right && bubble.turnKey == turnKey && normalizeAssistantText(bubble.text) == normalizeAssistantText(normalizedText)
+            bubble.right && bubble.turnKey == normalizedTurnKey && normalizeAssistantText(bubble.text) == normalizeAssistantText(normalizedText)
         }
         if (existing != null) return
         conversationItems.add(
             ConversationItem.Bubble(
-                id = buildConversationItemId("user", turnKey, normalizedText.take(24)),
+                id = buildConversationItemId("user", normalizedItemKey.ifBlank { normalizedTurnKey }, normalizedTurnKey),
                 right = true,
                 text = normalizedText,
                 backgroundColor = 0xFF1A8F55.toInt(),
                 textColor = AndroidColor.WHITE,
-                turnKey = turnKey,
+                turnKey = normalizedTurnKey,
             ),
         )
     }

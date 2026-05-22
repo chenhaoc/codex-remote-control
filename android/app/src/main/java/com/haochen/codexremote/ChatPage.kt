@@ -142,14 +142,23 @@ internal fun MainActivity.ChatPage() {
             }
         }
 
-        liveTurnStatus?.takeIf { it.isNotBlank() }?.let { status ->
-            Text(
-                text = status,
-                color = uiMuted,
-                fontSize = 11.sp,
-                lineHeight = 16.sp,
-                modifier = Modifier.padding(start = 4.dp, end = 4.dp),
-            )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(16.dp)
+                .padding(start = 4.dp, end = 4.dp),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            liveTurnStatus?.takeIf { it.isNotBlank() }?.let { status ->
+                Text(
+                    text = status,
+                    color = uiMuted,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
 
         Row(

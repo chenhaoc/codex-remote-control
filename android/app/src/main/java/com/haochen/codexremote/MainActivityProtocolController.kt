@@ -157,7 +157,13 @@ internal fun MainActivity.handleTurnInput(message: JSONObject, payload: JSONObje
             message.optString("request_id", ""),
             payload.optString("request_id", ""),
         )
-        appendUserInputBubble(turnKey, text)
+        val itemKey = firstNonEmpty(
+            payload.optString("itemId", ""),
+            payload.optString("item_id", ""),
+            message.optString("itemId", ""),
+            message.optString("item_id", ""),
+        )
+        appendUserInputBubble(turnKey, itemKey, text)
     }
 
 internal fun MainActivity.shouldIgnoreEvent(message: JSONObject): Boolean {
@@ -196,7 +202,7 @@ internal fun MainActivity.handleAssistantDelta(message: JSONObject, payload: JSO
             payload.optString("delta", ""),
             payload.optString("text", ""),
             payload.optString("message", ""),
-        ).ifBlank { safeJson(payload) }
+        )
         appendAssistantDeltaBubble(turnKey, itemKey.ifBlank { "stream" }, delta)
     }
 

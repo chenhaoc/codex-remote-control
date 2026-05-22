@@ -549,6 +549,8 @@ test('bridge broadcasts stored seq values and backfills turn ids for synced user
   const liveTurnInput = messages.find((m) => m.type === 'event' && m.event === 'turn/input' && m.payload?.text === '继续');
   assert.equal(typeof liveTurnInput.seq, 'number');
   assert.ok(liveTurnInput.seq > 0);
+  assert.equal(liveTurnInput.payload.itemId, 'input_2');
+  assert.equal(liveTurnInput.payload.item_id, 'input_2');
 
   await waitFor(() => {
     const session = store.getSession(sessionId);
@@ -561,7 +563,15 @@ test('bridge broadcasts stored seq values and backfills turn ids for synced user
   const userInputs = syncResponse.payload.events.filter((event) => event.event === 'turn/input' && event.payload?.text === '继续');
   assert.equal(userInputs.length, 1);
   assert.equal(userInputs[0].turn_id, 'turn_live_1');
+  assert.equal(userInputs[0].payload.itemId, 'input_2');
+  assert.equal(userInputs[0].payload.item_id, 'input_2');
   assert.ok(syncResponse.payload.events.some((event) => event.event === 'item/completed' && event.payload.item.id === 'item_agent_live_1'));
+
+  ws.send(JSON.stringify({ id: '4', type: 'session.content', payload: { session_id: sessionId } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '4'));
+  const contentResponse = messages.find((m) => m.type === 'response' && m.id === '4');
+  const userEntry = contentResponse.payload.entries.find((entry) => entry.item?.type === 'userMessage' && entry.item.content?.[0]?.text === '继续');
+  assert.equal(userEntry?.item?.id, 'input_2');
 
   ws.close();
   await once(ws, 'close');
@@ -1721,6 +1731,87 @@ test('bridge emits session changed notifications for turn sends', async () => {
 
   const changedEvent = messages.find((m) => m.type === 'event' && m.event === 'session/changed' && m.session_id === sessionId);
   assert.equal(changedEvent.payload.last_seq > 0, true);
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('bridge inherits stored sandbox policy for turn sends and defaults to full access', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-turn-sandbox-test-'));
+
+  class TurnSandboxBackend extends EventEmitter {
+    constructor() {
+      super();
+      this.paramsByThreadId = new Map();
+    }
+
+    async start() {}
+
+    async stop() {}
+
+    async startTurn(threadId, params = {}) {
+      this.paramsByThreadId.set(threadId, structuredClone(params));
+      return {
+        id: `turn_${threadId}`,
+        items: [],
+        itemsView: 'summary',
+        status: 'inProgress',
+        error: null,
+        startedAt: 1,
+        completedAt: null,
+        durationMs: null,
+      };
+    }
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  await store.load();
+  await store.upsertSession({
+    session_id: 'stored_sandbox_thread',
+    thread_id: 'stored_sandbox_thread',
+    title: 'stored sandbox',
+    cwd: '/tmp',
+    model: 'gpt-5',
+    backend: 'custom',
+    preview: '',
+    active: true,
+    sandbox: { type: 'dangerFullAccess' },
+    thread: { id: 'stored_sandbox_thread', sessionId: 'stored_sandbox_thread', status: { type: 'idle' }, turns: [] },
+  });
+  await store.upsertSession({
+    session_id: 'missing_sandbox_thread',
+    thread_id: 'missing_sandbox_thread',
+    title: 'missing sandbox',
+    cwd: '/tmp',
+    model: 'gpt-5',
+    backend: 'custom',
+    preview: '',
+    active: true,
+    thread: { id: 'missing_sandbox_thread', sessionId: 'missing_sandbox_thread', status: { type: 'idle' }, turns: [] },
+  });
+
+  const backend = new TurnSandboxBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'turn.send', payload: { session_id: 'stored_sandbox_thread', text: '继承沙箱' } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+  assert.deepEqual(backend.paramsByThreadId.get('stored_sandbox_thread')?.sandboxPolicy, { type: 'dangerFullAccess' });
+
+  ws.send(JSON.stringify({ id: '2', type: 'turn.send', payload: { session_id: 'missing_sandbox_thread', text: '默认沙箱' } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '2'));
+  assert.deepEqual(backend.paramsByThreadId.get('missing_sandbox_thread')?.sandboxPolicy, { type: 'dangerFullAccess' });
 
   ws.close();
   await once(ws, 'close');

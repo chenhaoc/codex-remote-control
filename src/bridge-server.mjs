@@ -310,6 +310,23 @@ function mergeMetadataIntoSession(session, metadata = {}) {
   return next;
 }
 
+function getPayloadItemId(payload = {}) {
+  return firstNonEmptyString(payload.itemId, payload.item_id);
+}
+
+function getTurnInputItemId({ payload = {}, requestId = '', turnId = '', sessionId = '', seq = '' } = {}) {
+  return firstNonEmptyString(
+    getPayloadItemId(payload),
+    requestId ? `input_${requestId}` : '',
+    turnId ? `stored_${turnId}_user_${seq}` : '',
+    sessionId ? `stored_${sessionId}_user_${seq}` : '',
+  );
+}
+
+function defaultSandboxPolicy() {
+  return { type: 'dangerFullAccess' };
+}
+
 export class BridgeServer extends EventEmitter {
   constructor({
     backend,
@@ -513,11 +530,14 @@ export class BridgeServer extends EventEmitter {
       }
       case 'turn.send': {
         const sessionId = payload.session_id ?? payload.thread_id;
+        const inputItemId = getTurnInputItemId({ payload, requestId: id, sessionId });
         const inputEvent = createEvent('turn/input', {
           session_id: sessionId,
           thread_id: sessionId,
           request_id: id,
           payload: {
+            itemId: inputItemId,
+            item_id: inputItemId,
             text: payload.text ?? '',
             input: payload.input ?? null,
           },
@@ -541,7 +561,7 @@ export class BridgeServer extends EventEmitter {
         const requestedPermissions = normalizePermissionSelection(payload.permissions);
         const requestedSandboxPolicy = Object.prototype.hasOwnProperty.call(payload, 'sandboxPolicy')
           ? normalizeSandboxPolicy(payload.sandboxPolicy)
-          : normalizeSandboxPolicy(session?.sandbox ?? null);
+          : normalizeSandboxPolicy(session?.sandbox ?? null) ?? defaultSandboxPolicy();
         const turnParams = {
           text: payload.text ?? '',
           input: payload.input ?? null,
@@ -550,7 +570,7 @@ export class BridgeServer extends EventEmitter {
           cwd: payload.cwd ?? null,
           approvalPolicy: payload.approvalPolicy ?? null,
           approvalsReviewer: payload.approvalsReviewer ?? null,
-          sandboxPolicy: payload.sandboxPolicy ?? null,
+          sandboxPolicy: requestedSandboxPolicy,
           permissions: requestedPermissions,
           model: payload.model ?? null,
           serviceTier: payload.serviceTier ?? null,
@@ -1113,11 +1133,14 @@ export class BridgeServer extends EventEmitter {
           case 'user_message': {
             const text = String(payload.message ?? '').trim();
             if (text) {
+              const itemId = currentTurnId ? `rollout_${currentTurnId}_user` : `rollout_${sessionId}_user`;
               events.push(createEvent('turn/input', {
                 session_id: sessionId,
                 thread_id: threadId,
                 turn_id: currentTurnId,
                 payload: {
+                  itemId,
+                  item_id: itemId,
                   text,
                   input: null,
                 },
@@ -1258,6 +1281,13 @@ export class BridgeServer extends EventEmitter {
         if (completedUserMessageSignatures.has(`${event.turn_id ?? ''}|${text}`)) {
           continue;
         }
+        const itemId = getTurnInputItemId({
+          payload: event?.payload,
+          requestId: event?.request_id ?? '',
+          turnId: event?.turn_id ?? '',
+          sessionId,
+          seq: event?.seq ?? entries.length,
+        });
         entries.push({
           type: 'item',
           session_id: sessionId,
@@ -1265,7 +1295,7 @@ export class BridgeServer extends EventEmitter {
           turn_id: event.turn_id ?? null,
           item: {
             type: 'userMessage',
-            id: event.turn_id ? `stored_${event.turn_id}_user_${event.seq ?? entries.length}` : `stored_${sessionId}_user_${event.seq ?? entries.length}`,
+            id: itemId,
             content: [{ type: 'text', text }],
           },
         });
@@ -1339,6 +1369,7 @@ export class BridgeServer extends EventEmitter {
     const rawThread = thread?.thread ?? thread;
     const turns = this.#sortTurnsForRendering(Array.isArray(rawThread?.turns) ? rawThread.turns : []);
     const threadId = rawThread?.id ?? rawThread?.threadId ?? rawThread?.sessionId ?? sessionId;
+    const storedUserInputItemIds = this.#buildStoredTurnInputItemIdMap(sessionId);
     const events = [];
 
     for (const turn of turns) {
@@ -1356,11 +1387,17 @@ export class BridgeServer extends EventEmitter {
         if (item?.type === 'userMessage') {
           const text = extractUserMessageText(item.content ?? []);
           if (text) {
+            const fallbackSeq = item.id ? null : String(++turnItemSeq).padStart(4, '0');
+            const itemId = storedUserInputItemIds.get(`${turn.id}|${text}`)
+              ?? item.id
+              ?? `turn_${turn.id}_user_${fallbackSeq}`;
             events.push(createEvent('turn/input', {
               session_id: sessionId,
               thread_id: threadId,
               turn_id: turn.id,
               payload: {
+                itemId,
+                item_id: itemId,
                 text,
                 input: item.content ?? null,
               },
@@ -1408,6 +1445,7 @@ export class BridgeServer extends EventEmitter {
     const rawThread = thread?.thread ?? thread;
     const turns = this.#sortTurnsForRendering(Array.isArray(rawThread?.turns) ? rawThread.turns : []);
     const threadId = rawThread?.id ?? rawThread?.threadId ?? rawThread?.sessionId ?? sessionId;
+    const storedUserInputItemIds = this.#buildStoredTurnInputItemIdMap(sessionId);
     const entries = [];
 
     for (const turn of turns) {
@@ -1419,7 +1457,11 @@ export class BridgeServer extends EventEmitter {
         if (item.type !== 'userMessage' && item.type !== 'agentMessage' && item.type !== 'fileChange') {
           continue;
         }
-        const itemId = item.id ?? `turn_${turn.id}_item_${String(++turnItemSeq).padStart(4, '0')}`;
+        const text = item.type === 'userMessage' ? extractUserMessageText(item.content ?? []) : '';
+        const fallbackSeq = item.id ? null : String(++turnItemSeq).padStart(4, '0');
+        const itemId = item.type === 'userMessage'
+          ? storedUserInputItemIds.get(`${turn.id}|${text}`) ?? item.id ?? `turn_${turn.id}_user_${fallbackSeq}`
+          : item.id ?? `turn_${turn.id}_item_${fallbackSeq}`;
         entries.push({
           type: 'item',
           session_id: sessionId,
@@ -1459,6 +1501,22 @@ export class BridgeServer extends EventEmitter {
 
       return String(left?.id ?? '').localeCompare(String(right?.id ?? ''));
     });
+  }
+
+  #buildStoredTurnInputItemIdMap(sessionId) {
+    const session = this.store.getSession(sessionId);
+    const events = session?.events ?? [];
+    const itemIds = new Map();
+    for (const event of events) {
+      if (event?.event !== 'turn/input') continue;
+      const turnId = event.turn_id ?? '';
+      const text = String(event?.payload?.text ?? '').trim();
+      const itemId = getTurnInputItemId({ payload: event?.payload, requestId: event?.request_id ?? '' });
+      if (turnId && text && itemId) {
+        itemIds.set(`${turnId}|${text}`, itemId);
+      }
+    }
+    return itemIds;
   }
 
   async #loadTurnItems(threadId, turn) {

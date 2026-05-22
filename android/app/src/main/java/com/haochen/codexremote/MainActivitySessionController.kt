@@ -328,6 +328,8 @@ internal fun MainActivity.clearConversation() {
         chatRestoreScrollY = null
         codeBrowserState = null
         lastSyncedSeq = 0
+        lastSnapshotSignature = null
+        lastSnapshotItemCount = 0
         syncInFlight = false
         sessionContentDirty = false
         pendingApprovals.clear()

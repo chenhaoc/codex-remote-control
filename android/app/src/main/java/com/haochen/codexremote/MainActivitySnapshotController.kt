@@ -125,11 +125,21 @@ internal fun MainActivity.buildConversationApprovalFromSnapshot(approval: JSONOb
     }
 
 internal fun MainActivity.updateLiveTurnStatusFromSnapshot(payload: JSONObject?) {
+        val entries = payload?.optJSONArray("entries")
+        val snapshotSignature = entries?.snapshotSignature().orEmpty()
+        val snapshotItemCount = entries?.length() ?: 0
+        val snapshotGrew = snapshotItemCount > lastSnapshotItemCount
+        val snapshotChanged = snapshotSignature.isNotBlank() && lastSnapshotSignature != null && snapshotSignature != lastSnapshotSignature
         val status = inferLiveTurnStatusFromSnapshot(payload)
         when {
             status != null -> updateLiveTurnStatus(status)
+            snapshotGrew || snapshotChanged -> updateLiveTurnStatus("Codex 正在同步桌面端输出…")
             activeTurnId == null -> updateLiveTurnStatus(null)
             else -> Unit
+        }
+        if (snapshotSignature.isNotBlank()) {
+            lastSnapshotSignature = snapshotSignature
+            lastSnapshotItemCount = snapshotItemCount
         }
     }
 
@@ -157,14 +167,13 @@ internal fun MainActivity.inferLiveTurnStatusFromThreadTurns(thread: JSONObject)
             val turn = turns.optJSONObject(index) ?: continue
             val status = turn.optString("status", "").trim()
             val errorText = extractErrorText(turn.optJSONObject("error"))
-            return when {
-                errorText.isNotBlank() -> "Codex 响应异常"
-                status == "inProgress" -> "Codex 正在处理中…"
-                status == "failed" -> "Codex 响应异常"
-                status == "completed" -> null
-                status == "interrupted" -> null
-                status.isNotBlank() -> "Codex 正在处理中…"
-                else -> null
+            when {
+                errorText.isNotBlank() -> return "Codex 响应异常"
+                status == "inProgress" -> return "Codex 正在处理中…"
+                status == "failed" -> return "Codex 响应异常"
+                status == "completed" -> Unit
+                status == "interrupted" -> Unit
+                status.isNotBlank() -> return "Codex 正在处理中…"
             }
         }
         return null
@@ -209,3 +218,23 @@ internal fun MainActivity.inferLiveTurnStatusFromSnapshotEntries(entries: JSONAr
         }
         return null
     }
+
+private fun JSONArray.snapshotSignature(): String {
+    val tail = buildList {
+        for (index in (length() - 4).coerceAtLeast(0) until length()) {
+            val entry = optJSONObject(index) ?: continue
+            val item = entry.optJSONObject("item")
+            add(
+                listOf(
+                    entry.optString("type", ""),
+                    entry.optString("turn_id", ""),
+                    item?.optString("id", "").orEmpty(),
+                    item?.optString("type", "").orEmpty(),
+                    item?.optString("status", "").orEmpty(),
+                    entry.optString("status", ""),
+                ).joinToString(":"),
+            )
+        }
+    }
+    return "${length()}|${tail.joinToString("|")}"
+}

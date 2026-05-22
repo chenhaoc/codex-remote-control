@@ -255,23 +255,22 @@ private fun canPatchConversationIncrementally(
 
 private data class ConversationPatchCheck(
     val canPatch: Boolean,
-    val reason: String,
 )
 
 private fun explainConversationIncrementalPatch(
     previous: ConversationRenderSnapshot,
     current: ConversationRenderSnapshot,
 ): ConversationPatchCheck {
-    if (previous.ids.size > current.ids.size) return ConversationPatchCheck(false, "shrunk")
+    if (previous.ids.size > current.ids.size) return ConversationPatchCheck(false)
     val currentIndexById = current.ids.withIndex().associate { it.value to it.index }
     var lastMatchedIndex = -1
     previous.ids.forEachIndexed { index, id ->
-        val currentIndex = currentIndexById[id] ?: return ConversationPatchCheck(false, "missing-id@$index:$id")
+        val currentIndex = currentIndexById[id] ?: return ConversationPatchCheck(false)
         if (current.types.getOrNull(currentIndex) != previous.types[index]) {
-            return ConversationPatchCheck(false, "type-mismatch@$index:${previous.types[index]}->${current.types.getOrNull(currentIndex).orEmpty()}")
+            return ConversationPatchCheck(false)
         }
         if (currentIndex <= lastMatchedIndex) {
-            return ConversationPatchCheck(false, "reordered@$index:$id@$currentIndex<=${lastMatchedIndex}")
+            return ConversationPatchCheck(false)
         }
         lastMatchedIndex = currentIndex
     }
@@ -279,14 +278,7 @@ private fun explainConversationIncrementalPatch(
         current.ids.mapIndexedNotNull { index, id ->
             if (previous.htmlById[id] != current.htmlById[id]) index else null
         }
-    if (changedIndexes.isEmpty()) return ConversationPatchCheck(true, "unchanged")
-    val changedExistingIndexes = changedIndexes.filter { index -> current.ids[index] in previous.htmlById }
-    if (changedExistingIndexes.isNotEmpty()) {
-        val firstChanged = changedExistingIndexes.minOrNull() ?: -1
-        val lastChanged = changedExistingIndexes.maxOrNull() ?: -1
-        return ConversationPatchCheck(true, "existing-change:$firstChanged..$lastChanged")
-    }
-    return ConversationPatchCheck(true, "insert-only:${changedIndexes.joinToString(",")}")
+    return ConversationPatchCheck(true)
 }
 
 private fun applyConversationIncrementalPatch(
@@ -306,9 +298,7 @@ private fun applyConversationIncrementalPatch(
                 JSONObject().apply {
                     put("id", id)
                     put("type", current.types[index])
-                    put("insertBeforeId", current.ids.getOrNull(index + 1).takeIf { nextId ->
-                        nextId != null && previous.htmlById[nextId] != null
-                    }.orEmpty())
+                    put("insertBeforeId", current.ids.firstExistingIdAfter(index, previous.htmlById))
                     put("html", current.htmlById[id].orEmpty())
                 },
             )
@@ -366,6 +356,17 @@ private fun applyConversationIncrementalPatch(
             )
         }
     }
+}
+
+private fun List<String>.firstExistingIdAfter(
+    index: Int,
+    existingHtmlById: Map<String, String>,
+): String {
+    for (candidateIndex in index + 1 until size) {
+        val id = this[candidateIndex]
+        if (existingHtmlById[id] != null) return id
+    }
+    return ""
 }
 
 private fun applyConversationScrollModeAfterPatch(

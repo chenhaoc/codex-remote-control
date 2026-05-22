@@ -11,7 +11,7 @@ internal fun MainActivity.handleThreadItemEvent(eventName: String, payload: JSON
             "agentMessage" -> {
                 if (eventName == "item/completed") {
                     val text = extractThreadItemText(item).ifBlank { item.optString("text", "").trim() }
-                    finalizeAssistantBubble(turnKey, itemKey, text.ifBlank { formatJson(item) })
+                    finalizeAssistantBubble(turnKey, itemKey, text)
                 }
             }
             "fileChange" -> handleFileChangeItem(turnKey, item)
