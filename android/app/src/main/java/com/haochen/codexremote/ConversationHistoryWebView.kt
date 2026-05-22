@@ -55,6 +55,9 @@ internal fun ConversationHistoryWebView(
     var lastScrollMode by remember(sessionId) { mutableStateOf<ConversationScrollMode>(ConversationScrollMode.Bottom) }
     var fullRenderPending by remember(sessionId) { mutableStateOf(false) }
     var restoreAnnounced by remember(sessionId, restoreScrollY) { mutableStateOf(false) }
+    var lastViewportHeight by remember(sessionId) { mutableStateOf<Int?>(null) }
+    var viewportResizeAnchorY by remember(sessionId) { mutableStateOf<Int?>(null) }
+    var viewportResizeSequence by remember(sessionId) { mutableStateOf(0) }
 
     val webView = remember(sessionId) {
         buildConversationWebView(
@@ -83,6 +86,8 @@ internal fun ConversationHistoryWebView(
                                 applyConversationScrollMode(view, targetMode)
                                 if (delayMs == restoreDelays.last()) {
                                     fullRenderPending = false
+                                    lastViewportHeight = view.height.takeIf { it > 0 } ?: lastViewportHeight
+                                    viewportResizeAnchorY = null
                                 }
                                 if (targetMode is ConversationScrollMode.Restore && !restoreAnnounced) {
                                     restoreAnnounced = true
@@ -96,18 +101,20 @@ internal fun ConversationHistoryWebView(
             },
         )
     }
-    var lastViewportHeight by remember(sessionId) { mutableStateOf<Int?>(null) }
-    var viewportResizeAnchorY by remember(sessionId) { mutableStateOf<Int?>(null) }
-    var viewportResizeSequence by remember(sessionId) { mutableStateOf(0) }
 
     AndroidView(
         modifier =
             modifier.onSizeChanged { size ->
                 val previousHeight = lastViewportHeight
-                lastViewportHeight = size.height
-                if (previousHeight == null || previousHeight <= 0 || size.height <= 0) return@onSizeChanged
-                if (restoreScrollY != null || lastLoadedHtml == null) return@onSizeChanged
+                if (previousHeight == null || previousHeight <= 0 || size.height <= 0) {
+                    if (size.height > 0) {
+                        lastViewportHeight = size.height
+                    }
+                    return@onSizeChanged
+                }
                 if (previousHeight == size.height) return@onSizeChanged
+                if (restoreScrollY != null || lastLoadedHtml == null || fullRenderPending) return@onSizeChanged
+                lastViewportHeight = size.height
                 val anchorY = viewportResizeAnchorY ?: (webView.scrollY + previousHeight)
                 viewportResizeAnchorY = anchorY
                 viewportResizeSequence += 1
@@ -131,6 +138,7 @@ internal fun ConversationHistoryWebView(
             val renderTag = renderSnapshot.tag()
             if (pendingRenderTag == null && lastRenderSnapshot == renderSnapshot) return@AndroidView
             if (pendingRenderTag == renderTag) return@AndroidView
+            if (fullRenderPending) return@AndroidView
             val previousSnapshot = lastRenderSnapshot
             val sessionChanged = previousSnapshot == null && pendingRenderTag == null
             val wasAtBottom = isConversationNearBottom(view)
@@ -233,7 +241,9 @@ private data class ConversationRenderSnapshot(
 }
 
 private fun isConversationNearBottom(webView: WebView): Boolean {
-    return !webView.canScrollVertically(1)
+    val bottomY = conversationBottomScrollY(webView)
+    if (bottomY <= 0) return true
+    return bottomY - webView.scrollY <= 96
 }
 
 private fun canPatchConversationIncrementally(
@@ -413,12 +423,11 @@ private fun applyConversationScrollMode(
 }
 
 private fun scrollConversationToBottom(webView: WebView) {
-    val script =
-        """
-        window.scrollTo(0, Math.max(
-          document.documentElement.scrollHeight || 0,
-          document.body ? document.body.scrollHeight : 0
-        ));
-        """.trimIndent()
-    webView.evaluateJavascript(script, null)
+    webView.scrollTo(0, conversationBottomScrollY(webView))
+}
+
+@Suppress("DEPRECATION")
+private fun conversationBottomScrollY(webView: WebView): Int {
+    val contentHeight = (webView.contentHeight * webView.scale).toInt()
+    return (contentHeight - webView.height).coerceAtLeast(0)
 }
