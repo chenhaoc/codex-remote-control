@@ -5,6 +5,10 @@ plugins {
 }
 
 val localDebugKeystore = rootProject.file("debug.keystore")
+val gitCommitShort =
+    providers.exec {
+        commandLine("git", "rev-parse", "--short", "HEAD")
+    }.standardOutput.asText.get().trim().ifBlank { "unknown" }
 
 android {
     namespace = "com.haochen.codexremote"
@@ -46,6 +50,11 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
+    }
+
+    defaultConfig {
+        buildConfigField("String", "GIT_COMMIT_SHORT", "\"$gitCommitShort\"")
     }
 }
 

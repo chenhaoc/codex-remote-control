@@ -32,7 +32,6 @@ internal fun MainActivity.disconnectBridge(
     ) {
         stopSessionSyncLoop()
         cancelReconnectSchedule(resetAttempt = true)
-        updateAutoReconnectEnabled(false)
         disconnectRequested = true
         bridgeClient?.close()
         bridgeClient = null
@@ -44,14 +43,14 @@ internal fun MainActivity.disconnectBridge(
         currentBridgeUrl = null
         selectedWorkspace = null
         if (switchToConnectionPage) {
-            selectedTab = AppTab.Connection
+            currentPage = AppPage.Connection
         }
         connectionDetail = detail
     }
 
 internal fun MainActivity.connectToBridge(url: String, isAutoReconnect: Boolean = false) {
         if (bridgeClient?.isOpen() == true && currentBridgeUrl == url) {
-            selectedTab = AppTab.Chat
+            currentPage = AppPage.Chat
             connectionDetail = "已连接到 ${connectionHistory.firstOrNull { it.url == url }?.displayName() ?: BridgeHistoryEntry.fromUrl(url)?.displayName() ?: url}"
             return
         }
@@ -72,8 +71,10 @@ internal fun MainActivity.connectToBridge(url: String, isAutoReconnect: Boolean 
 
         mainHandler.removeCallbacks(reconnectRunnable)
         reconnectScheduled = false
+        if (!isAutoReconnect) {
+            reconnectAttempt = 0
+        }
         saveBridgeSettings(url)
-        updateAutoReconnectEnabled(true)
         bridgeUrl = url
         disconnectRequested = false
         bootSyncRequested = false
@@ -92,9 +93,8 @@ internal fun MainActivity.connectToBridge(url: String, isAutoReconnect: Boolean 
                     connected = true
                     reconnectAttempt = 0
                     cancelReconnectSchedule(resetAttempt = false)
-                    updateAutoReconnectEnabled(true)
                     rememberConnectionHistory(url)
-                    selectedTab = AppTab.Chat
+                    currentPage = AppPage.Chat
                     connectionDetail = "已连接到 ${connectionHistory.firstOrNull { it.url == url }?.displayName() ?: BridgeHistoryEntry.fromUrl(url)?.displayName() ?: url}"
                 }
             }
@@ -114,17 +114,17 @@ internal fun MainActivity.connectToBridge(url: String, isAutoReconnect: Boolean 
                     bridgeClient = null
                     val detailSuffix = describeThrowable(error)
                     val targetUrl = currentBridgeUrl?.takeIf { it.isNotBlank() } ?: bridgeUrl.trim().takeIf { it.isNotBlank() }
-                    if (autoReconnectEnabled && !targetUrl.isNullOrBlank()) {
+                    if (shouldScheduleReconnect(targetUrl)) {
                         scheduleReconnect(
-                            url = targetUrl,
+                            url = targetUrl.orEmpty(),
                             reason = reason,
                             error = error,
                         )
                     } else {
                         currentBridgeUrl = null
                         selectedWorkspace = null
-                        selectedTab = AppTab.Connection
-                        connectionDetail = reason + detailSuffix
+                        currentPage = AppPage.Connection
+                        connectionDetail = buildReconnectExhaustedDetail(reason + detailSuffix)
                     }
                     disconnectRequested = false
                 }
@@ -135,11 +135,11 @@ internal fun MainActivity.connectToBridge(url: String, isAutoReconnect: Boolean 
             bridgeClient?.connect()
         } catch (error: RuntimeException) {
             bridgeClient = null
-            if (autoReconnectEnabled) {
+            if (shouldScheduleReconnect(url)) {
                 scheduleReconnect(url = url, reason = "连接失败", error = error)
             } else {
                 currentBridgeUrl = null
-                connectionDetail = "连接失败: ${error.message}"
+                connectionDetail = buildReconnectExhaustedDetail("连接失败: ${error.message}")
                 showNotice(connectionDetail)
             }
         }
@@ -390,6 +390,26 @@ internal fun MainActivity.loadBridgeUrl(): String {
 internal fun MainActivity.updateAutoReconnectEnabled(enabled: Boolean) {
         autoReconnectEnabled = enabled
         prefs.edit().putBoolean(KEY_AUTO_RECONNECT, enabled).apply()
+        if (!enabled) {
+            cancelReconnectSchedule(resetAttempt = true)
+        }
+    }
+
+internal fun MainActivity.loadAutoReconnectMaxAttempts(): Int {
+        return prefs.getInt(KEY_AUTO_RECONNECT_MAX_ATTEMPTS, 0).coerceAtLeast(0)
+    }
+
+internal fun MainActivity.updateAutoReconnectMaxAttempts(maxAttempts: Int) {
+        autoReconnectMaxAttempts = maxAttempts.coerceAtLeast(0)
+        prefs.edit().putInt(KEY_AUTO_RECONNECT_MAX_ATTEMPTS, autoReconnectMaxAttempts).apply()
+        if (reconnectScheduled && !canScheduleReconnectAttempt(reconnectAttempt)) {
+            cancelReconnectSchedule(resetAttempt = true)
+            currentBridgeUrl = null
+            selectedWorkspace = null
+            currentPage = AppPage.Connection
+            connectionDetail = "已达到最大自动重连次数"
+            showNotice(connectionDetail)
+        }
     }
 
 internal fun MainActivity.resumeBridgeConnectionIfNeeded() {
@@ -444,6 +464,22 @@ internal fun MainActivity.reconnectDelayMillis(attempt: Int): Long {
             attempt == 4 -> 15_000L
             else -> 30_000L
         }
+    }
+
+internal fun MainActivity.shouldScheduleReconnect(targetUrl: String?): Boolean {
+        if (!autoReconnectEnabled || targetUrl.isNullOrBlank()) return false
+        return canScheduleReconnectAttempt(reconnectAttempt + 1)
+    }
+
+internal fun MainActivity.canScheduleReconnectAttempt(attempt: Int): Boolean {
+        return autoReconnectMaxAttempts <= 0 || attempt <= autoReconnectMaxAttempts
+    }
+
+internal fun MainActivity.buildReconnectExhaustedDetail(baseDetail: String): String {
+        if (autoReconnectEnabled && autoReconnectMaxAttempts > 0 && reconnectAttempt >= autoReconnectMaxAttempts) {
+            return "$baseDetail，已达到最大自动重连次数"
+        }
+        return baseDetail
     }
 
 internal fun MainActivity.normalizeBridgeUrl(input: String, requireToken: Boolean): String {

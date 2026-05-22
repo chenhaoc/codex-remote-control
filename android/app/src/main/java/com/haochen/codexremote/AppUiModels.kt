@@ -2,10 +2,10 @@ package com.haochen.codexremote
 
 import org.json.JSONObject
 
-internal enum class AppTab {
+internal enum class AppPage {
     Connection,
-    Sessions,
     Chat,
+    Settings,
 }
 
 internal data class ApprovalPresentation(

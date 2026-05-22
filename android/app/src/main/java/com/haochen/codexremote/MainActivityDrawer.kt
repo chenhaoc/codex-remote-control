@@ -161,7 +161,7 @@ internal fun MainActivity.AppDrawerContent(onCloseDrawer: () -> Unit) {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                         OutlinedButton(
                             onClick = {
-                                selectedTab = AppTab.Connection
+                                currentPage = AppPage.Connection
                                 onCloseDrawer()
                             },
                             modifier = Modifier.weight(1f),
@@ -176,6 +176,42 @@ internal fun MainActivity.AppDrawerContent(onCloseDrawer: () -> Unit) {
                         ) {
                             Text("新对话")
                         }
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = uiSurface),
+                shape = RoundedCornerShape(24.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        text = "设置",
+                        color = uiText,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                    )
+                    Text(
+                        text = "自动重连、启动默认页、应用版本。",
+                        color = uiMuted,
+                        fontSize = 12.sp,
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            openSettingsPage()
+                            onCloseDrawer()
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("打开设置")
                     }
                 }
             }
@@ -209,7 +245,7 @@ internal fun MainActivity.AppDrawerContent(onCloseDrawer: () -> Unit) {
                     onSelectSession = { session ->
                         selectSession(session.sessionId, true)
                         selectedWorkspace = group.path
-                        selectedTab = AppTab.Chat
+                        currentPage = AppPage.Chat
                         onCloseDrawer()
                     },
                 )

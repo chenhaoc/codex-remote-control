@@ -28,6 +28,8 @@ internal const val KEY_CONNECTION_HISTORY = "connection_history"
 internal const val KEY_SESSION = "session"
 internal const val KEY_MODEL = "model"
 internal const val KEY_AUTO_RECONNECT = "auto_reconnect"
+internal const val KEY_AUTO_RECONNECT_MAX_ATTEMPTS = "auto_reconnect_max_attempts"
+internal const val KEY_STARTUP_PAGE = "startup_page"
 internal const val MAX_CONNECTION_HISTORY = 8
 internal const val CODE_BROWSER_FILE_CACHE_SIZE = 24
 internal const val CODE_BROWSER_RENDER_CACHE_SIZE = 16
@@ -77,7 +79,7 @@ class MainActivity : ComponentActivity() {
     internal lateinit var prefs: SharedPreferences
     internal var bridgeClient: BridgeClient? = null
     internal var connected by mutableStateOf(false)
-    internal var selectedTab by mutableStateOf(AppTab.Chat)
+    internal var currentPage by mutableStateOf(AppPage.Chat)
     internal var selectedWorkspace by mutableStateOf<String?>(null)
     internal var activeSessionId by mutableStateOf<String?>(null)
     internal var activeTurnId by mutableStateOf<String?>(null)
@@ -98,6 +100,8 @@ class MainActivity : ComponentActivity() {
     internal var syncInFlight = false
     internal var sessionContentDirty = false
     internal var autoReconnectEnabled = false
+    internal var autoReconnectMaxAttempts by mutableStateOf(0)
+    internal var startupPagePreference by mutableStateOf(AppPage.Chat)
     internal var reconnectAttempt = 0
     internal var reconnectScheduled = false
     internal var noticeToast: Toast? = null
@@ -133,6 +137,9 @@ class MainActivity : ComponentActivity() {
         activeSessionId = prefs.getString(KEY_SESSION, null)
         selectedModel = prefs.getString(KEY_MODEL, "")?.trim().orEmpty()
         autoReconnectEnabled = prefs.getBoolean(KEY_AUTO_RECONNECT, false)
+        autoReconnectMaxAttempts = loadAutoReconnectMaxAttempts()
+        startupPagePreference = loadStartupPagePreference()
+        currentPage = startupPagePreference
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.statusBarColor = AndroidColor.TRANSPARENT

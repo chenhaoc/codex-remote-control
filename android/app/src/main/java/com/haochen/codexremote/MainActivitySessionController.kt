@@ -92,7 +92,7 @@ internal fun MainActivity.startNewSession(
                 if (info != null) {
                     upsertSession(info)
                     selectSession(info.sessionId, syncHistory = false)
-                    selectedTab = AppTab.Chat
+                    currentPage = AppPage.Chat
                     selectedWorkspace = info.cwd.takeIf { it.isNotBlank() } ?: projectPath
                     if (info.model.isNotBlank()) {
                         selectModel(info.model)
@@ -102,7 +102,7 @@ internal fun MainActivity.startNewSession(
                 }
             }
         ) {
-            selectedTab = AppTab.Chat
+            currentPage = AppPage.Chat
         }
     }
 

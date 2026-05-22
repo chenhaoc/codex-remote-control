@@ -14,7 +14,7 @@ internal fun MainActivity.handleIncoming(text: String) {
         when (message.optString("type", "")) {
             "hello" -> {
                 connectionDetail = "Bridge 已就绪，正在拉取会话列表"
-                selectedTab = AppTab.Chat
+                currentPage = AppPage.Chat
                 requestSessionList()
                 requestModelList()
             }

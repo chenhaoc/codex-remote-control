@@ -158,8 +158,8 @@ internal fun MainActivity.RemoteApp() {
                     )
                 },
             ) { scaffoldPadding ->
-                val horizontalPadding = if (selectedTab == AppTab.Chat) 8.dp else 16.dp
-                val verticalPadding = if (selectedTab == AppTab.Chat) 8.dp else 12.dp
+                val horizontalPadding = if (currentPage == AppPage.Chat) 8.dp else 16.dp
+                val verticalPadding = if (currentPage == AppPage.Chat) 8.dp else 12.dp
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -171,10 +171,10 @@ internal fun MainActivity.RemoteApp() {
                             .fillMaxSize()
                             .padding(horizontal = horizontalPadding, vertical = verticalPadding),
                     ) {
-                        when (selectedTab) {
-                            AppTab.Connection -> ConnectionPage()
-                            AppTab.Sessions -> SessionPage()
-                            AppTab.Chat -> ChatPage()
+                        when (currentPage) {
+                            AppPage.Connection -> ConnectionPage()
+                            AppPage.Chat -> ChatPage()
+                            AppPage.Settings -> SettingsPage()
                         }
                     }
                 }
@@ -257,10 +257,10 @@ internal fun MainActivity.RemoteApp() {
 @Composable
 internal fun MainActivity.AppTopBar(onOpenDrawer: () -> Unit) {
     val title =
-        when (selectedTab) {
-            AppTab.Chat -> activeSession()?.titleLine() ?: "Codex Remote"
-            AppTab.Connection -> "连接设置"
-            AppTab.Sessions -> selectedWorkspace?.let { workspaceDisplayName(it, fallback = it) } ?: "会话历史"
+        when (currentPage) {
+            AppPage.Chat -> activeSession()?.titleLine() ?: "Codex Remote"
+            AppPage.Connection -> "连接设置"
+            AppPage.Settings -> "设置"
         }
 
     TopAppBar(
@@ -289,12 +289,12 @@ internal fun MainActivity.AppTopBar(onOpenDrawer: () -> Unit) {
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(
-                    end = if (selectedTab == AppTab.Chat) 14.dp else 8.dp,
+                    end = if (currentPage == AppPage.Chat) 14.dp else 8.dp,
                     top = 6.dp,
                     bottom = 6.dp,
                 ),
             ) {
-                if (selectedTab == AppTab.Chat && activeSession() != null) {
+                if (currentPage == AppPage.Chat && activeSession() != null) {
                     IconButton(
                         onClick = { openSessionInfoSheet() },
                     ) {
