@@ -102,6 +102,7 @@ internal fun MainActivity.CodeBrowserPage(
 ) {
     val selectedEntry = state.selectedEntry()
     val diffStats = buildDiffStatsLine(diffEntries = state.diffEntries, fallbackDiff = state.fallbackDiff)
+    var fileListExpanded by remember(state.conversationItemId) { mutableStateOf(false) }
     val selectedPathLabel =
         selectedEntry?.displayPath(basePath = state.basePath, maxLength = 96)
             ?: state.selectedPath?.takeIf { it.isNotBlank() }?.let {
@@ -145,11 +146,17 @@ internal fun MainActivity.CodeBrowserPage(
             }
 
             if (state.diffEntries.isNotEmpty()) {
+                val visibleEntries =
+                    if (fileListExpanded || state.diffEntries.size <= 4) {
+                        state.diffEntries
+                    } else {
+                        state.diffEntries.take(4)
+                    }
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(0.dp),
                 ) {
-                    state.diffEntries.forEachIndexed { index, entry ->
+                    visibleEntries.forEachIndexed { index, entry ->
                         CodeBrowserFileRow(
                             label = entry.filenameLabel(),
                             stats = entry.diffStatsLabel(),
@@ -159,8 +166,23 @@ internal fun MainActivity.CodeBrowserPage(
                                 setCodeBrowserMode(CodeBrowserMode.Diff)
                             },
                         )
-                        if (index < state.diffEntries.lastIndex) {
+                        if (index < visibleEntries.lastIndex) {
                             HorizontalDivider(color = uiBorder.copy(alpha = 0.75f))
+                        }
+                    }
+                    if (state.diffEntries.size > 4) {
+                        HorizontalDivider(color = uiBorder.copy(alpha = 0.75f))
+                        TextButton(
+                            onClick = { fileListExpanded = !fileListExpanded },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                if (fileListExpanded) {
+                                    "收起文件列表"
+                                } else {
+                                    "展开剩余 ${state.diffEntries.size - visibleEntries.size} 个文件"
+                                },
+                            )
                         }
                     }
                 }

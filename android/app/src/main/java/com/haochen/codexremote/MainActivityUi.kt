@@ -48,7 +48,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedButton
@@ -99,7 +98,6 @@ import kotlinx.coroutines.withContext
 @Composable
 internal fun MainActivity.RemoteApp() {
     val drawerState = androidx.compose.material3.rememberDrawerState(initialValue = DrawerValue.Closed)
-    val codeBrowserSheetState = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
 
     BackHandler(enabled = drawerState.isOpen) {
@@ -189,19 +187,56 @@ internal fun MainActivity.RemoteApp() {
         }
 
         codeBrowserState?.let { state ->
-            ModalBottomSheet(
+            BackHandler { closeCodeBrowser() }
+            Dialog(
                 onDismissRequest = { closeCodeBrowser() },
-                sheetState = codeBrowserSheetState,
-                containerColor = uiSurface,
-                contentColor = uiText,
+                properties = DialogProperties(usePlatformDefaultWidth = false),
             ) {
-                CodeBrowserPage(
-                    state = state,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 360.dp, max = 760.dp)
-                        .navigationBarsPadding(),
-                )
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = uiBackground,
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .navigationBarsPadding(),
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(uiSurface)
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                IconButton(onClick = { closeCodeBrowser() }) {
+                                    Icon(
+                                        painter = painterResource(id = android.R.drawable.ic_menu_close_clear_cancel),
+                                        contentDescription = "关闭文件查看",
+                                        tint = uiText,
+                                    )
+                                }
+                                Text(
+                                    text = state.title.ifBlank { "文件修改" },
+                                    color = uiText,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                        CodeBrowserPage(
+                            state = state,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+                }
             }
         }
 
