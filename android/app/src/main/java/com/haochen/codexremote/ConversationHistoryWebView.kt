@@ -22,6 +22,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 private val CONVERSATION_VIEWPORT_RESIZE_RESTORE_DELAYS_MS = longArrayOf(0L, 16L, 48L, 120L)
+private val CONVERSATION_INCREMENTAL_SCROLL_DELAYS_MS = longArrayOf(0L, 16L, 48L, 120L)
 
 private sealed interface ConversationScrollMode {
     data object Bottom : ConversationScrollMode
@@ -156,10 +157,11 @@ internal fun ConversationHistoryWebView(
             pendingRenderSnapshots.clear()
             pendingRenderSnapshots[renderTag] = renderSnapshot
             lastScrollMode = scrollMode
+            val patchCheck = previousSnapshot?.let { explainConversationIncrementalPatch(it, renderSnapshot) }
             if (
                 !fullRenderPending &&
                 previousSnapshot != null &&
-                canPatchConversationIncrementally(previousSnapshot, renderSnapshot)
+                patchCheck?.canPatch == true
             ) {
                 expectedHtmlTag = renderTag
                 fullRenderPending = false
@@ -249,22 +251,42 @@ private fun isConversationNearBottom(webView: WebView): Boolean {
 private fun canPatchConversationIncrementally(
     previous: ConversationRenderSnapshot,
     current: ConversationRenderSnapshot,
-): Boolean {
-    if (previous.ids.size > current.ids.size) return false
+): Boolean = explainConversationIncrementalPatch(previous, current).canPatch
+
+private data class ConversationPatchCheck(
+    val canPatch: Boolean,
+    val reason: String,
+)
+
+private fun explainConversationIncrementalPatch(
+    previous: ConversationRenderSnapshot,
+    current: ConversationRenderSnapshot,
+): ConversationPatchCheck {
+    if (previous.ids.size > current.ids.size) return ConversationPatchCheck(false, "shrunk")
+    val currentIndexById = current.ids.withIndex().associate { it.value to it.index }
+    var lastMatchedIndex = -1
     previous.ids.forEachIndexed { index, id ->
-        if (current.ids.getOrNull(index) != id) return false
-        if (current.types.getOrNull(index) != previous.types[index]) return false
+        val currentIndex = currentIndexById[id] ?: return ConversationPatchCheck(false, "missing-id@$index:$id")
+        if (current.types.getOrNull(currentIndex) != previous.types[index]) {
+            return ConversationPatchCheck(false, "type-mismatch@$index:${previous.types[index]}->${current.types.getOrNull(currentIndex).orEmpty()}")
+        }
+        if (currentIndex <= lastMatchedIndex) {
+            return ConversationPatchCheck(false, "reordered@$index:$id@$currentIndex<=${lastMatchedIndex}")
+        }
+        lastMatchedIndex = currentIndex
     }
     val changedIndexes =
         current.ids.mapIndexedNotNull { index, id ->
             if (previous.htmlById[id] != current.htmlById[id]) index else null
         }
-    if (changedIndexes.isEmpty()) return true
-    val firstNewIndex = previous.ids.size
-    val lastExistingIndex = previous.ids.lastIndex
-    if (changedIndexes.any { index -> index < lastExistingIndex }) return false
-    if (changedIndexes.any { index -> index < firstNewIndex && index != lastExistingIndex }) return false
-    return true
+    if (changedIndexes.isEmpty()) return ConversationPatchCheck(true, "unchanged")
+    val changedExistingIndexes = changedIndexes.filter { index -> current.ids[index] in previous.htmlById }
+    if (changedExistingIndexes.isNotEmpty()) {
+        val firstChanged = changedExistingIndexes.minOrNull() ?: -1
+        val lastChanged = changedExistingIndexes.maxOrNull() ?: -1
+        return ConversationPatchCheck(true, "existing-change:$firstChanged..$lastChanged")
+    }
+    return ConversationPatchCheck(true, "insert-only:${changedIndexes.joinToString(",")}")
 }
 
 private fun applyConversationIncrementalPatch(
@@ -284,7 +306,9 @@ private fun applyConversationIncrementalPatch(
                 JSONObject().apply {
                     put("id", id)
                     put("type", current.types[index])
-                    put("append", index >= previous.ids.size)
+                    put("insertBeforeId", current.ids.getOrNull(index + 1).takeIf { nextId ->
+                        nextId != null && previous.htmlById[nextId] != null
+                    }.orEmpty())
                     put("html", current.htmlById[id].orEmpty())
                 },
             )
@@ -314,8 +338,13 @@ private fun applyConversationIncrementalPatch(
               if (existing.getAttribute('data-cr-item-type') !== update.type) return false;
               existing.outerHTML = update.html;
             } else {
-              if (!update.append) return false;
-              root.insertAdjacentHTML('beforeend', update.html);
+              if (update.insertBeforeId) {
+                var anchor = root.querySelector('[data-cr-item-id="' + update.insertBeforeId + '"]');
+                if (!anchor) return false;
+                anchor.insertAdjacentHTML('beforebegin', update.html);
+              } else {
+                root.insertAdjacentHTML('beforeend', update.html);
+              }
             }
           }
           return true;
@@ -325,7 +354,7 @@ private fun applyConversationIncrementalPatch(
         if (webView.tag != renderTag) return@evaluateJavascript
         if (result == "true") {
             onPatchApplied()
-            applyConversationScrollMode(webView, scrollMode)
+            applyConversationScrollModeAfterPatch(webView, scrollMode)
         } else {
             onFallbackRenderStarted()
             webView.loadDataWithBaseURL(
@@ -336,6 +365,23 @@ private fun applyConversationIncrementalPatch(
                 null,
             )
         }
+    }
+}
+
+private fun applyConversationScrollModeAfterPatch(
+    webView: WebView,
+    mode: ConversationScrollMode,
+) {
+    when (mode) {
+        ConversationScrollMode.Bottom -> {
+            CONVERSATION_INCREMENTAL_SCROLL_DELAYS_MS.forEach { delayMs ->
+                webView.postDelayed(
+                    { scrollConversationToBottom(webView) },
+                    delayMs,
+                )
+            }
+        }
+        is ConversationScrollMode.Restore -> webView.scrollTo(0, mode.y.coerceAtLeast(0))
     }
 }
 

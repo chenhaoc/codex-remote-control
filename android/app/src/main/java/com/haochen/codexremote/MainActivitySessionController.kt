@@ -177,10 +177,12 @@ internal fun MainActivity.requestSessionContent(sessionId: String) {
                     return
                 }
                 val responsePayload = response.optJSONObject("payload")
+                val snapshotItems = buildConversationItemsFromSnapshot(responsePayload)
                 responsePayload?.optJSONObject("session")
                     ?.let(SessionInfo::fromSession)
                     ?.let(::upsertSession)
-                applySessionContentSnapshot(responsePayload)
+                applySessionContentSnapshot(responsePayload, snapshotItems)
+                updateLiveTurnStatusFromSnapshot(responsePayload)
                 flushPendingSessionRefresh(requestedSessionId)
             }
 
@@ -206,13 +208,13 @@ internal fun MainActivity.flushPendingSessionRefresh(sessionId: String) {
         mainHandler.post { requestSessionContent(sessionId) }
     }
 
-internal fun MainActivity.applySessionContentSnapshot(payload: JSONObject?) {
-        val snapshotItems = buildConversationItemsFromSnapshot(payload)
+internal fun MainActivity.applySessionContentSnapshot(payload: JSONObject?, snapshotItems: List<ConversationItem>? = null) {
+        val resolvedSnapshotItems = snapshotItems ?: buildConversationItemsFromSnapshot(payload)
         val snapshotApprovals = buildPendingApprovalsFromSnapshot(payload)
-        if (snapshotItems.isEmpty() && snapshotApprovals.isEmpty() && conversationItems.isNotEmpty()) {
+        if (resolvedSnapshotItems.isEmpty() && snapshotApprovals.isEmpty() && conversationItems.isNotEmpty()) {
             return
         }
-        if (conversationItems.matchesSnapshot(snapshotItems) && pendingApprovals.matchesSnapshot(snapshotApprovals)) {
+        if (conversationItems.matchesSnapshot(resolvedSnapshotItems) && pendingApprovals.matchesSnapshot(snapshotApprovals)) {
             return
         }
         assistantItemIds.clear()
@@ -223,10 +225,10 @@ internal fun MainActivity.applySessionContentSnapshot(payload: JSONObject?) {
         turnDiffs.clear()
 
         conversationItems.clear()
-        conversationItems.addAll(snapshotItems)
+        conversationItems.addAll(resolvedSnapshotItems)
         replacePendingApprovals(snapshotApprovals)
 
-        snapshotItems.forEach { item ->
+        resolvedSnapshotItems.forEach { item ->
             when (item) {
                 is ConversationItem.Bubble -> {
                     item.assistantKey?.takeIf { it.isNotBlank() }?.let { assistantKey ->
@@ -246,7 +248,7 @@ internal fun MainActivity.applySessionContentSnapshot(payload: JSONObject?) {
         }
 
         codeBrowserState?.let { state ->
-            if (!state.conversationItemId.startsWith("approval_") && snapshotItems.none { it.id == state.conversationItemId }) {
+            if (!state.conversationItemId.startsWith("approval_") && resolvedSnapshotItems.none { it.id == state.conversationItemId }) {
                 codeBrowserState = null
             }
         }
