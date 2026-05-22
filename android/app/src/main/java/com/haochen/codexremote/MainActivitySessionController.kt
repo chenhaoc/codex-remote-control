@@ -228,6 +228,11 @@ internal fun MainActivity.applySessionContentSnapshot(payload: JSONObject?) {
 
         snapshotItems.forEach { item ->
             when (item) {
+                is ConversationItem.Bubble -> {
+                    item.assistantKey?.takeIf { it.isNotBlank() }?.let { assistantKey ->
+                        assistantItemIds[buildAssistantBubbleKey(item.turnKey.orEmpty(), assistantKey)] = item.id
+                    }
+                }
                 is ConversationItem.FileChange -> {
                     item.sourceItemId?.takeIf { it.isNotBlank() }?.let { sourceId ->
                         fileChangeItemIds[sourceId] = item.id

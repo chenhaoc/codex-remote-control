@@ -1,6 +1,5 @@
 package com.haochen.codexremote
 
-import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -36,7 +35,7 @@ internal fun MainActivity.handleToolItem(eventName: String, item: JSONObject) {
         val existingId = toolItemIds[itemId]
         if (existingId == null) {
             val created = ConversationItem.SystemNote(
-                id = "tool_${UUID.randomUUID()}",
+                id = buildConversationItemId("tool", itemId, item.optString("type", "").takeIf { it.isNotBlank() }),
                 text = text,
                 itemKey = itemId,
             )

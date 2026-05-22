@@ -1,6 +1,5 @@
 package com.haochen.codexremote
 
-import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -78,12 +77,14 @@ internal fun MainActivity.upsertFileChangeConversationItem(
         val existingId = fileChangeItemIds[itemId]
         if (existingId == null) {
             val created = ConversationItem.FileChange(
-                id = "file_change_${UUID.randomUUID()}",
+                id = buildConversationItemId("file_change", itemId, turnKey),
                 title = "文件修改",
                 summary = summary,
                 status = status,
                 diffEntries = diffEntries,
                 fallbackDiff = fallbackDiff,
+                sourceItemId = itemId,
+                turnId = turnKey,
             )
             fileChangeItemIds[itemId] = created.id
             conversationItems.add(created)
@@ -98,6 +99,8 @@ internal fun MainActivity.upsertFileChangeConversationItem(
                     status = status,
                     diffEntries = diffEntries,
                     fallbackDiff = fallbackDiff,
+                    sourceItemId = itemId,
+                    turnId = turnKey,
                 )
             } else {
                 current
@@ -110,12 +113,13 @@ internal fun MainActivity.upsertTurnDiffConversationItem(turnKey: String, diff: 
         val existingId = turnDiffItemIds[turnKey]
         if (existingId == null) {
             val created = ConversationItem.FileChange(
-                id = "turn_diff_${UUID.randomUUID()}",
+                id = buildConversationItemId("turn_diff", turnKey),
                 title = "文件修改中",
                 summary = summary,
                 status = "inProgress",
                 diffEntries = emptyList(),
                 fallbackDiff = diff,
+                turnId = turnKey,
             )
             turnDiffItemIds[turnKey] = created.id
             conversationItems.add(created)
@@ -129,6 +133,7 @@ internal fun MainActivity.upsertTurnDiffConversationItem(turnKey: String, diff: 
                     summary = summary,
                     status = "inProgress",
                     fallbackDiff = diff,
+                    turnId = turnKey,
                 )
             } else {
                 current

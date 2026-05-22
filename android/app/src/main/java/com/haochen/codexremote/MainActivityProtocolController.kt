@@ -93,7 +93,7 @@ internal fun MainActivity.handleEvent(message: JSONObject) {
 
         when (eventName) {
             "turn/input" -> {
-                Unit
+                handleTurnInput(message, payload)
             }
 
             "turn/started" -> {
@@ -106,6 +106,7 @@ internal fun MainActivity.handleEvent(message: JSONObject) {
 
             "item/agentMessage/delta" -> {
                 updateLiveTurnStatus("Codex 正在输出…")
+                handleAssistantDelta(message, payload)
             }
             "item/commandExecution/requestApproval",
             "item/fileChange/requestApproval",
@@ -117,12 +118,18 @@ internal fun MainActivity.handleEvent(message: JSONObject) {
             }
             "item/fileChange/patchUpdated" -> {
                 updateLiveTurnStatus("Codex 正在修改文件…")
+                handleFileChangePatchUpdated(message, payload)
             }
             "turn/diff/updated" -> {
                 updateLiveTurnStatus("Codex 正在修改文件…")
+                handleTurnDiffUpdated(message, payload)
             }
             "item/started", "item/completed" -> {
-                updateLiveTurnStatusFromItem(eventName, payload.optJSONObject("item"))
+                val item = payload.optJSONObject("item")
+                updateLiveTurnStatusFromItem(eventName, item)
+                if (item != null) {
+                    handleThreadItemEvent(eventName, payload)
+                }
             }
             "warning" -> updateLiveTurnStatusFromWarning(payload)
             "error" -> updateLiveTurnStatusFromError(payload)
@@ -137,6 +144,20 @@ internal fun MainActivity.handleEvent(message: JSONObject) {
 
             else -> Unit
         }
+    }
+
+internal fun MainActivity.handleTurnInput(message: JSONObject, payload: JSONObject) {
+        val text = firstNonEmpty(
+            payload.optString("text", ""),
+            payload.optString("message", ""),
+        )
+        val turnKey = firstNonEmpty(
+            message.optString("turn_id", ""),
+            payload.optString("turn_id", ""),
+            message.optString("request_id", ""),
+            payload.optString("request_id", ""),
+        )
+        appendUserInputBubble(turnKey, text)
     }
 
 internal fun MainActivity.shouldIgnoreEvent(message: JSONObject): Boolean {

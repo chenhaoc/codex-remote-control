@@ -89,7 +89,7 @@ internal fun MainActivity.appendAssistantDeltaBubble(turnKey: String, itemKey: S
         val bubbleKey = buildAssistantBubbleKey(turnKey, itemKey)
         val bubbleId = assistantItemIds[bubbleKey]
         if (bubbleId == null) {
-            val created = createAssistantBubble(turnKey, delta, bubbleKey)
+            val created = createAssistantBubble(turnKey, delta, itemKey)
             assistantItemIds[bubbleKey] = created.id
             conversationItems.add(created)
             return
@@ -115,7 +115,7 @@ internal fun MainActivity.finalizeAssistantBubble(turnKey: String, itemKey: Stri
         val bubbleId = assistantItemIds[bubbleKey]
         if (bubbleId == null) {
             if (hasEquivalentAssistantBubble(turnKey, text)) return
-            val created = createAssistantBubble(turnKey, text, bubbleKey)
+            val created = createAssistantBubble(turnKey, text, itemKey)
             assistantItemIds[bubbleKey] = created.id
             conversationItems.add(created)
             return
@@ -136,9 +136,29 @@ internal fun MainActivity.appendStandaloneAssistantBubble(turnKey: String, text:
         conversationItems.add(createAssistantBubble(turnKey, text))
     }
 
+internal fun MainActivity.appendUserInputBubble(turnKey: String, text: String) {
+        val normalizedText = text.trim()
+        if (normalizedText.isBlank()) return
+        val existing = conversationItems.asReversed().firstOrNull { item ->
+            val bubble = item as? ConversationItem.Bubble ?: return@firstOrNull false
+            bubble.right && bubble.turnKey == turnKey && normalizeAssistantText(bubble.text) == normalizeAssistantText(normalizedText)
+        }
+        if (existing != null) return
+        conversationItems.add(
+            ConversationItem.Bubble(
+                id = buildConversationItemId("user", turnKey, normalizedText.take(24)),
+                right = true,
+                text = normalizedText,
+                backgroundColor = 0xFF1A8F55.toInt(),
+                textColor = AndroidColor.WHITE,
+                turnKey = turnKey,
+            ),
+        )
+    }
+
 internal fun MainActivity.createAssistantBubble(turnKey: String, text: String, assistantKey: String? = null): ConversationItem.Bubble {
         return ConversationItem.Bubble(
-            id = "assistant_${UUID.randomUUID()}",
+            id = buildConversationItemId("assistant", assistantKey, turnKey),
             right = false,
             text = stripClientDirectivesFromAssistantText(text),
             backgroundColor = 0xFFF1F8F2.toInt(),
@@ -146,6 +166,24 @@ internal fun MainActivity.createAssistantBubble(turnKey: String, text: String, a
             turnKey = turnKey,
             assistantKey = assistantKey,
         )
+    }
+
+internal fun MainActivity.buildConversationItemId(
+        prefix: String,
+        primaryKey: String?,
+        secondaryKey: String? = null,
+    ): String {
+        val parts = buildList {
+            add(prefix.trim().ifBlank { "item" })
+            primaryKey?.trim()?.takeIf { it.isNotBlank() }?.let(::add)
+            secondaryKey?.trim()?.takeIf { it.isNotBlank() }?.let(::add)
+        }
+        return parts.joinToString("_") { sanitizeConversationItemIdPart(it) }
+    }
+
+internal fun sanitizeConversationItemIdPart(value: String): String {
+        val normalized = value.trim().replace(Regex("[^A-Za-z0-9._-]+"), "_")
+        return normalized.trim('_').ifBlank { "item" }
     }
 
 internal fun MainActivity.extractTurnKey(message: JSONObject? = null, payload: JSONObject? = null): String {

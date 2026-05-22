@@ -45,7 +45,7 @@ internal fun MainActivity.buildConversationSnapshotThreadItem(entry: JSONObject)
                 val text = extractThreadItemText(item)
                 if (text.isBlank()) return null
                 ConversationItem.Bubble(
-                    id = "snapshot_user_${itemId.ifBlank { turnId.ifBlank { "item" } }}",
+                    id = buildConversationItemId("user", itemId.ifBlank { turnId }, turnId),
                     right = true,
                     text = text,
                     backgroundColor = 0xFF1A8F55.toInt(),
@@ -57,7 +57,7 @@ internal fun MainActivity.buildConversationSnapshotThreadItem(entry: JSONObject)
                 val text = extractThreadItemText(item)
                 if (text.isBlank()) return null
                 ConversationItem.Bubble(
-                    id = "snapshot_agent_${itemId.ifBlank { turnId.ifBlank { "item" } }}",
+                    id = buildConversationItemId("assistant", itemId.ifBlank { turnId }, turnId),
                     right = false,
                     text = text,
                     backgroundColor = 0xFFF1F8F2.toInt(),
@@ -70,7 +70,7 @@ internal fun MainActivity.buildConversationSnapshotThreadItem(entry: JSONObject)
                 val diffEntries = item.optJSONArray("changes").toConversationDiffEntries()
                 val status = item.optString("status", "").trim()
                 ConversationItem.FileChange(
-                    id = "snapshot_file_${itemId.ifBlank { turnId.ifBlank { "item" } }}",
+                    id = buildConversationItemId("file_change", itemId.ifBlank { turnId }, turnId),
                     title = if (status == "inProgress") "文件修改中" else "文件修改",
                     summary = buildFileChangeSummary(status, diffEntries, fallbackDiff = null),
                     status = status,
@@ -92,7 +92,7 @@ internal fun MainActivity.buildConversationSnapshotTurnStatus(entry: JSONObject)
             return null
         }
         return ConversationItem.SystemNote(
-            id = "snapshot_turn_status_${turnId.ifBlank { "unknown" }}",
+            id = buildConversationItemId("turn_status", turnId.ifBlank { "unknown" }),
             text = buildString {
                 append("当前回合结束: ${if (status.isNotBlank()) status else "unknown"}")
                 if (errorText.isNotBlank()) {
