@@ -10,8 +10,43 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function normalizeTurnStatusValue(status) {
+  if (typeof status === 'string') return status.trim();
+  if (status && typeof status === 'object') {
+    return String(status.type ?? status.status ?? '').trim();
+  }
+  return '';
+}
+
+function nowLocalIso() {
+  const date = new Date();
+  const pad = (value, length = 2) => String(value).padStart(length, '0');
+  const offsetMinutes = -date.getTimezoneOffset();
+  const offsetSign = offsetMinutes >= 0 ? '+' : '-';
+  const absOffsetMinutes = Math.abs(offsetMinutes);
+  const offsetHours = Math.floor(absOffsetMinutes / 60);
+  const offsetRemainderMinutes = absOffsetMinutes % 60;
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+    + `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`
+    + `${offsetSign}${pad(offsetHours)}:${pad(offsetRemainderMinutes)}`;
+}
+
 const SANDBOX_POLICY_TYPES = new Set(['readOnly', 'workspaceWrite', 'dangerFullAccess', 'externalSandbox']);
 const SANDBOX_MODE_TYPES = new Set(['readOnly', 'workspaceWrite', 'dangerFullAccess']);
+const SESSION_SYNC_EVENT_NAMES = new Set([
+  'turn/input',
+  'turn/started',
+  'turn/completed',
+  'item/completed',
+  'item/fileChange/patchUpdated',
+  'turn/diff/updated',
+  'item/commandExecution/requestApproval',
+  'item/fileChange/requestApproval',
+  'item/permissions/requestApproval',
+  'applyPatchApproval',
+  'execCommandApproval',
+]);
+const SYNC_LOG_EVENT_LIMIT = 12;
 
 function firstNonEmptyString(...values) {
   for (const value of values) {
@@ -20,6 +55,42 @@ function firstNonEmptyString(...values) {
     }
   }
   return '';
+}
+
+function normalizeSeq(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
+}
+
+function summarizeSyncEntries(entries = []) {
+  return entries.slice(-SYNC_LOG_EVENT_LIMIT).map((entry) => ({
+    type: entry?.type ?? '',
+    turn_id: entry?.turn_id ?? '',
+    item_type: entry?.item?.type ?? '',
+    item_id: entry?.item?.id ?? '',
+    text_len: String(entry?.item?.text ?? entry?.item?.content?.[0]?.text ?? '').length,
+    status: entry?.status ?? '',
+  }));
+}
+
+function summarizeSyncEvents(events = []) {
+  return events.slice(-SYNC_LOG_EVENT_LIMIT).map((event) => ({
+    seq: event?.seq ?? null,
+    event: event?.event ?? '',
+    turn_id: event?.turn_id ?? '',
+    item_type: event?.payload?.item?.type ?? '',
+    item_id: event?.payload?.item?.id ?? '',
+    text_len: String(event?.payload?.item?.text ?? event?.payload?.text ?? event?.payload?.delta ?? '').length,
+  }));
+}
+
+function syncItemTypeCounts(entries = []) {
+  const counts = {};
+  for (const entry of entries) {
+    const key = entry?.item?.type ?? entry?.type ?? 'unknown';
+    counts[key] = (counts[key] ?? 0) + 1;
+  }
+  return counts;
 }
 
 function diffStatsLabel(diff) {
@@ -371,6 +442,7 @@ export class BridgeServer extends EventEmitter {
     token = null,
     name = 'codex-remote-control',
     version = '0.1.0',
+    syncLogPath = null,
   }) {
     super();
     this.backend = backend;
@@ -380,10 +452,23 @@ export class BridgeServer extends EventEmitter {
     this.token = token;
     this.name = name;
     this.version = version;
+    this.syncLogPath = syncLogPath;
     this.httpServer = null;
     this.wsServer = null;
     this.connections = new Set();
     this.backendListener = (message) => this.#handleBackendMessage(message);
+  }
+
+  #logSync(event, details = {}) {
+    if (!this.syncLogPath) return;
+    const line = JSON.stringify({
+      at: nowLocalIso(),
+      event,
+      ...details,
+    });
+    fs.mkdir(path.dirname(this.syncLogPath), { recursive: true })
+      .then(() => fs.appendFile(this.syncLogPath, `${line}\n`, 'utf8'))
+      .catch(() => {});
   }
 
   async start() {
@@ -702,27 +787,49 @@ export class BridgeServer extends EventEmitter {
       }
       case 'session.sync': {
         const sessionId = payload.session_id ?? payload.thread_id;
-        const sinceSeq = payload.since_seq ?? 0;
-        if (sinceSeq > 0) {
-          ws.send(JSON.stringify(createResponse(id, {
-            session_id: sessionId,
-            events: this.#filterIncrementalSessionEvents(sessionId, sinceSeq),
-            last_seq: this.store.getLastSeq(sessionId),
-          })));
-          return;
-        }
-
-        const refreshed = await this.#refreshSessionHistory(sessionId);
-        ws.send(JSON.stringify(createResponse(id, {
+        const sinceSeq = normalizeSeq(payload.since_seq);
+        this.#logSync('session.sync.request', {
+          request_id: id,
           session_id: sessionId,
-          events: refreshed.events,
-          last_seq: refreshed.lastSeq,
-        })));
+          since_seq: sinceSeq,
+          raw_since_seq: payload.since_seq ?? null,
+          incremental: payload.incremental ?? null,
+        });
+        const sync = await this.#buildSessionSync(sessionId, sinceSeq);
+        this.#logSync('session.sync.response', {
+          request_id: id,
+          session_id: sessionId,
+          since_seq: sinceSeq,
+          last_seq: sync.last_seq ?? null,
+          changed_turn_ids: sync.changed_turn_ids ?? [],
+          entries: sync.entries?.length ?? 0,
+          item_counts: syncItemTypeCounts(sync.entries ?? []),
+          active_turns: sync.active_turns?.length ?? 0,
+          pending_approvals: sync.pending_approvals?.length ?? 0,
+          needs_full_sync: sync.needs_full_sync ?? null,
+          fallback_reason: sync.fallback_reason ?? '',
+          entry_tail: summarizeSyncEntries(sync.entries ?? []),
+        });
+        ws.send(JSON.stringify(createResponse(id, sync)));
         return;
       }
       case 'session.content': {
         const sessionId = payload.session_id ?? payload.thread_id;
+        this.#logSync('session.content.request', {
+          request_id: id,
+          session_id: sessionId,
+        });
         const content = await this.#buildSessionContent(sessionId);
+        this.#logSync('session.content.response', {
+          request_id: id,
+          session_id: sessionId,
+          last_seq: content.last_seq ?? null,
+          entries: content.entries?.length ?? 0,
+          item_counts: syncItemTypeCounts(content.entries ?? []),
+          active_turns: content.active_turns?.length ?? 0,
+          pending_approvals: content.pending_approvals?.length ?? 0,
+          entry_tail: summarizeSyncEntries(content.entries ?? []),
+        });
         ws.send(JSON.stringify(createResponse(id, content)));
         return;
       }
@@ -966,6 +1073,176 @@ export class BridgeServer extends EventEmitter {
     }
   }
 
+  async #refreshSessionHistoryForSessionSync(sessionId, sinceSeq) {
+    const session = this.store.getSession(sessionId);
+    if (!session) {
+      return { appended: 0, skipped: 0, lastSeq: 0 };
+    }
+
+    const storedEvents = this.store.syncEvents(sessionId, 0);
+    const knownTurnIds = new Set(storedEvents.map((event) => event?.turn_id ?? '').filter(Boolean));
+    const openTurnIds = this.#openTurnIdsAtSeq(storedEvents, sinceSeq);
+    const incrementalWindowTurnIds = this.#incrementalTurnWindowIds(storedEvents, sinceSeq);
+    const lastKnownStoreTurnId = this.#lastTurnIdAtSeq(storedEvents, sinceSeq);
+
+    try {
+      const hydratedEvents = await this.#hydrateSessionHistory(sessionId);
+      const effectiveHydratedEvents = this.#pruneHydratedEvents(hydratedEvents, storedEvents);
+      const hydratedTurnIndexes = this.#turnIndexesFromEvents(effectiveHydratedEvents);
+      const knownTurnIdsAtSince = this.#turnIdsAtSeq(storedEvents, sinceSeq);
+      const lastKnownHydratedTurnIndex = this.#lastKnownHydratedTurnIndex(hydratedTurnIndexes, knownTurnIdsAtSince);
+      const eligibleTurnIds = this.#sessionSyncHydrationTurnIds({
+        hydratedTurnIndexes,
+        sinceSeq,
+        openTurnIds,
+        incrementalWindowTurnIds,
+        lastKnownHydratedTurnIndex,
+        lastKnownStoreTurnId,
+      });
+      const seen = new Set(storedEvents.map((event) => this.#eventSignature(event)));
+      let appended = 0;
+      let skipped = 0;
+
+      for (const event of effectiveHydratedEvents) {
+        const signature = this.#eventSignature(event);
+        if (seen.has(signature)) continue;
+        const turnId = event?.turn_id ?? '';
+        const eligible = sinceSeq <= 0
+          || !turnId
+          || (
+            eligibleTurnIds.has(turnId)
+            && (
+              turnId !== lastKnownStoreTurnId
+              || this.#isSessionSyncContentEvent(event)
+            )
+          );
+        if (!eligible) {
+          skipped += 1;
+          continue;
+        }
+        const stored = await this.store.appendEvent(sessionId, event);
+        storedEvents.push(stored);
+        seen.add(signature);
+        appended += 1;
+      }
+
+      this.#logSync('session.sync.refresh_history', {
+        session_id: sessionId,
+        since_seq: sinceSeq,
+        hydrated_events: effectiveHydratedEvents.length,
+        known_turns: knownTurnIds.size,
+        incremental_window_turns: Array.from(incrementalWindowTurnIds),
+        last_known_hydrated_turn_index: lastKnownHydratedTurnIndex,
+        last_known_store_turn_id: lastKnownStoreTurnId,
+        eligible_turn_ids: Array.from(eligibleTurnIds),
+        appended,
+        skipped_historical: skipped,
+        last_seq: this.store.getLastSeq(sessionId),
+      });
+      return { appended, skipped, lastSeq: this.store.getLastSeq(sessionId) };
+    } catch (error) {
+      this.#logSync('session.sync.refresh_history.error', {
+        session_id: sessionId,
+        since_seq: sinceSeq,
+        message: error?.message ?? String(error),
+      });
+      return { appended: 0, skipped: 0, lastSeq: this.store.getLastSeq(sessionId) };
+    }
+  }
+
+  #sessionSyncHydrationTurnIds({
+    hydratedTurnIndexes,
+    sinceSeq,
+    openTurnIds,
+    incrementalWindowTurnIds,
+    lastKnownHydratedTurnIndex,
+    lastKnownStoreTurnId,
+  }) {
+    const turnIds = new Set([...openTurnIds, ...incrementalWindowTurnIds]);
+    if (sinceSeq <= 0) {
+      for (const turnId of hydratedTurnIndexes.keys()) {
+        turnIds.add(turnId);
+      }
+      return turnIds;
+    }
+
+    if (lastKnownStoreTurnId && hydratedTurnIndexes.has(lastKnownStoreTurnId)) {
+      turnIds.add(lastKnownStoreTurnId);
+    }
+    if (lastKnownHydratedTurnIndex >= 0) {
+      for (const [turnId, index] of hydratedTurnIndexes.entries()) {
+        if (index > lastKnownHydratedTurnIndex) {
+          turnIds.add(turnId);
+        }
+      }
+    }
+    return turnIds;
+  }
+
+  #isSessionSyncContentEvent(event) {
+    return event?.event === 'turn/input'
+      || event?.event === 'item/completed'
+      || event?.event === 'item/fileChange/patchUpdated'
+      || event?.event === 'turn/diff/updated';
+  }
+
+  #turnIndexesFromEvents(events) {
+    const indexes = new Map();
+    for (const event of events) {
+      const turnId = event?.turn_id ?? '';
+      if (!turnId || indexes.has(turnId)) continue;
+      indexes.set(turnId, indexes.size);
+    }
+    return indexes;
+  }
+
+  #turnIdsAtSeq(events, seq) {
+    const turnIds = new Set();
+    for (const event of events) {
+      if ((event?.seq ?? 0) > seq) continue;
+      const turnId = event?.turn_id ?? '';
+      if (turnId) {
+        turnIds.add(turnId);
+      }
+    }
+    return turnIds;
+  }
+
+  #lastTurnIdAtSeq(events, seq) {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      if ((events[index]?.seq ?? 0) > seq) continue;
+      const turnId = events[index]?.turn_id ?? '';
+      if (turnId) return turnId;
+    }
+    return '';
+  }
+
+  #lastKnownHydratedTurnIndex(hydratedTurnIndexes, knownTurnIds) {
+    let lastIndex = -1;
+    for (const turnId of knownTurnIds) {
+      const index = hydratedTurnIndexes.get(turnId);
+      if (Number.isInteger(index) && index > lastIndex) {
+        lastIndex = index;
+      }
+    }
+    return lastIndex;
+  }
+
+  #openTurnIdsAtSeq(events, seq) {
+    const openTurnIds = new Set();
+    for (const event of events.slice().sort((left, right) => (left.seq ?? 0) - (right.seq ?? 0))) {
+      if ((event?.seq ?? 0) > seq) break;
+      const turnId = event?.turn_id ?? '';
+      if (!turnId) continue;
+      if (event.event === 'turn/started') {
+        openTurnIds.add(turnId);
+      } else if (event.event === 'turn/completed') {
+        openTurnIds.delete(turnId);
+      }
+    }
+    return openTurnIds;
+  }
+
   async #backfillSessionMetadataFromLocalState(session) {
     if (!session || !hasMissingSessionMetadata(session)) {
       return session;
@@ -1077,10 +1354,13 @@ export class BridgeServer extends EventEmitter {
   async #buildSessionContent(sessionId) {
     let session = this.store.getSession(sessionId);
     if (!session) {
+      this.#logSync('session.content.build.missing_session', { session_id: sessionId });
       return {
         session_id: sessionId,
         thread_id: sessionId,
+        last_seq: 0,
         entries: [],
+        active_turns: [],
         pending_approvals: [],
       };
     }
@@ -1092,23 +1372,53 @@ export class BridgeServer extends EventEmitter {
       thread = await this.#loadHydrationThread(sessionId, session);
       session = this.store.getSession(sessionId) ?? session;
       session = await this.#backfillSessionMetadataFromLocalState(session);
-    } catch {
+    } catch (error) {
+      this.#logSync('session.content.hydration.error', {
+        session_id: sessionId,
+        message: error?.message ?? String(error),
+      });
       thread = session.thread ?? null;
     }
 
     let entries = await this.#buildContentEntriesFromThread(sessionId, thread);
+    this.#logSync('session.content.entries.thread', {
+      session_id: sessionId,
+      entries: entries.length,
+      item_counts: syncItemTypeCounts(entries),
+      entry_tail: summarizeSyncEntries(entries),
+    });
     if (entries.length === 0) {
       entries = this.#buildContentEntriesFromStoredEvents(sessionId);
+      this.#logSync('session.content.entries.stored_events', {
+        session_id: sessionId,
+        entries: entries.length,
+        item_counts: syncItemTypeCounts(entries),
+        entry_tail: summarizeSyncEntries(entries),
+      });
     }
     if (entries.length === 0 && session.thread?.path) {
       try {
         entries = await this.#buildContentEntriesFromRolloutFile(sessionId, session.thread.path, session.thread_id ?? sessionId);
-      } catch {}
+        this.#logSync('session.content.entries.rollout', {
+          session_id: sessionId,
+          path: session.thread.path,
+          entries: entries.length,
+          item_counts: syncItemTypeCounts(entries),
+          entry_tail: summarizeSyncEntries(entries),
+        });
+      } catch (error) {
+        this.#logSync('session.content.entries.rollout_error', {
+          session_id: sessionId,
+          path: session.thread.path,
+          message: error?.message ?? String(error),
+        });
+      }
     }
 
     return {
       session_id: sessionId,
       thread_id: session.thread_id ?? sessionId,
+      last_seq: this.store.getLastSeq(sessionId),
       session,
       entries,
       active_turns: this.#buildActiveTurns(sessionId, entries),
@@ -1143,6 +1453,14 @@ export class BridgeServer extends EventEmitter {
           ...detail,
           output_chars: (turns.get(turnId)?.output_chars ?? 0) + outputCharsDelta,
         });
+      }
+    }
+
+    for (const entry of entries) {
+      const turnId = entry?.turn_id ?? '';
+      const status = entry?.type === 'turn_status' ? normalizeTurnStatusValue(entry.status) : '';
+      if (turnId && status && status !== 'inProgress') {
+        turns.delete(turnId);
       }
     }
 
@@ -1275,6 +1593,234 @@ export class BridgeServer extends EventEmitter {
       if (recentTurnIds.has(turnId)) return true;
       return openTurnIds.has(turnId);
     });
+  }
+
+  #changedTurnIdsForSessionSync(sessionId, sinceSeq) {
+    const session = this.store.getSession(sessionId);
+    if (!session) {
+      this.#logSync('session.sync.changed_turns.missing_session', { session_id: sessionId, since_seq: sinceSeq });
+      return { turnIds: [], hasRelevantEvents: false };
+    }
+
+    const turnIds = new Set();
+    let hasRelevantEvents = false;
+    const events = (session.events ?? []).slice().sort((left, right) => (left.seq ?? 0) - (right.seq ?? 0));
+    const incrementalTurnIds = this.#incrementalTurnWindowIds(events, sinceSeq);
+    const tailTurnIdAtSince = this.#lastTurnIdAtSeq(events, sinceSeq);
+    const relevantEvents = [];
+    for (const event of events) {
+      if ((event?.seq ?? 0) <= sinceSeq) continue;
+      if (!SESSION_SYNC_EVENT_NAMES.has(event?.event)) continue;
+      relevantEvents.push(event);
+      const turnId = event?.turn_id ?? '';
+      if (!turnId) {
+        hasRelevantEvents = true;
+        continue;
+      }
+      if (
+        (incrementalTurnIds.has(turnId) || turnId === tailTurnIdAtSince)
+        && this.#turnChangedAfterSeq(sessionId, turnId, sinceSeq)
+      ) {
+        hasRelevantEvents = true;
+        turnIds.add(turnId);
+      }
+    }
+
+    const result = { turnIds: Array.from(turnIds), hasRelevantEvents };
+    this.#logSync('session.sync.changed_turns', {
+      session_id: sessionId,
+      since_seq: sinceSeq,
+      last_seq: session.lastSeq ?? 0,
+      relevant_events: relevantEvents.length,
+      incremental_turn_ids: Array.from(incrementalTurnIds),
+      tail_turn_id_at_since: tailTurnIdAtSince,
+      turn_ids: result.turnIds,
+      has_relevant_events: hasRelevantEvents,
+      event_tail: summarizeSyncEvents(relevantEvents),
+    });
+    return result;
+  }
+
+  #incrementalTurnWindowIds(events, sinceSeq) {
+    if (sinceSeq <= 0) {
+      return new Set(events.map((event) => event?.turn_id ?? '').filter(Boolean));
+    }
+
+    const openTurnIds = new Set();
+    for (const event of events) {
+      if ((event?.seq ?? 0) > sinceSeq) break;
+      const turnId = event?.turn_id ?? '';
+      if (!turnId) continue;
+      if (event.event === 'turn/started') {
+        openTurnIds.add(turnId);
+      } else if (event.event === 'turn/completed') {
+        openTurnIds.delete(turnId);
+      }
+    }
+
+    const turnIds = new Set(openTurnIds);
+    for (const event of events) {
+      if ((event?.seq ?? 0) <= sinceSeq) continue;
+      const turnId = event?.turn_id ?? '';
+      if (!turnId) continue;
+      if (event.event === 'turn/started' || event.event === 'turn/input') {
+        turnIds.add(turnId);
+      }
+    }
+
+    return turnIds;
+  }
+
+  #turnChangedAfterSeq(sessionId, turnId, sinceSeq) {
+    const session = this.store.getSession(sessionId);
+    return (session?.events ?? []).some((event) => {
+      if ((event?.seq ?? 0) <= sinceSeq) return false;
+      if ((event?.turn_id ?? '') !== turnId) return false;
+      return event?.event === 'turn/input'
+        || event?.event === 'item/completed'
+        || event?.event === 'turn/completed'
+        || event?.event === 'item/fileChange/patchUpdated'
+        || event?.event === 'turn/diff/updated';
+    });
+  }
+
+  async #buildSessionSync(sessionId, sinceSeq) {
+    const session = this.store.getSession(sessionId);
+    const lastSeq = this.store.getLastSeq(sessionId);
+    if (!session) {
+      this.#logSync('session.sync.build.missing_session', { session_id: sessionId, since_seq: sinceSeq });
+      return {
+        session_id: sessionId,
+        thread_id: sessionId,
+        last_seq: 0,
+        entries: [],
+        active_turns: [],
+        pending_approvals: [],
+        changed_turn_ids: [],
+        needs_full_sync: false,
+        fallback_reason: '',
+      };
+    }
+
+    let { turnIds, hasRelevantEvents } = this.#changedTurnIdsForSessionSync(sessionId, sinceSeq);
+    if (!hasRelevantEvents || turnIds.length === 0) {
+      await this.#refreshSessionHistoryForSessionSync(sessionId, sinceSeq);
+      ({ turnIds, hasRelevantEvents } = this.#changedTurnIdsForSessionSync(sessionId, sinceSeq));
+    }
+    const refreshedLastSeq = this.store.getLastSeq(sessionId);
+    if (!hasRelevantEvents) {
+      this.#logSync('session.sync.build.no_relevant_events', {
+        session_id: sessionId,
+        since_seq: sinceSeq,
+        last_seq: refreshedLastSeq,
+      });
+      return {
+        session_id: sessionId,
+        thread_id: session.thread_id ?? sessionId,
+        last_seq: refreshedLastSeq,
+        entries: [],
+        active_turns: this.#buildActiveTurns(sessionId, []),
+        pending_approvals: this.store.getPendingApprovals(sessionId),
+        changed_turn_ids: [],
+        needs_full_sync: false,
+        fallback_reason: '',
+      };
+    }
+
+    if (turnIds.length === 0) {
+      this.#logSync('session.sync.build.no_turn_ids', {
+        session_id: sessionId,
+        since_seq: sinceSeq,
+        last_seq: refreshedLastSeq,
+      });
+      return {
+        session_id: sessionId,
+        thread_id: session.thread_id ?? sessionId,
+        last_seq: refreshedLastSeq,
+        entries: [],
+        active_turns: this.#buildActiveTurns(sessionId, []),
+        pending_approvals: this.store.getPendingApprovals(sessionId),
+        changed_turn_ids: [],
+        needs_full_sync: true,
+        fallback_reason: 'changed events did not include turn ids',
+      };
+    }
+
+    try {
+      const { entries, changedTurnIds, missingFinalAgentTurnIds } = await this.#buildContentEntriesForTurns(sessionId, turnIds);
+      const fallbackTurnIds = new Set(missingFinalAgentTurnIds);
+      for (const turnId of turnIds) {
+        if (this.#turnRequiresAuthoritativeItems(sessionId, turnId) && !changedTurnIds.includes(turnId)) {
+          fallbackTurnIds.add(turnId);
+        }
+      }
+      if (fallbackTurnIds.size > 0) {
+        this.#logSync('session.sync.build.needs_full_sync', {
+          session_id: sessionId,
+          since_seq: sinceSeq,
+          last_seq: refreshedLastSeq,
+          requested_turn_ids: turnIds,
+          changed_turn_ids: changedTurnIds,
+          missing_final_agent_turn_ids: missingFinalAgentTurnIds,
+          fallback_turn_ids: Array.from(fallbackTurnIds),
+          entries: entries.length,
+          item_counts: syncItemTypeCounts(entries),
+          entry_tail: summarizeSyncEntries(entries),
+        });
+        return {
+          session_id: sessionId,
+          thread_id: session.thread_id ?? sessionId,
+          last_seq: refreshedLastSeq,
+          entries: [],
+          active_turns: this.#buildActiveTurns(sessionId, []),
+          pending_approvals: this.store.getPendingApprovals(sessionId),
+          changed_turn_ids: changedTurnIds,
+          needs_full_sync: true,
+          fallback_reason: `missing final agentMessage for turns: ${Array.from(fallbackTurnIds).join(',')}`,
+        };
+      }
+
+      this.#logSync('session.sync.build.success', {
+        session_id: sessionId,
+        since_seq: sinceSeq,
+        last_seq: refreshedLastSeq,
+        requested_turn_ids: turnIds,
+        changed_turn_ids: changedTurnIds,
+        entries: entries.length,
+        item_counts: syncItemTypeCounts(entries),
+        entry_tail: summarizeSyncEntries(entries),
+      });
+      return {
+        session_id: sessionId,
+        thread_id: session.thread_id ?? sessionId,
+        last_seq: refreshedLastSeq,
+        entries,
+        active_turns: this.#buildActiveTurns(sessionId, entries),
+        pending_approvals: this.store.getPendingApprovals(sessionId),
+        changed_turn_ids: changedTurnIds,
+        needs_full_sync: false,
+        fallback_reason: '',
+      };
+    } catch (error) {
+      this.#logSync('session.sync.build.error', {
+        session_id: sessionId,
+        since_seq: sinceSeq,
+        last_seq: refreshedLastSeq,
+        requested_turn_ids: turnIds,
+        message: error?.message ?? String(error),
+      });
+      return {
+        session_id: sessionId,
+        thread_id: session.thread_id ?? sessionId,
+        last_seq: refreshedLastSeq,
+        entries: [],
+        active_turns: this.#buildActiveTurns(sessionId, []),
+        pending_approvals: this.store.getPendingApprovals(sessionId),
+        changed_turn_ids: turnIds,
+        needs_full_sync: true,
+        fallback_reason: error?.message ?? 'session sync failed',
+      };
+    }
   }
 
   async #hydrateSessionHistory(sessionId) {
@@ -1677,19 +2223,335 @@ export class BridgeServer extends EventEmitter {
         });
       }
 
-      if (turn.status && turn.status !== 'completed' && turn.status !== 'inProgress') {
+      const turnStatus = normalizeTurnStatusValue(turn.status);
+      if (turnStatus && turnStatus !== 'inProgress') {
         entries.push({
           type: 'turn_status',
           session_id: sessionId,
           thread_id: threadId,
           turn_id: turn.id,
-          status: turn.status,
+          status: turnStatus,
           error: turn.error ?? null,
         });
       }
     }
 
     return entries;
+  }
+
+  async #buildContentEntriesForTurns(sessionId, turnIds) {
+    const session = this.store.getSession(sessionId);
+    if (!session) {
+      this.#logSync('session.sync.turns.missing_session', { session_id: sessionId, turn_ids: turnIds });
+      return { entries: [], changedTurnIds: [], missingFinalAgentTurnIds: [] };
+    }
+
+    const uniqueTurnIds = Array.from(new Set(turnIds.map((turnId) => String(turnId ?? '').trim()).filter(Boolean)));
+    if (uniqueTurnIds.length === 0) {
+      this.#logSync('session.sync.turns.empty_turn_ids', { session_id: sessionId, turn_ids: turnIds });
+      return { entries: [], changedTurnIds: [], missingFinalAgentTurnIds: [] };
+    }
+
+    const threadId = session.thread_id ?? sessionId;
+    const thread = await this.#loadHydrationThread(sessionId, session);
+    const rawThread = thread?.thread ?? thread ?? {};
+    const turns = this.#sortTurnsForRendering(Array.isArray(rawThread?.turns) ? rawThread.turns : []);
+    const turnsById = new Map(turns.map((turn) => [turn?.id, turn]).filter(([turnId]) => turnId));
+    this.#logSync('session.sync.turns.thread_loaded', {
+      session_id: sessionId,
+      thread_id: threadId,
+      requested_turn_ids: uniqueTurnIds,
+      thread_turns: turns.length,
+      matching_turn_ids: uniqueTurnIds.filter((turnId) => turnsById.has(turnId)),
+      thread_turn_tail: turns.slice(-SYNC_LOG_EVENT_LIMIT).map((turn) => ({
+        id: turn?.id ?? '',
+        items: Array.isArray(turn?.items) ? turn.items.length : null,
+        items_view: turn?.itemsView ?? null,
+        status: turn?.status?.type ?? turn?.status ?? '',
+      })),
+    });
+    const storedUserInputItemIds = this.#buildStoredTurnInputItemIdIndex(sessionId);
+    const entries = [];
+    const changedTurnIds = [];
+    const missingFinalAgentTurnIds = [];
+
+    for (const turnId of uniqueTurnIds) {
+      const turn = turnsById.get(turnId) ?? (this.#turnRequiresAuthoritativeItems(sessionId, turnId) ? null : this.#buildStoredTurnStub(sessionId, turnId));
+      if (!turn) {
+        this.#logSync('session.sync.turn.missing_turn', {
+          session_id: sessionId,
+          thread_id: threadId,
+          turn_id: turnId,
+          requires_authoritative_items: this.#turnRequiresAuthoritativeItems(sessionId, turnId),
+          has_completed_assistant_event: this.#turnHasCompletedAssistantEvent(sessionId, turnId),
+        });
+        continue;
+      }
+
+      const requiresAuthoritativeItems = this.#turnRequiresAuthoritativeItems(sessionId, turnId);
+      const turnEntries = await this.#buildContentEntriesFromTurn(sessionId, threadId, turn, storedUserInputItemIds, {
+        requireAuthoritativeItems: requiresAuthoritativeItems,
+      });
+      if (turnEntries == null) {
+        this.#logSync('session.sync.turn.entries_null', {
+          session_id: sessionId,
+          thread_id: threadId,
+          turn_id: turnId,
+          requires_authoritative_items: requiresAuthoritativeItems,
+        });
+        missingFinalAgentTurnIds.push(turnId);
+        continue;
+      }
+      this.#logSync('session.sync.turn.entries', {
+        session_id: sessionId,
+        thread_id: threadId,
+        turn_id: turnId,
+        requires_authoritative_items: requiresAuthoritativeItems,
+        turn_status: turn?.status?.type ?? turn?.status ?? '',
+        turn_items_view: turn?.itemsView ?? null,
+        inline_items: Array.isArray(turn?.items) ? turn.items.length : null,
+        entries: turnEntries.length,
+        item_counts: syncItemTypeCounts(turnEntries),
+        entry_tail: summarizeSyncEntries(turnEntries),
+      });
+      entries.push(...turnEntries);
+      changedTurnIds.push(turnId);
+
+      if (
+        (
+          this.#turnHasCompletedAssistantEvent(sessionId, turnId)
+          || (requiresAuthoritativeItems && this.#isCompletedTurn(turn))
+        )
+        && !turnEntries.some((entry) => entry?.item?.type === 'agentMessage')
+      ) {
+        missingFinalAgentTurnIds.push(turnId);
+      }
+    }
+
+    return { entries, changedTurnIds, missingFinalAgentTurnIds };
+  }
+
+  async #buildContentEntriesFromTurn(sessionId, threadId, turn, storedUserInputItemIds, options = {}) {
+    const entries = [];
+    const turnId = turn?.id ?? '';
+    if (!turnId) {
+      this.#logSync('session.sync.turn.build_entries.blank_turn_id', { session_id: sessionId, thread_id: threadId });
+      return entries;
+    }
+
+    const items = options.requireAuthoritativeItems
+      ? await this.#loadAuthoritativeTurnItems(threadId, turn)
+      : await this.#loadTurnItems(threadId, turn);
+    if (items == null) {
+      this.#logSync('session.sync.turn.build_entries.items_null', {
+        session_id: sessionId,
+        thread_id: threadId,
+        turn_id: turnId,
+        require_authoritative_items: options.requireAuthoritativeItems ?? false,
+      });
+      return null;
+    }
+    this.#logSync('session.sync.turn.build_entries.items', {
+      session_id: sessionId,
+      thread_id: threadId,
+      turn_id: turnId,
+      require_authoritative_items: options.requireAuthoritativeItems ?? false,
+      item_count: items.length,
+      item_types: items.reduce((counts, item) => {
+        const key = item?.type ?? 'unknown';
+        counts[key] = (counts[key] ?? 0) + 1;
+        return counts;
+      }, {}),
+      item_tail: items.slice(-SYNC_LOG_EVENT_LIMIT).map((item) => ({
+        type: item?.type ?? '',
+        id: item?.id ?? '',
+        text_len: String(item?.text ?? item?.content?.[0]?.text ?? '').length,
+        status: item?.status ?? '',
+      })),
+    });
+
+    let turnItemSeq = 0;
+    for (const item of items) {
+      if (!item?.type) continue;
+      if (item.type !== 'userMessage' && item.type !== 'agentMessage' && item.type !== 'fileChange') {
+        continue;
+      }
+      const text = item.type === 'userMessage' ? extractUserMessageText(item.content ?? []) : '';
+      const fallbackSeq = item.id ? null : String(++turnItemSeq).padStart(4, '0');
+      const storedUserInputItemId = item.type === 'userMessage'
+        ? this.#resolveStoredTurnInputItemId(storedUserInputItemIds, turnId, text)
+        : null;
+      const fallbackItemId = item.type === 'userMessage'
+        ? `turn_${turnId}_user_${fallbackSeq}`
+        : `turn_${turnId}_item_${fallbackSeq}`;
+      const itemId = item.type === 'userMessage'
+        ? storedUserInputItemId ?? item.id ?? fallbackItemId
+        : item.id ?? fallbackItemId;
+      entries.push({
+        type: 'item',
+        session_id: sessionId,
+        thread_id: threadId,
+        turn_id: turnId,
+        item: {
+          ...item,
+          id: itemId,
+        },
+      });
+    }
+
+    const turnStatus = normalizeTurnStatusValue(turn.status);
+    if (turnStatus && turnStatus !== 'inProgress') {
+      entries.push({
+        type: 'turn_status',
+        session_id: sessionId,
+        thread_id: threadId,
+        turn_id: turnId,
+        status: turnStatus,
+        error: turn.error ?? null,
+      });
+    }
+
+    return entries;
+  }
+
+  async #loadAuthoritativeTurnItems(threadId, turn) {
+    const inlineItems = Array.isArray(turn?.items) ? turn.items : [];
+    if (turn?.itemsView === 'full') {
+      this.#logSync('session.sync.turn.authoritative_items.inline_full', {
+        thread_id: threadId,
+        turn_id: turn?.id ?? '',
+        items: inlineItems.length,
+      });
+      return inlineItems;
+    }
+    if (typeof this.backend.listTurnItems !== 'function' || !turn?.id || !threadId) {
+      this.#logSync('session.sync.turn.authoritative_items.unavailable', {
+        thread_id: threadId,
+        turn_id: turn?.id ?? '',
+        has_list_turn_items: typeof this.backend.listTurnItems === 'function',
+      });
+      return null;
+    }
+
+    try {
+      const loaded = [];
+      let cursor = null;
+      do {
+        const page = await this.backend.listTurnItems(threadId, turn.id, {
+          cursor,
+          limit: 200,
+          sortDirection: 'asc',
+        });
+        const data = Array.isArray(page) ? page : page?.data ?? [];
+        loaded.push(...data);
+        cursor = Array.isArray(page) ? null : page?.nextCursor ?? null;
+      } while (cursor);
+      this.#logSync('session.sync.turn.authoritative_items.loaded', {
+        thread_id: threadId,
+        turn_id: turn.id,
+        items: loaded.length,
+        item_types: loaded.reduce((counts, item) => {
+          const key = item?.type ?? 'unknown';
+          counts[key] = (counts[key] ?? 0) + 1;
+          return counts;
+        }, {}),
+      });
+      return loaded;
+    } catch (error) {
+      this.#logSync('session.sync.turn.authoritative_items.error', {
+        thread_id: threadId,
+        turn_id: turn.id,
+        message: error?.message ?? String(error),
+      });
+      return null;
+    }
+  }
+
+  #buildStoredTurnStub(sessionId, turnId) {
+    const session = this.store.getSession(sessionId);
+    if (!session) return null;
+
+    const items = [];
+    for (const event of session.events ?? []) {
+      if ((event?.turn_id ?? '') !== turnId) continue;
+      if (event.event === 'turn/input') {
+        const text = String(event?.payload?.text ?? '').trim();
+        if (!text) continue;
+        const itemId = getTurnInputItemId({
+          payload: event?.payload,
+          requestId: event?.request_id ?? '',
+          turnId,
+          sessionId,
+          seq: event?.seq ?? items.length,
+        });
+        items.push({
+          type: 'userMessage',
+          id: itemId,
+          content: [{ type: 'text', text }],
+        });
+        continue;
+      }
+
+      if (event.event !== 'item/completed') continue;
+      const item = event?.payload?.item;
+      if (!item?.type) continue;
+      if (item.type !== 'userMessage' && item.type !== 'agentMessage' && item.type !== 'fileChange') continue;
+      items.push({
+        ...item,
+        id: item.id ?? `stored_item_${event.seq ?? items.length}`,
+      });
+    }
+
+    if (items.length === 0) return null;
+    return {
+      id: turnId,
+      items,
+      itemsView: 'full',
+      status: this.#storedTurnStatus(sessionId, turnId),
+      error: null,
+      startedAt: null,
+      completedAt: null,
+      durationMs: null,
+    };
+  }
+
+  #storedTurnStatus(sessionId, turnId) {
+    const session = this.store.getSession(sessionId);
+    let status = null;
+    for (const event of session?.events ?? []) {
+      if ((event?.turn_id ?? '') !== turnId) continue;
+      if (event.event === 'turn/started') {
+        status = 'inProgress';
+      } else if (event.event === 'turn/completed') {
+        status = event?.payload?.status ?? event?.payload?.turn?.status ?? 'completed';
+      }
+    }
+    return status;
+  }
+
+  #turnHasCompletedAssistantEvent(sessionId, turnId) {
+    const session = this.store.getSession(sessionId);
+    return (session?.events ?? []).some((event) => (
+      (event?.turn_id ?? '') === turnId
+      && event?.event === 'item/completed'
+      && event?.payload?.item?.type === 'agentMessage'
+    ));
+  }
+
+  #turnRequiresAuthoritativeItems(sessionId, turnId) {
+    const session = this.store.getSession(sessionId);
+    return (session?.events ?? []).some((event) => (
+      (event?.turn_id ?? '') === turnId
+      && (
+        (event?.event === 'item/completed' && event?.payload?.item?.type === 'agentMessage')
+        || event?.event === 'item/agentMessage/delta'
+      )
+    ));
+  }
+
+  #isCompletedTurn(turn) {
+    const status = turn?.status?.type ?? turn?.status ?? '';
+    return status === 'completed' || status === 'failed' || status === 'interrupted' || Boolean(turn?.completedAt);
   }
 
   #sortTurnsForRendering(turns) {

@@ -80,7 +80,7 @@ internal fun MainActivity.handleEvent(message: JSONObject) {
                 if (syncInFlight) {
                     sessionContentDirty = true
                 } else {
-                    requestSessionContent(sessionId)
+                    requestSessionRefresh(sessionId)
                 }
             }
             return

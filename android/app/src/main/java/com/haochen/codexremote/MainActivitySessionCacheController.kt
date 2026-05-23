@@ -57,6 +57,7 @@ internal fun MainActivity.applyCachedSessionContent(sessionId: String): Boolean 
     payload.optJSONObject("session")?.let(SessionInfo::fromSession)?.let(::upsertSessionFromCache)
     sessionContentCacheSignatures[sessionId] = buildSessionContentCacheSignature(payload)
     applySessionContentSnapshot(JSONObject(payload.toString()))
+    updateSessionSyncCursor(payload)
     updateLiveTurnStatus(null)
     return true
 }

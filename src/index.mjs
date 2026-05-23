@@ -12,6 +12,7 @@ function parseArgs(argv) {
     listen: '127.0.0.1:8787',
     state: path.join(process.cwd(), 'data', 'bridge-state.json'),
     tokenFile: path.join(process.cwd(), 'data', 'bridge-token.txt'),
+    syncLog: null,
     codexBin: 'codex',
     codexArgs: [],
     codexConfigs: [],
@@ -23,6 +24,7 @@ function parseArgs(argv) {
     else if (arg === '--listen') out.listen = argv[++i];
     else if (arg === '--state') out.state = argv[++i];
     else if (arg === '--token-file') out.tokenFile = argv[++i];
+    else if (arg === '--sync-log') out.syncLog = argv[++i];
     else if (arg === '--codex-bin') out.codexBin = argv[++i];
     else if (arg === '--codex-arg') out.codexArgs.push(argv[++i]);
     else if (arg === '--codex-config') out.codexConfigs.push(argv[++i]);
@@ -67,6 +69,7 @@ Options:
   --listen HOST:PORT
   --state PATH
   --token-file PATH
+  --sync-log PATH        enable sync debug logging to a file
   --codex-bin PATH
   --codex-arg VALUE      repeatable
   --codex-config KEY=VALUE repeatable
@@ -80,13 +83,16 @@ Options:
   const backend = args.backend === 'codex'
     ? new CodexBackend({ codexBin: args.codexBin, codexArgs: args.codexArgs, codexConfigs: args.codexConfigs })
     : new MockBackend();
-  const bridge = new BridgeServer({ backend, store, host, port, token });
+  const bridge = new BridgeServer({ backend, store, host, port, token, syncLogPath: args.syncLog });
 
   await bridge.start();
   const address = bridge.address();
   console.log(`Codex bridge ready on ${address.host}:${address.port}`);
   console.log(`Token file: ${args.tokenFile}`);
   console.log(`State file: ${args.state}`);
+  if (args.syncLog) {
+    console.log(`Sync log: ${args.syncLog}`);
+  }
 }
 
 main().catch((error) => {

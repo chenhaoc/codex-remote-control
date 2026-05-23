@@ -279,6 +279,7 @@ internal fun MainActivity.RemoteApp() {
                 SessionInfoSheet(
                     state = state,
                     onDismiss = { sessionInfoSheetState = null },
+                    onRebuildHistory = { rebuildActiveSessionHistory() },
                     onSwitchToFullAccess = { switchActiveSessionToFullAccess() },
                 )
             }

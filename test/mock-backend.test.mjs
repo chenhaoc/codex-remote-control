@@ -560,12 +560,13 @@ test('bridge broadcasts stored seq values and backfills turn ids for synced user
   ws.send(JSON.stringify({ id: '3', type: 'session.sync', payload: { session_id: sessionId, since_seq: 0 } }));
   await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '3'));
   const syncResponse = messages.find((m) => m.type === 'response' && m.id === '3');
-  const userInputs = syncResponse.payload.events.filter((event) => event.event === 'turn/input' && event.payload?.text === '继续');
+  const userInputs = syncResponse.payload.entries.filter((entry) => entry.item?.type === 'userMessage' && entry.item.content?.[0]?.text === '继续');
   assert.equal(userInputs.length, 1);
   assert.equal(userInputs[0].turn_id, 'turn_live_1');
-  assert.equal(userInputs[0].payload.itemId, 'input_2');
-  assert.equal(userInputs[0].payload.item_id, 'input_2');
-  assert.ok(syncResponse.payload.events.some((event) => event.event === 'item/completed' && event.payload.item.id === 'item_agent_live_1'));
+  assert.equal(userInputs[0].item.id, 'input_2');
+  assert.deepEqual(syncResponse.payload.changed_turn_ids, ['turn_live_1']);
+  assert.equal(syncResponse.payload.needs_full_sync, false);
+  assert.ok(syncResponse.payload.entries.some((entry) => entry.item?.type === 'agentMessage' && entry.item.id === 'item_agent_live_1'));
 
   ws.send(JSON.stringify({ id: '4', type: 'session.content', payload: { session_id: sessionId } }));
   await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '4'));
@@ -706,12 +707,12 @@ test('bridge resumes notLoaded threads before send and hydrates history', async 
   assert.equal(sendResponse.ok, true);
   assert.equal(backend.resumeCalls, 1);
 
-  ws.send(JSON.stringify({ id: '3', type: 'session.sync', payload: { session_id: sessionId, since_seq: 0 } }));
+  ws.send(JSON.stringify({ id: '3', type: 'session.content', payload: { session_id: sessionId } }));
   await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '3'));
-  const syncResponse = messages.find((m) => m.type === 'response' && m.id === '3');
-  assert.equal(syncResponse.ok, true);
-  assert.ok(syncResponse.payload.events.some((event) => event.event === 'turn/input' && event.payload.text === '旧消息'));
-  assert.ok(syncResponse.payload.events.some((event) => event.event === 'item/completed' && event.payload.item.id === 'item_agent' && event.payload.item.text === '旧回复'));
+  const contentResponse = messages.find((m) => m.type === 'response' && m.id === '3');
+  assert.equal(contentResponse.ok, true);
+  assert.ok(contentResponse.payload.entries.some((entry) => entry.item?.type === 'userMessage' && entry.item.content?.[0]?.text === '旧消息'));
+  assert.ok(contentResponse.payload.entries.some((entry) => entry.item?.type === 'agentMessage' && entry.item.id === 'item_agent' && entry.item.text === '旧回复'));
 
   ws.close();
   await once(ws, 'close');
@@ -889,7 +890,7 @@ test('session content deduplicates stored user messages when both turn input and
   await fs.rm(dir, { recursive: true, force: true });
 });
 
-test('bridge keeps stored assistant deltas instead of replacing them with hydrated summaries', async () => {
+test('session sync does not expose stored assistant deltas as final entries', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-stored-test-'));
   const rolloutPath = path.join(dir, 'stored-thread.jsonl');
   await fs.writeFile(rolloutPath, '', 'utf8');
@@ -1001,10 +1002,9 @@ test('bridge keeps stored assistant deltas instead of replacing them with hydrat
 
   const syncResponse = messages.find((m) => m.type === 'response' && m.id === '2');
   assert.equal(syncResponse.ok, true);
-  const assistantDelta = syncResponse.payload.events.find((event) => event.event === 'item/agentMessage/delta');
-  assert.equal(assistantDelta.payload.delta, '第一段');
-  assert.notEqual(assistantDelta.payload.delta, '折叠后的摘要');
-  assert.ok(!syncResponse.payload.events.some((event) => event.event === 'item/completed' && event.payload.item?.text === '折叠后的摘要'));
+  assert.equal(syncResponse.payload.needs_full_sync, true);
+  assert.deepEqual(syncResponse.payload.entries, []);
+  assert.match(syncResponse.payload.fallback_reason, /missing final agentMessage/);
 
   ws.close();
   await once(ws, 'close');
@@ -1112,14 +1112,14 @@ test('bridge hydrates full turn items when turn summaries are incomplete', async
   ws.send(JSON.stringify({ id: '1', type: 'session.list', payload: {} }));
   await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
 
-  ws.send(JSON.stringify({ id: '2', type: 'session.sync', payload: { session_id: 'items_thread_1', since_seq: 0 } }));
+  ws.send(JSON.stringify({ id: '2', type: 'session.content', payload: { session_id: 'items_thread_1' } }));
   await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '2'));
 
-  const syncResponse = messages.find((m) => m.type === 'response' && m.id === '2');
-  assert.equal(syncResponse.ok, true);
-  assert.ok(syncResponse.payload.events.some((event) => event.event === 'turn/input' && event.payload.text === '你好'));
-  assert.ok(syncResponse.payload.events.some((event) => event.event === 'item/completed' && event.payload.item.id === 'item_part_1' && event.payload.item.text === '第一段'));
-  assert.ok(syncResponse.payload.events.some((event) => event.event === 'item/completed' && event.payload.item.id === 'item_part_2' && event.payload.item.text === '第二段'));
+  const contentResponse = messages.find((m) => m.type === 'response' && m.id === '2');
+  assert.equal(contentResponse.ok, true);
+  assert.ok(contentResponse.payload.entries.some((entry) => entry.item?.type === 'userMessage' && entry.item.content?.[0]?.text === '你好'));
+  assert.ok(contentResponse.payload.entries.some((entry) => entry.item?.type === 'agentMessage' && entry.item.id === 'item_part_1' && entry.item.text === '第一段'));
+  assert.ok(contentResponse.payload.entries.some((entry) => entry.item?.type === 'agentMessage' && entry.item.id === 'item_part_2' && entry.item.text === '第二段'));
 
   ws.close();
   await once(ws, 'close');
@@ -1127,7 +1127,7 @@ test('bridge hydrates full turn items when turn summaries are incomplete', async
   await fs.rm(dir, { recursive: true, force: true });
 });
 
-test('session sync returns incremental events with last_seq after refresh', async () => {
+test('session sync returns incremental entries with last_seq after refresh', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-incremental-test-'));
   const store = new StateStore(path.join(dir, 'state.json'));
   const backend = new MockBackend();
@@ -1156,13 +1156,17 @@ test('session sync returns incremental events with last_seq after refresh', asyn
   const fullSync = messages.find((m) => m.type === 'response' && m.id === '3');
   assert.equal(fullSync.ok, true);
   assert.ok(fullSync.payload.last_seq > 0);
-  assert.ok(fullSync.payload.events.length > 0);
+  assert.ok(Array.isArray(fullSync.payload.entries));
+  assert.equal(fullSync.payload.needs_full_sync, false);
+  assert.ok(fullSync.payload.changed_turn_ids.length > 0);
 
   ws.send(JSON.stringify({ id: '4', type: 'session.sync', payload: { session_id: sessionId, since_seq: fullSync.payload.last_seq } }));
   await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '4'));
   const incrementalSync = messages.find((m) => m.type === 'response' && m.id === '4');
   assert.equal(incrementalSync.ok, true);
-  assert.deepEqual(incrementalSync.payload.events, []);
+  assert.deepEqual(incrementalSync.payload.entries, []);
+  assert.deepEqual(incrementalSync.payload.changed_turn_ids, []);
+  assert.equal(incrementalSync.payload.needs_full_sync, false);
   assert.equal(incrementalSync.payload.last_seq, fullSync.payload.last_seq);
 
   ws.close();
@@ -1315,18 +1319,521 @@ test('incremental session sync does not surface hydrated events from older turns
   await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
   const incrementalSync = messages.find((m) => m.type === 'response' && m.id === '1');
   assert.equal(incrementalSync.ok, true);
-  assert.deepEqual(incrementalSync.payload.events, []);
+  assert.deepEqual(incrementalSync.payload.entries, []);
+  assert.deepEqual(incrementalSync.payload.changed_turn_ids, []);
+  assert.equal(incrementalSync.payload.needs_full_sync, false);
   assert.equal(incrementalSync.payload.last_seq, store.getLastSeq('history_thread_1'));
 
-  ws.send(JSON.stringify({ id: '2', type: 'session.sync', payload: { session_id: 'history_thread_1', since_seq: 0 } }));
+  ws.send(JSON.stringify({ id: '2', type: 'session.content', payload: { session_id: 'history_thread_1' } }));
   await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '2'));
   const fullSync = messages.find((m) => m.type === 'response' && m.id === '2');
   assert.equal(fullSync.ok, true);
-  assert.ok(fullSync.payload.events.some((event) => event.event === 'turn/input' && event.payload.text === '旧问题'));
+  assert.ok(fullSync.payload.entries.some((entry) => entry.item?.type === 'userMessage' && entry.item.content?.[0]?.text === '旧问题'));
   assert.equal(
-    fullSync.payload.events.filter((event) => event.event === 'item/completed' && event.payload.item.id === 'old_agent_1' && event.payload.item.text === '旧回答').length,
+    fullSync.payload.entries.filter((entry) => entry.item?.type === 'agentMessage' && entry.item.id === 'old_agent_1' && entry.item.text === '旧回答').length,
     1,
   );
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('session sync hydrates tail turns that only exist in authoritative snapshot', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-snapshot-tail-test-'));
+
+  class SnapshotTailBackend extends EventEmitter {
+    async start() {}
+
+    async stop() {}
+
+    async readThread() {
+      return { thread: this.#thread() };
+    }
+
+    #thread() {
+      return {
+        id: 'tail_thread_1',
+        sessionId: 'tail_thread_1',
+        forkedFromId: null,
+        preview: '尾部增量',
+        ephemeral: false,
+        model: 'gpt-5',
+        modelProvider: 'custom',
+        createdAt: 1,
+        updatedAt: 4,
+        status: { type: 'idle' },
+        path: null,
+        cwd: '/tmp',
+        cliVersion: 'mock',
+        source: 'app-server',
+        threadSource: null,
+        agentNickname: null,
+        agentRole: null,
+        gitInfo: null,
+        name: '尾部增量',
+        turns: [
+          {
+            id: 'snapshot_only_old_turn',
+            items: [
+              {
+                type: 'userMessage',
+                id: 'snapshot_only_old_user',
+                content: [{ type: 'text', text: '只在快照里的旧问题', text_elements: [] }],
+              },
+              {
+                type: 'agentMessage',
+                id: 'snapshot_only_old_agent',
+                text: '只在快照里的旧回答',
+                phase: null,
+                memoryCitation: null,
+              },
+            ],
+            itemsView: 'full',
+            status: 'completed',
+            error: null,
+            startedAt: 0.1,
+            completedAt: 0.2,
+            durationMs: 1,
+          },
+          {
+            id: 'known_turn_1',
+            items: [
+              {
+                type: 'userMessage',
+                id: 'known_user_1',
+                content: [{ type: 'text', text: '已同步问题', text_elements: [] }],
+              },
+              {
+                type: 'agentMessage',
+                id: 'known_agent_1',
+                text: '已同步回答',
+                phase: null,
+                memoryCitation: null,
+              },
+            ],
+            itemsView: 'full',
+            status: 'completed',
+            error: null,
+            startedAt: 1,
+            completedAt: 2,
+            durationMs: 1,
+          },
+          {
+            id: 'tail_turn_1',
+            items: [
+              {
+                type: 'userMessage',
+                id: 'tail_user_1',
+                content: [{ type: 'text', text: '桌面侧新问题', text_elements: [] }],
+              },
+              {
+                type: 'agentMessage',
+                id: 'tail_agent_1',
+                text: '桌面侧新回答',
+                phase: null,
+                memoryCitation: null,
+              },
+            ],
+            itemsView: 'full',
+            status: 'completed',
+            error: null,
+            startedAt: 3,
+            completedAt: 4,
+            durationMs: 1,
+          },
+        ],
+      };
+    }
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  await store.load();
+  await store.upsertSession({
+    session_id: 'tail_thread_1',
+    thread_id: 'tail_thread_1',
+    title: '尾部增量',
+    cwd: '/tmp',
+    model: 'gpt-5',
+    backend: 'mock',
+    preview: '尾部增量',
+    active: true,
+    thread: {
+      id: 'tail_thread_1',
+      sessionId: 'tail_thread_1',
+      status: { type: 'idle' },
+      turns: [],
+    },
+  });
+  await store.appendEvent('tail_thread_1', {
+    type: 'event',
+    event: 'turn/started',
+    session_id: 'tail_thread_1',
+    thread_id: 'tail_thread_1',
+    turn_id: 'known_turn_1',
+    payload: { turn: { id: 'known_turn_1' } },
+  });
+  await store.appendEvent('tail_thread_1', {
+    type: 'event',
+    event: 'turn/input',
+    session_id: 'tail_thread_1',
+    thread_id: 'tail_thread_1',
+    turn_id: 'known_turn_1',
+    payload: {
+      itemId: 'known_user_1',
+      item_id: 'known_user_1',
+      text: '已同步问题',
+      input: [{ type: 'text', text: '已同步问题', text_elements: [] }],
+    },
+  });
+  await store.appendEvent('tail_thread_1', {
+    type: 'event',
+    event: 'item/completed',
+    session_id: 'tail_thread_1',
+    thread_id: 'tail_thread_1',
+    turn_id: 'known_turn_1',
+    payload: {
+      item: {
+        type: 'agentMessage',
+        id: 'known_agent_1',
+        text: '已同步回答',
+        phase: null,
+        memoryCitation: null,
+      },
+    },
+  });
+  const cursorEvent = await store.appendEvent('tail_thread_1', {
+    type: 'event',
+    event: 'turn/completed',
+    session_id: 'tail_thread_1',
+    thread_id: 'tail_thread_1',
+    turn_id: 'known_turn_1',
+    payload: {
+      status: 'completed',
+      turn: { id: 'known_turn_1', status: 'completed' },
+    },
+  });
+
+  const bridge = new BridgeServer({ backend: new SnapshotTailBackend(), store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'session.sync', payload: { session_id: 'tail_thread_1', since_seq: cursorEvent.seq } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+  const sync = messages.find((m) => m.type === 'response' && m.id === '1');
+  assert.equal(sync.ok, true);
+  assert.equal(sync.payload.needs_full_sync, false);
+  assert.ok(sync.payload.last_seq > cursorEvent.seq);
+  assert.deepEqual(sync.payload.changed_turn_ids, ['tail_turn_1']);
+  assert.ok(!sync.payload.entries.some((entry) => entry.turn_id === 'snapshot_only_old_turn'));
+  assert.ok(sync.payload.entries.some((entry) => entry.turn_id === 'tail_turn_1' && entry.item?.type === 'userMessage' && entry.item.content?.[0]?.text === '桌面侧新问题'));
+  assert.ok(sync.payload.entries.some((entry) => entry.turn_id === 'tail_turn_1' && entry.item?.type === 'agentMessage' && entry.item.text === '桌面侧新回答'));
+  assert.ok(sync.payload.entries.some((entry) => entry.turn_id === 'tail_turn_1' && entry.type === 'turn_status' && entry.status === 'completed'));
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('session sync hydrates assistant items added later to the known tail turn', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-tail-followup-test-'));
+
+  class TailFollowupBackend extends EventEmitter {
+    includeAssistant = false;
+
+    async start() {}
+
+    async stop() {}
+
+    async readThread() {
+      return { thread: this.#thread() };
+    }
+
+    #thread() {
+      const tailItems = [
+        {
+          type: 'userMessage',
+          id: 'tail_user_1',
+          content: [{ type: 'text', text: '先出现的问题', text_elements: [] }],
+        },
+      ];
+      if (this.includeAssistant) {
+        tailItems.push({
+          type: 'agentMessage',
+          id: 'tail_agent_1',
+          text: '稍后出现的回答',
+          phase: null,
+          memoryCitation: null,
+        });
+      }
+      return {
+        id: 'tail_followup_thread',
+        sessionId: 'tail_followup_thread',
+        forkedFromId: null,
+        preview: '尾部补齐',
+        ephemeral: false,
+        model: 'gpt-5',
+        modelProvider: 'custom',
+        createdAt: 1,
+        updatedAt: 4,
+        status: { type: 'idle' },
+        path: null,
+        cwd: '/tmp',
+        cliVersion: 'mock',
+        source: 'app-server',
+        threadSource: null,
+        agentNickname: null,
+        agentRole: null,
+        gitInfo: null,
+        name: '尾部补齐',
+        turns: [
+          {
+            id: 'known_turn_1',
+            items: [
+              {
+                type: 'userMessage',
+                id: 'known_user_1',
+                content: [{ type: 'text', text: '已同步问题', text_elements: [] }],
+              },
+              {
+                type: 'agentMessage',
+                id: 'known_agent_1',
+                text: '已同步回答',
+                phase: null,
+                memoryCitation: null,
+              },
+            ],
+            itemsView: 'full',
+            status: 'completed',
+            error: null,
+            startedAt: 1,
+            completedAt: 2,
+            durationMs: 1,
+          },
+          {
+            id: 'tail_turn_1',
+            items: tailItems,
+            itemsView: 'full',
+            status: 'interrupted',
+            error: null,
+            startedAt: 3,
+            completedAt: 4,
+            durationMs: 1,
+          },
+        ],
+      };
+    }
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  await store.load();
+  await store.upsertSession({
+    session_id: 'tail_followup_thread',
+    thread_id: 'tail_followup_thread',
+    title: '尾部补齐',
+    cwd: '/tmp',
+    model: 'gpt-5',
+    backend: 'mock',
+    preview: '尾部补齐',
+    active: true,
+    thread: {
+      id: 'tail_followup_thread',
+      sessionId: 'tail_followup_thread',
+      status: { type: 'idle' },
+      turns: [],
+    },
+  });
+  await store.appendEvent('tail_followup_thread', {
+    type: 'event',
+    event: 'turn/started',
+    session_id: 'tail_followup_thread',
+    thread_id: 'tail_followup_thread',
+    turn_id: 'known_turn_1',
+    payload: { turn: { id: 'known_turn_1' } },
+  });
+  await store.appendEvent('tail_followup_thread', {
+    type: 'event',
+    event: 'turn/input',
+    session_id: 'tail_followup_thread',
+    thread_id: 'tail_followup_thread',
+    turn_id: 'known_turn_1',
+    payload: {
+      itemId: 'known_user_1',
+      item_id: 'known_user_1',
+      text: '已同步问题',
+      input: [{ type: 'text', text: '已同步问题', text_elements: [] }],
+    },
+  });
+  await store.appendEvent('tail_followup_thread', {
+    type: 'event',
+    event: 'item/completed',
+    session_id: 'tail_followup_thread',
+    thread_id: 'tail_followup_thread',
+    turn_id: 'known_turn_1',
+    payload: {
+      item: {
+        type: 'agentMessage',
+        id: 'known_agent_1',
+        text: '已同步回答',
+        phase: null,
+        memoryCitation: null,
+      },
+    },
+  });
+  const cursorEvent = await store.appendEvent('tail_followup_thread', {
+    type: 'event',
+    event: 'turn/completed',
+    session_id: 'tail_followup_thread',
+    thread_id: 'tail_followup_thread',
+    turn_id: 'known_turn_1',
+    payload: {
+      status: 'completed',
+      turn: { id: 'known_turn_1', status: 'completed' },
+    },
+  });
+
+  const backend = new TailFollowupBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'session.sync', payload: { session_id: 'tail_followup_thread', since_seq: cursorEvent.seq } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+  const firstSync = messages.find((m) => m.type === 'response' && m.id === '1');
+  assert.equal(firstSync.ok, true);
+  assert.deepEqual(firstSync.payload.changed_turn_ids, ['tail_turn_1']);
+  assert.ok(firstSync.payload.entries.some((entry) => entry.turn_id === 'tail_turn_1' && entry.item?.type === 'userMessage'));
+  assert.ok(!firstSync.payload.entries.some((entry) => entry.turn_id === 'tail_turn_1' && entry.item?.type === 'agentMessage'));
+
+  backend.includeAssistant = true;
+  ws.send(JSON.stringify({ id: '2', type: 'session.sync', payload: { session_id: 'tail_followup_thread', since_seq: firstSync.payload.last_seq } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '2'));
+  const secondSync = messages.find((m) => m.type === 'response' && m.id === '2');
+  assert.equal(secondSync.ok, true);
+  assert.equal(secondSync.payload.needs_full_sync, false);
+  assert.ok(secondSync.payload.last_seq > firstSync.payload.last_seq);
+  assert.deepEqual(secondSync.payload.changed_turn_ids, ['tail_turn_1']);
+  assert.ok(secondSync.payload.entries.some((entry) => entry.turn_id === 'tail_turn_1' && entry.item?.type === 'agentMessage' && entry.item.text === '稍后出现的回答'));
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('session sync falls back when final assistant item is not authoritative', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-sync-fallback-test-'));
+  const store = new StateStore(path.join(dir, 'state.json'));
+  await store.load();
+  await store.upsertSession({
+    session_id: 'fallback_thread_1',
+    thread_id: 'fallback_thread_1',
+    title: '缺少最终回复',
+    cwd: '/tmp',
+    model: 'gpt-5',
+    backend: 'mock',
+    preview: '缺少最终回复',
+    active: true,
+    thread: {
+      id: 'fallback_thread_1',
+      sessionId: 'fallback_thread_1',
+      status: { type: 'idle' },
+      turns: [],
+    },
+  });
+  await store.appendEvent('fallback_thread_1', {
+    type: 'event',
+    event: 'turn/started',
+    session_id: 'fallback_thread_1',
+    thread_id: 'fallback_thread_1',
+    turn_id: 'fallback_turn_1',
+    payload: {
+      turn: { id: 'fallback_turn_1' },
+    },
+  });
+  await store.appendEvent('fallback_thread_1', {
+    type: 'event',
+    event: 'item/completed',
+    session_id: 'fallback_thread_1',
+    thread_id: 'fallback_thread_1',
+    turn_id: 'fallback_turn_1',
+    payload: {
+      item: {
+        type: 'agentMessage',
+        id: 'fallback_agent_1',
+        text: '不能从 stored event 合成最终回复',
+      },
+    },
+  });
+
+  class MissingFinalBackend extends EventEmitter {
+    async start() {}
+
+    async stop() {}
+
+    async readThread() {
+      return {
+        thread: {
+          id: 'fallback_thread_1',
+          sessionId: 'fallback_thread_1',
+          status: { type: 'idle' },
+          turns: [{
+            id: 'fallback_turn_1',
+            items: [{
+              type: 'userMessage',
+              id: 'fallback_user_1',
+              content: [{ type: 'text', text: '问题', text_elements: [] }],
+            }],
+            itemsView: 'full',
+            status: 'completed',
+            error: null,
+            startedAt: 1,
+            completedAt: 2,
+            durationMs: 1,
+          }],
+        },
+      };
+    }
+  }
+
+  const backend = new MissingFinalBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'session.sync', payload: { session_id: 'fallback_thread_1', since_seq: 0 } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+  const syncResponse = messages.find((m) => m.type === 'response' && m.id === '1');
+  assert.equal(syncResponse.ok, true);
+  assert.equal(syncResponse.payload.needs_full_sync, true);
+  assert.match(syncResponse.payload.fallback_reason, /missing final agentMessage/);
+  assert.ok(!syncResponse.payload.entries.some((entry) => entry.item?.type === 'agentMessage'));
 
   ws.close();
   await once(ws, 'close');
@@ -1460,14 +1967,14 @@ test('session sync merges hydrated items for a turn even when stored events alre
   ws.send(JSON.stringify({ id: '1', type: 'session.list', payload: {} }));
   await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
 
-  ws.send(JSON.stringify({ id: '2', type: 'session.sync', payload: { session_id: 'merge_thread_1', since_seq: 0 } }));
+  ws.send(JSON.stringify({ id: '2', type: 'session.content', payload: { session_id: 'merge_thread_1' } }));
   await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '2'));
 
-  const syncResponse = messages.find((m) => m.type === 'response' && m.id === '2');
-  assert.equal(syncResponse.ok, true);
-  assert.ok(syncResponse.payload.events.some((event) => event.event === 'turn/input' && event.payload.text === '历史问题'));
-  assert.ok(syncResponse.payload.events.some((event) => event.event === 'item/completed' && event.payload.item.id === 'merge_part_1' && event.payload.item.text === '第一段'));
-  assert.ok(syncResponse.payload.events.some((event) => event.event === 'item/completed' && event.payload.item.id === 'merge_part_2' && event.payload.item.text === '第二段'));
+  const contentResponse = messages.find((m) => m.type === 'response' && m.id === '2');
+  assert.equal(contentResponse.ok, true);
+  assert.ok(contentResponse.payload.entries.some((entry) => entry.item?.type === 'userMessage' && entry.item.content?.[0]?.text === '历史问题'));
+  assert.ok(contentResponse.payload.entries.some((entry) => entry.item?.type === 'agentMessage' && entry.item.id === 'merge_part_1' && entry.item.text === '第一段'));
+  assert.ok(contentResponse.payload.entries.some((entry) => entry.item?.type === 'agentMessage' && entry.item.id === 'merge_part_2' && entry.item.text === '第二段'));
 
   ws.close();
   await once(ws, 'close');
@@ -1609,13 +2116,15 @@ test('session content returns final thread items and pending approvals in stable
   assert.equal(contentResponse.ok, true);
   assert.deepEqual(
     contentResponse.payload.entries.map((entry) => entry.item?.type ?? entry.type),
-    ['userMessage', 'agentMessage', 'userMessage', 'agentMessage', 'fileChange'],
+    ['userMessage', 'agentMessage', 'turn_status', 'userMessage', 'agentMessage', 'fileChange', 'turn_status'],
   );
   assert.equal(contentResponse.payload.entries[0].item.id, 'content_user_0');
   assert.equal(contentResponse.payload.entries[1].item.id, 'content_agent_0');
-  assert.equal(contentResponse.payload.entries[2].item.id, 'content_user_1');
-  assert.equal(contentResponse.payload.entries[3].item.id, 'content_agent_1');
-  assert.equal(contentResponse.payload.entries[4].item.id, 'content_file_1');
+  assert.equal(contentResponse.payload.entries[2].status, 'completed');
+  assert.equal(contentResponse.payload.entries[3].item.id, 'content_user_1');
+  assert.equal(contentResponse.payload.entries[4].item.id, 'content_agent_1');
+  assert.equal(contentResponse.payload.entries[5].item.id, 'content_file_1');
+  assert.equal(contentResponse.payload.entries[6].status, 'completed');
   assert.equal(contentResponse.payload.pending_approvals.length, 1);
   assert.equal(contentResponse.payload.pending_approvals[0].request_id, 'approval_1');
   assert.equal(store.getSession('content_thread_1').updatedAt, '1970-01-01T00:00:11.000Z');
@@ -1712,6 +2221,112 @@ test('session content reports active stored turns', async () => {
   assert.equal(contentResponse.payload.active_turns[0].last_item_type, 'agentMessage');
   assert.equal(contentResponse.payload.active_turns[0].output_chars, 3);
   assert.equal(contentResponse.payload.active_turns[0].detail, null);
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('session content clears active turns when authoritative snapshot has terminal status', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-terminal-active-turn-test-'));
+
+  class CompletedTurnBackend extends EventEmitter {
+    async start() {}
+
+    async stop() {}
+
+    async readThread() {
+      return {
+        thread: {
+          id: 'terminal_active_thread',
+          sessionId: 'terminal_active_thread',
+          status: { type: 'idle' },
+          turns: [{
+            id: 'active_turn_1',
+            items: [
+              {
+                type: 'userMessage',
+                id: 'active_user_1',
+                content: [{ type: 'text', text: '远端问题', text_elements: [] }],
+              },
+              {
+                type: 'agentMessage',
+                id: 'active_agent_1',
+                text: '已完成',
+                phase: null,
+                memoryCitation: null,
+              },
+            ],
+            itemsView: 'full',
+            status: 'completed',
+            error: null,
+            startedAt: 1,
+            completedAt: 2,
+            durationMs: 1,
+          }],
+        },
+      };
+    }
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  await store.load();
+  await store.upsertSession({
+    session_id: 'terminal_active_thread',
+    thread_id: 'terminal_active_thread',
+    title: 'Terminal active turn',
+    cwd: '/tmp',
+    model: 'gpt-5',
+    backend: 'mock',
+    preview: 'Terminal active turn',
+    active: true,
+    thread: {
+      id: 'terminal_active_thread',
+      sessionId: 'terminal_active_thread',
+      status: { type: 'idle' },
+      turns: [],
+    },
+  });
+  await store.appendEvent('terminal_active_thread', {
+    type: 'event',
+    event: 'turn/started',
+    session_id: 'terminal_active_thread',
+    thread_id: 'terminal_active_thread',
+    turn_id: 'active_turn_1',
+    payload: { turn: { id: 'active_turn_1' } },
+  });
+  await store.appendEvent('terminal_active_thread', {
+    type: 'event',
+    event: 'item/agentMessage/delta',
+    session_id: 'terminal_active_thread',
+    thread_id: 'terminal_active_thread',
+    turn_id: 'active_turn_1',
+    payload: {
+      itemId: 'active_agent_1',
+      delta: '已',
+    },
+  });
+
+  const bridge = new BridgeServer({ backend: new CompletedTurnBackend(), store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'session.content', payload: { session_id: 'terminal_active_thread' } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+
+  const contentResponse = messages.find((m) => m.type === 'response' && m.id === '1');
+  assert.equal(contentResponse.ok, true);
+  assert.equal(contentResponse.payload.active_turns.length, 0);
+  assert.ok(contentResponse.payload.entries.some((entry) => entry.turn_id === 'active_turn_1' && entry.type === 'turn_status' && entry.status === 'completed'));
 
   ws.close();
   await once(ws, 'close');

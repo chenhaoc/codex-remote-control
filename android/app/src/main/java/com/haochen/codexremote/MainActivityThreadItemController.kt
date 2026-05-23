@@ -12,7 +12,7 @@ internal fun MainActivity.handleThreadItemEvent(eventName: String, payload: JSON
                 if (eventName == "item/completed") {
                     discardBufferedAssistantText(turnKey, itemKey)
                     activeSessionId?.takeIf { it.isNotBlank() }?.let { sessionId ->
-                        requestSessionContent(sessionId)
+                        requestSessionRefresh(sessionId)
                     }
                 }
             }

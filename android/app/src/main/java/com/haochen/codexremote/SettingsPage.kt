@@ -109,6 +109,31 @@ internal fun MainActivity.SettingsPage() {
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 SectionTitle("同步")
+                Surface(
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
+                    color = uiSurfaceAlt,
+                    border = BorderStroke(1.dp, uiBorder),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Label("增量同步")
+                            BodyText("开启后只同步有变化的回合；关闭后每次轮询拉取完整快照。")
+                        }
+                        Switch(
+                            checked = sessionIncrementalSyncEnabled,
+                            onCheckedChange = { updateSessionIncrementalSyncEnabled(it) },
+                        )
+                    }
+                }
                 SelectionMenuField(
                     label = "会话同步间隔",
                     selectedLabel = sessionSyncIntervalLabel(),

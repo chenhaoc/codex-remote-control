@@ -33,6 +33,7 @@ internal const val KEY_AUTO_RECONNECT = "auto_reconnect"
 internal const val KEY_AUTO_RECONNECT_MAX_ATTEMPTS = "auto_reconnect_max_attempts"
 internal const val KEY_STARTUP_PAGE = "startup_page"
 internal const val KEY_SESSION_SYNC_INTERVAL_SECONDS = "session_sync_interval_seconds"
+internal const val KEY_SESSION_INCREMENTAL_SYNC = "session_incremental_sync"
 internal const val MAX_CONNECTION_HISTORY = 8
 internal const val CODE_BROWSER_FILE_CACHE_SIZE = 24
 internal const val CODE_BROWSER_RENDER_CACHE_SIZE = 16
@@ -105,6 +106,7 @@ class MainActivity : ComponentActivity() {
     internal var disconnectRequested = false
     internal var bootSyncRequested = false
     internal var lastSyncedSeq = 0
+    internal var sessionSyncCursorReady = false
     internal var syncInFlight = false
     internal var sessionContentDirty = false
     internal var lastSnapshotSignature: String? = null
@@ -113,6 +115,7 @@ class MainActivity : ComponentActivity() {
     internal var autoReconnectMaxAttempts by mutableStateOf(0)
     internal var startupPagePreference by mutableStateOf(AppPage.Chat)
     internal var sessionSyncIntervalSeconds by mutableStateOf(DEFAULT_SESSION_SYNC_INTERVAL_SECONDS)
+    internal var sessionIncrementalSyncEnabled by mutableStateOf(true)
     internal var reconnectAttempt = 0
     internal var reconnectScheduled = false
     internal var noticeToast: Toast? = null
@@ -124,7 +127,7 @@ class MainActivity : ComponentActivity() {
                 syncInFlight = false
                 return
             }
-            requestSessionContent(sessionId)
+            requestSessionRefresh(sessionId)
             mainHandler.postDelayed(this, sessionSyncIntervalMs())
         }
     }
@@ -151,6 +154,7 @@ class MainActivity : ComponentActivity() {
         autoReconnectMaxAttempts = loadAutoReconnectMaxAttempts()
         startupPagePreference = loadStartupPagePreference()
         sessionSyncIntervalSeconds = loadSessionSyncIntervalSeconds()
+        sessionIncrementalSyncEnabled = loadSessionIncrementalSyncEnabled()
         currentPage = startupPagePreference
         loadLocalSessionCache()
 

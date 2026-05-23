@@ -1,5 +1,6 @@
 package com.haochen.codexremote
 
+import android.util.Log
 import java.util.Locale
 import org.json.JSONObject
 
@@ -180,10 +181,20 @@ internal fun MainActivity.interruptCurrentTurn() {
     }
 
 internal fun MainActivity.requestSessionContent(sessionId: String) {
-        if (sessionId.isBlank()) return
-        if (!ensureConnected()) return
+        if (sessionId.isBlank()) {
+            Log.d(SYNC_LOG_TAG, "session.content skip blank session")
+            return
+        }
+        if (!ensureConnected()) {
+            Log.d(SYNC_LOG_TAG, "session.content skip disconnected sessionId=$sessionId")
+            return
+        }
         if (syncInFlight) {
             sessionContentDirty = true
+            Log.d(
+                SYNC_LOG_TAG,
+                "session.content defer in_flight sessionId=$sessionId lastSyncedSeq=$lastSyncedSeq dirty=$sessionContentDirty",
+            )
             return
         }
         syncInFlight = true
@@ -197,16 +208,30 @@ internal fun MainActivity.requestSessionContent(sessionId: String) {
                 syncInFlight = false
                 if (activeSessionId != requestedSessionId) {
                     sessionContentDirty = false
+                    Log.d(
+                        SYNC_LOG_TAG,
+                        "session.content ignore inactive requested=$requestedSessionId active=$activeSessionId",
+                    )
                     return
                 }
                 val responsePayload = response.optJSONObject("payload")
                 val snapshotItems = buildConversationItemsFromSnapshot(responsePayload)
+                Log.d(
+                    SYNC_LOG_TAG,
+                    "session.content response sessionId=$requestedSessionId last=${responsePayload?.optInt("last_seq", lastSyncedSeq) ?: -1} entries=${responsePayload?.optJSONArray("entries")?.length() ?: 0} items=${snapshotItems.size} conversationBefore=${conversationItems.size}",
+                )
+                logSessionSyncEntries("session.content response entries", responsePayload)
                 responsePayload?.optJSONObject("session")
                     ?.let(SessionInfo::fromSession)
                     ?.let(::upsertSession)
                 applySessionContentSnapshot(responsePayload, snapshotItems)
+                updateSessionSyncCursor(responsePayload)
                 persistLocalSessionContent(requestedSessionId, responsePayload)
                 updateLiveTurnStatusFromSnapshot(responsePayload)
+                Log.d(
+                    SYNC_LOG_TAG,
+                    "session.content applied sessionId=$requestedSessionId conversationItems=${conversationItems.size} pendingApprovals=${pendingApprovals.size}",
+                )
                 flushPendingSessionRefresh(requestedSessionId)
             }
 
@@ -214,31 +239,52 @@ internal fun MainActivity.requestSessionContent(sessionId: String) {
                 syncInFlight = false
                 if (activeSessionId != requestedSessionId) {
                     sessionContentDirty = false
+                    Log.d(
+                        SYNC_LOG_TAG,
+                        "session.content error ignored inactive requested=$requestedSessionId active=$activeSessionId error=$errorText",
+                    )
                     return
                 }
+                Log.d(SYNC_LOG_TAG, "session.content error sessionId=$requestedSessionId error=$errorText")
                 flushPendingSessionRefresh(requestedSessionId)
             }
 
             override fun suppressDefaultErrorUi(): Boolean = true
         })) {
             syncInFlight = false
+            Log.d(SYNC_LOG_TAG, "session.content send_failed sessionId=$requestedSessionId")
         }
     }
 
 internal fun MainActivity.flushPendingSessionRefresh(sessionId: String) {
         if (!sessionContentDirty) return
-        if (!connected || activeSessionId != sessionId) return
+        if (!connected || activeSessionId != sessionId) {
+            Log.d(
+                SYNC_LOG_TAG,
+                "session.refresh skip dirty sessionId=$sessionId connected=$connected active=$activeSessionId",
+            )
+            return
+        }
         sessionContentDirty = false
-        mainHandler.post { requestSessionContent(sessionId) }
+        Log.d(SYNC_LOG_TAG, "session.refresh flush_dirty sessionId=$sessionId lastSyncedSeq=$lastSyncedSeq")
+        mainHandler.post { requestSessionRefresh(sessionId) }
     }
 
 internal fun MainActivity.applySessionContentSnapshot(payload: JSONObject?, snapshotItems: List<ConversationItem>? = null) {
         val resolvedSnapshotItems = snapshotItems ?: buildConversationItemsFromSnapshot(payload)
         val snapshotApprovals = buildPendingApprovalsFromSnapshot(payload)
         if (resolvedSnapshotItems.isEmpty() && snapshotApprovals.isEmpty() && conversationItems.isNotEmpty()) {
+            Log.d(
+                SYNC_LOG_TAG,
+                "session.content apply skip empty_snapshot conversationItems=${conversationItems.size}",
+            )
             return
         }
         if (conversationItems.matchesSnapshot(resolvedSnapshotItems) && pendingApprovals.matchesSnapshot(snapshotApprovals)) {
+            Log.d(
+                SYNC_LOG_TAG,
+                "session.content apply skip unchanged items=${resolvedSnapshotItems.size} approvals=${snapshotApprovals.size}",
+            )
             return
         }
         assistantItemIds.clear()
@@ -251,6 +297,10 @@ internal fun MainActivity.applySessionContentSnapshot(payload: JSONObject?, snap
         conversationItems.clear()
         conversationItems.addAll(resolvedSnapshotItems)
         replacePendingApprovals(snapshotApprovals)
+        Log.d(
+            SYNC_LOG_TAG,
+            "session.content apply replaced items=${conversationItems.size} approvals=${pendingApprovals.size}",
+        )
 
         resolvedSnapshotItems.forEach { item ->
             when (item) {
@@ -358,6 +408,7 @@ internal fun MainActivity.clearConversation() {
         chatRestoreScrollY = null
         codeBrowserState = null
         lastSyncedSeq = 0
+        sessionSyncCursorReady = false
         lastSnapshotSignature = null
         lastSnapshotItemCount = 0
         syncInFlight = false
@@ -583,9 +634,11 @@ internal fun MainActivity.openSessionInfoSheet() {
         sessionInfoSheetState =
             SessionInfoSheetState(
                 title = session.titleLine(),
+                canRebuildHistory = connected,
                 canSwitchToFullAccess = !session.isDangerFullAccess(),
                 rows =
                     buildList {
+                        add("会话 ID" to session.sessionId)
                         add("目录" to session.cwd.ifBlank { "未提供" })
                         add("模型" to session.modelSummary())
                         add("审批策略" to session.approvalPolicy.ifBlank { "未提供" })
@@ -593,9 +646,19 @@ internal fun MainActivity.openSessionInfoSheet() {
                         add("上下文窗口" to session.contextWindowSummary())
                         add("最近 token" to session.lastTokenUsageSummary())
                         add("累计 token" to session.totalTokenUsageSummary())
-                        add("会话 ID" to session.sessionId)
                     },
             )
+    }
+
+internal fun MainActivity.rebuildActiveSessionHistory() {
+        val sessionId = activeSessionId?.takeIf { it.isNotBlank() } ?: return
+        if (!ensureConnected()) return
+        sessionSyncCursorReady = false
+        lastSyncedSeq = 0
+        requestSessionContent(sessionId)
+        sessionInfoSheetState = null
+        currentPage = AppPage.Chat
+        showNotice("正在重建历史记录")
     }
 
 

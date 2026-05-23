@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -291,6 +293,7 @@ internal fun MainActivity.SelectionMenuField(
 internal fun MainActivity.SessionInfoSheet(
     state: SessionInfoSheetState,
     onDismiss: () -> Unit,
+    onRebuildHistory: () -> Unit,
     onSwitchToFullAccess: () -> Unit,
 ) {
     Column(
@@ -322,8 +325,23 @@ internal fun MainActivity.SessionInfoSheet(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            OutlinedButton(onClick = onDismiss) {
-                Text("关闭")
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(
+                    onClick = onRebuildHistory,
+                    enabled = state.canRebuildHistory,
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Refresh,
+                        contentDescription = "重建历史记录",
+                        tint = if (state.canRebuildHistory) uiPrimary else uiMuted,
+                    )
+                }
+                OutlinedButton(onClick = onDismiss) {
+                    Text("关闭")
+                }
             }
         }
 

@@ -7,6 +7,8 @@ PORT="${CODEX_REMOTE_PORT:-8787}"
 BACKEND="${CODEX_REMOTE_BACKEND:-codex}"
 TOKEN_FILE="${CODEX_REMOTE_TOKEN_FILE:-$ROOT_DIR/data/bridge-token.txt}"
 STATE_FILE="${CODEX_REMOTE_STATE_FILE:-$ROOT_DIR/data/bridge-state.json}"
+SYNC_LOG="${CODEX_REMOTE_SYNC_LOG:-0}"
+SYNC_LOG_FILE="${CODEX_REMOTE_SYNC_LOG_FILE:-$ROOT_DIR/data/bridge-sync.log}"
 
 ensure_token() {
   node -e '
@@ -57,9 +59,15 @@ echo "如果 Codex 需要代理，先在当前 shell 执行：source ~/.zshrc &&
 echo
 
 cd "$ROOT_DIR"
-exec npm start -- \
+ARGS=(
   --backend "$BACKEND" \
   --listen "$HOST:$PORT" \
   --state "$STATE_FILE" \
-  --token-file "$TOKEN_FILE" \
-  "$@"
+  --token-file "$TOKEN_FILE"
+)
+if [[ "$SYNC_LOG" == "1" || "$SYNC_LOG" == "true" || "$SYNC_LOG" == "yes" ]]; then
+  ARGS+=(--sync-log "$SYNC_LOG_FILE")
+  echo "Sync log: $SYNC_LOG_FILE"
+fi
+
+exec npm start -- "${ARGS[@]}" "$@"

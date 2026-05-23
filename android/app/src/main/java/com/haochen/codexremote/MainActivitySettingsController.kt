@@ -62,6 +62,18 @@ internal fun MainActivity.sessionSyncIntervalDescription(): String {
     return "当前打开会话的内容轮询间隔。只影响 active session，不影响项目和历史列表刷新。"
 }
 
+internal fun MainActivity.loadSessionIncrementalSyncEnabled(): Boolean {
+    return prefs.getBoolean(KEY_SESSION_INCREMENTAL_SYNC, true)
+}
+
+internal fun MainActivity.updateSessionIncrementalSyncEnabled(enabled: Boolean) {
+    sessionIncrementalSyncEnabled = enabled
+    prefs.edit().putBoolean(KEY_SESSION_INCREMENTAL_SYNC, enabled).apply()
+    if (!enabled) {
+        sessionSyncCursorReady = false
+    }
+}
+
 internal fun MainActivity.loadStartupPagePreference(): AppPage {
     return appPageFromPreference(prefs.getString(KEY_STARTUP_PAGE, null))
 }

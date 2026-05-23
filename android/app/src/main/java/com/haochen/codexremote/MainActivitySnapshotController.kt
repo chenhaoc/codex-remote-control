@@ -130,11 +130,12 @@ internal fun MainActivity.updateLiveTurnStatusFromSnapshot(payload: JSONObject?)
         val snapshotItemCount = entries?.length() ?: 0
         val snapshotGrew = snapshotItemCount > lastSnapshotItemCount
         val snapshotChanged = snapshotSignature.isNotBlank() && lastSnapshotSignature != null && snapshotSignature != lastSnapshotSignature
+        reconcileActiveTurnFromSnapshot(payload)
         val status = inferLiveTurnStatusFromSnapshot(payload)
         when {
             status != null -> updateLiveTurnStatus(status)
-            snapshotGrew || snapshotChanged -> updateLiveTurnStatus("正在同步…")
             activeTurnId == null -> updateLiveTurnStatus(null)
+            snapshotGrew || snapshotChanged -> updateLiveTurnStatus("正在同步…")
             else -> Unit
         }
         if (snapshotSignature.isNotBlank()) {
@@ -143,10 +144,29 @@ internal fun MainActivity.updateLiveTurnStatusFromSnapshot(payload: JSONObject?)
         }
     }
 
+internal fun MainActivity.reconcileActiveTurnFromSnapshot(payload: JSONObject?) {
+        val activeTurns = payload?.optJSONArray("active_turns") ?: return
+        if (activeTurns.length() == 0) {
+            activeTurnId = null
+            return
+        }
+        val turnId = activeTurns.optJSONObject(activeTurns.length() - 1)?.optString("turn_id", "")?.trim().orEmpty()
+        if (turnId.isNotBlank()) {
+            activeTurnId = turnId
+        }
+    }
+
 internal fun MainActivity.inferLiveTurnStatusFromSnapshot(payload: JSONObject?): String? {
+        val activeTurns = payload?.optJSONArray("active_turns")
+        if (activeTurns != null) {
+            inferLiveTurnStatusFromActiveTurns(activeTurns)?.let { return it }
+            payload.optJSONArray("entries")?.let { entries ->
+                inferLiveTurnStatusFromSnapshotEntries(entries)?.let { return it }
+            }
+            return null
+        }
         val session = payload?.optJSONObject("session")
         inferLiveTurnStatusFromSession(session)?.let { return it }
-        inferLiveTurnStatusFromActiveTurns(payload?.optJSONArray("active_turns"))?.let { return it }
         val entries = payload?.optJSONArray("entries") ?: return null
         return inferLiveTurnStatusFromSnapshotEntries(entries)
     }
