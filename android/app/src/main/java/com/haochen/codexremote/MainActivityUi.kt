@@ -155,7 +155,9 @@ internal fun MainActivity.RemoteApp() {
                 topBar = {
                     AppTopBar(
                         onOpenDrawer = {
-                            requestSessionList()
+                            if (connected) {
+                                requestSessionList()
+                            }
                             scope.launch {
                                 drawerState.open()
                             }

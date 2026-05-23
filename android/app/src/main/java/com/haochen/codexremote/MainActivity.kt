@@ -19,6 +19,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import java.util.LinkedHashMap
+import org.json.JSONObject
 
 internal const val PREFS = "codex_remote_settings"
 internal const val KEY_URL = "bridge_url"
@@ -66,6 +67,8 @@ class MainActivity : ComponentActivity() {
     internal val connectionHistory = mutableStateListOf<BridgeHistoryEntry>()
     internal val pendingApprovals = mutableStateListOf<ApprovalDialogState>()
     internal val projectGroupExpanded = mutableStateMapOf<String, Boolean>()
+    internal val sessionContentCache = mutableMapOf<String, JSONObject>()
+    internal val sessionContentCacheSignatures = mutableMapOf<String, String>()
     internal val codeBrowserFileCache =
         object : LinkedHashMap<String, CodeBrowserFileContent>(CODE_BROWSER_FILE_CACHE_SIZE, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CodeBrowserFileContent>?): Boolean {
@@ -90,6 +93,7 @@ class MainActivity : ComponentActivity() {
     internal var selectedModel by mutableStateOf("")
     internal var connectionDetail by mutableStateOf("未连接")
     internal var currentBridgeUrl by mutableStateOf<String?>(null)
+    internal var activeSessionCacheKey: String? = null
     internal var connectionRenameState by mutableStateOf<ConnectionRenameDialogState?>(null)
     internal var sessionInfoSheetState by mutableStateOf<SessionInfoSheetState?>(null)
     internal var composerText by mutableStateOf("")
@@ -147,6 +151,7 @@ class MainActivity : ComponentActivity() {
         startupPagePreference = loadStartupPagePreference()
         sessionSyncIntervalSeconds = loadSessionSyncIntervalSeconds()
         currentPage = startupPagePreference
+        loadLocalSessionCache()
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.statusBarColor = AndroidColor.TRANSPARENT

@@ -254,7 +254,7 @@ internal fun MainActivity.AppDrawerContent(onCloseDrawer: () -> Unit) {
                     border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
                 ) {
                     BodyText(
-                        text = if (connected) "连接后，项目和历史会话会显示在这里。" else "先连接 bridge，再来创建新对话。",
+                        text = if (connected) "连接后，项目和历史会话会显示在这里。" else "没有本地缓存的历史。连接 bridge 后会同步项目和会话。",
                         modifier = Modifier.padding(14.dp),
                     )
                 }

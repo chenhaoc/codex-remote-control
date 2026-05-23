@@ -253,6 +253,25 @@ internal data class SessionInfo(
         )
     }
 
+    fun toJson(): JSONObject {
+        return JSONObject().apply {
+            put("session_id", sessionId)
+            put("title", title)
+            put("preview", preview)
+            put("model", model)
+            put("reasoningEffort", reasoningEffort)
+            put("backend", backend)
+            put("cwd", cwd)
+            put("updatedAt", updatedAt)
+            put("approvalPolicy", approvalPolicy)
+            sandbox?.let { put("sandbox", cloneJsonValue(it)) }
+            permissions?.let { put("permissions", JSONObject(it.toString())) }
+            contextWindow?.let { put("contextWindow", it) }
+            lastTokenUsage?.let { put("lastTokenUsage", it.toJson()) }
+            totalTokenUsage?.let { put("totalTokenUsage", it.toJson()) }
+        }
+    }
+
     fun titleLine(): String {
         if (title.isNotBlank()) return title
         if (preview.isNotBlank()) return preview
@@ -362,6 +381,16 @@ internal data class TokenUsageSnapshot(
             if (outputTokens > 0) add("出 ${formatCountLabel(outputTokens)}")
             if (reasoningOutputTokens > 0) add("推理 ${formatCountLabel(reasoningOutputTokens)}")
         }.joinToString(" · ").ifBlank { "0" }
+    }
+
+    fun toJson(): JSONObject {
+        return JSONObject().apply {
+            put("totalTokens", totalTokens)
+            put("inputTokens", inputTokens)
+            put("cachedInputTokens", cachedInputTokens)
+            put("outputTokens", outputTokens)
+            put("reasoningOutputTokens", reasoningOutputTokens)
+        }
     }
 }
 

@@ -76,6 +76,7 @@ internal fun MainActivity.connectToBridge(url: String, isAutoReconnect: Boolean 
         }
         saveBridgeSettings(url)
         bridgeUrl = url
+        switchLocalSessionCache(url)
         disconnectRequested = false
         bootSyncRequested = false
         connected = false
@@ -122,8 +123,12 @@ internal fun MainActivity.connectToBridge(url: String, isAutoReconnect: Boolean 
                         )
                     } else {
                         currentBridgeUrl = null
-                        selectedWorkspace = null
-                        currentPage = AppPage.Connection
+                        if (sessions.isEmpty()) {
+                            selectedWorkspace = null
+                            currentPage = AppPage.Connection
+                        } else {
+                            showCachedHistoryAfterConnectionFailure()
+                        }
                         connectionDetail = buildReconnectExhaustedDetail(reason + detailSuffix)
                     }
                     disconnectRequested = false
@@ -139,6 +144,7 @@ internal fun MainActivity.connectToBridge(url: String, isAutoReconnect: Boolean 
                 scheduleReconnect(url = url, reason = "连接失败", error = error)
             } else {
                 currentBridgeUrl = null
+                showCachedHistoryAfterConnectionFailure()
                 connectionDetail = buildReconnectExhaustedDetail("连接失败: ${error.message}")
                 showNotice(connectionDetail)
             }
@@ -147,6 +153,7 @@ internal fun MainActivity.connectToBridge(url: String, isAutoReconnect: Boolean 
 
 internal fun MainActivity.applyHistoryConnection(entry: BridgeHistoryEntry) {
         bridgeUrl = entry.url
+        switchLocalSessionCache(entry.url)
         connectionDetail = "已回填 ${entry.displayName()}，点击连接即可"
     }
 

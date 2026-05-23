@@ -16,6 +16,7 @@ internal fun MainActivity.requestSessionList() {
                 }
             }
             replaceSessions(newSessions)
+            persistLocalSessionList()
             if (activeSessionId != null && sessions.none { it.sessionId == activeSessionId }) {
                 stopSessionSyncLoop()
                 activeSessionId = null
@@ -182,6 +183,7 @@ internal fun MainActivity.requestSessionContent(sessionId: String) {
                     ?.let(SessionInfo::fromSession)
                     ?.let(::upsertSession)
                 applySessionContentSnapshot(responsePayload, snapshotItems)
+                persistLocalSessionContent(requestedSessionId, responsePayload)
                 updateLiveTurnStatusFromSnapshot(responsePayload)
                 flushPendingSessionRefresh(requestedSessionId)
             }
@@ -287,11 +289,13 @@ internal fun MainActivity.selectSession(sessionId: String, syncHistory: Boolean)
         sessions.firstOrNull { it.sessionId == sessionId }?.model
             ?.takeIf { it.isNotBlank() && isKnownModel(it) }
             ?.let { selectModel(it) }
-        clearConversation()
-        if (syncHistory) {
+        if (syncHistory && connected) {
+            clearConversation()
             requestSessionContent(sessionId)
             startSessionSyncLoop()
         } else {
+            clearConversation()
+            applyCachedSessionContent(sessionId)
             stopSessionSyncLoop()
         }
     }
