@@ -1820,6 +1820,175 @@ test('bridge inherits stored sandbox policy for turn sends and defaults to full 
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test('bridge preserves stored sandbox while resuming before turn sends', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-resume-sandbox-test-'));
+
+  class ResumeSandboxBackend extends EventEmitter {
+    constructor() {
+      super();
+      this.resumeParams = null;
+      this.turnParams = null;
+    }
+
+    async start() {}
+
+    async stop() {}
+
+    async resumeThread(threadId, params = {}) {
+      this.resumeParams = { threadId, params: structuredClone(params) };
+      return {
+        id: threadId,
+        sessionId: threadId,
+        name: 'resume sandbox',
+        preview: '',
+        cwd: '/tmp',
+        model: 'gpt-5',
+        status: { type: 'idle' },
+        sandbox: { type: 'dangerFullAccess' },
+        turns: [],
+      };
+    }
+
+    async startTurn(threadId, params = {}) {
+      this.turnParams = { threadId, params: structuredClone(params) };
+      return {
+        id: `turn_${threadId}`,
+        items: [],
+        itemsView: 'summary',
+        status: 'inProgress',
+        error: null,
+        startedAt: 1,
+        completedAt: null,
+        durationMs: null,
+      };
+    }
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  await store.load();
+  await store.upsertSession({
+    session_id: 'not_loaded_full_access_thread',
+    thread_id: 'not_loaded_full_access_thread',
+    title: 'not loaded full access',
+    cwd: '/tmp',
+    model: 'gpt-5',
+    backend: 'custom',
+    preview: '',
+    active: true,
+    sandbox: { type: 'dangerFullAccess' },
+    thread: {
+      id: 'not_loaded_full_access_thread',
+      sessionId: 'not_loaded_full_access_thread',
+      status: { type: 'notLoaded' },
+      turns: [],
+    },
+  });
+
+  const backend = new ResumeSandboxBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'turn.send', payload: { session_id: 'not_loaded_full_access_thread', text: '继续' } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+
+  assert.equal(backend.resumeParams?.params.sandbox, 'danger-full-access');
+  assert.deepEqual(backend.turnParams?.params.sandboxPolicy, { type: 'dangerFullAccess' });
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('bridge updates stored session sandbox metadata', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-session-update-test-'));
+  const backendThread = {
+    id: 'update_sandbox_thread',
+    sessionId: 'update_sandbox_thread',
+    name: 'update sandbox',
+    preview: '',
+    cwd: '/tmp',
+    model: 'gpt-5',
+    status: { type: 'idle' },
+    sandbox: { type: 'workspaceWrite', writableRoots: ['/tmp'], networkAccess: false },
+    turns: [],
+  };
+
+  class SessionUpdateBackend extends EventEmitter {
+    async start() {}
+
+    async stop() {}
+
+    async listThreads() {
+      return [structuredClone(backendThread)];
+    }
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  await store.load();
+  await store.upsertSession({
+    session_id: 'update_sandbox_thread',
+    thread_id: 'update_sandbox_thread',
+    title: 'update sandbox',
+    cwd: '/tmp',
+    model: 'gpt-5',
+    backend: 'custom',
+    preview: '',
+    active: true,
+    approvalPolicy: 'never',
+    sandbox: { type: 'workspaceWrite', writableRoots: ['/tmp'], networkAccess: false },
+    thread: backendThread,
+  });
+
+  const backend = new SessionUpdateBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({
+    id: '1',
+    type: 'session.update',
+    payload: {
+      session_id: 'update_sandbox_thread',
+      sandbox: 'danger-full-access',
+    },
+  }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+
+  const response = messages.find((m) => m.type === 'response' && m.id === '1');
+  assert.deepEqual(response.payload.session.sandbox, { type: 'dangerFullAccess' });
+  assert.deepEqual(store.getSession('update_sandbox_thread').sandbox, { type: 'dangerFullAccess' });
+  assert.ok(messages.some((m) => m.type === 'event' && m.event === 'session/changed' && m.session_id === 'update_sandbox_thread'));
+
+  ws.send(JSON.stringify({ id: '2', type: 'session.list', payload: {} }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '2'));
+  const listResponse = messages.find((m) => m.type === 'response' && m.id === '2');
+  const listed = listResponse.payload.sessions.find((session) => session.session_id === 'update_sandbox_thread');
+  assert.deepEqual(listed.sandbox, { type: 'dangerFullAccess' });
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 test('bridge file.read resolves relative paths from session cwd', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-file-read-test-'));
   const workspaceDir = path.join(dir, 'workspace');

@@ -20,6 +20,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -34,6 +36,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -288,6 +291,7 @@ internal fun MainActivity.SelectionMenuField(
 internal fun MainActivity.SessionInfoSheet(
     state: SessionInfoSheetState,
     onDismiss: () -> Unit,
+    onSwitchToFullAccess: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -325,29 +329,45 @@ internal fun MainActivity.SessionInfoSheet(
 
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             state.rows.forEach { (label, value) ->
+                val showSandboxUpgrade = state.canSwitchToFullAccess && label == state.sandboxRowLabel
                 Surface(
                     shape = RoundedCornerShape(16.dp),
                     color = uiSurfaceAlt,
                     border = BorderStroke(1.dp, uiBorder),
                 ) {
-                    Column(
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 14.dp, vertical = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(
-                            text = label,
-                            color = uiMuted,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium,
-                        )
-                        Text(
-                            text = value,
-                            color = uiText,
-                            fontSize = 13.sp,
-                            lineHeight = 19.sp,
-                        )
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                text = label,
+                                color = uiMuted,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            Text(
+                                text = value,
+                                color = uiText,
+                                fontSize = 13.sp,
+                                lineHeight = 19.sp,
+                            )
+                        }
+                        if (showSandboxUpgrade) {
+                            IconButton(onClick = onSwitchToFullAccess) {
+                                Icon(
+                                    painter = painterResource(id = R.drawable.ic_upgrade_access),
+                                    contentDescription = "切回完整访问",
+                                    tint = uiPrimary,
+                                )
+                            }
+                        }
                     }
                 }
             }

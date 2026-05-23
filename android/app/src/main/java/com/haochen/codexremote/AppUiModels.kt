@@ -77,6 +77,8 @@ internal data class NewChatDraft(
 internal data class SessionInfoSheetState(
     val title: String,
     val rows: List<Pair<String, String>>,
+    val sandboxRowLabel: String = "沙箱",
+    val canSwitchToFullAccess: Boolean = false,
 )
 
 internal data class SelectionMenuOption(

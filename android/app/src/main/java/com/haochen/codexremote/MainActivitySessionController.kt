@@ -139,6 +139,28 @@ internal fun MainActivity.sendComposerText() {
         composerText = ""
     }
 
+internal fun MainActivity.switchActiveSessionToFullAccess() {
+        val session = activeSession() ?: return
+        if (!ensureConnected()) return
+
+        val payload = JSONObject().apply {
+            put("session_id", session.sessionId)
+            put("sandbox", "danger-full-access")
+        }
+
+        if (!sendRequest("session.update", payload) { response ->
+                val updated = response.optJSONObject("payload")?.optJSONObject("session")?.let { SessionInfo.fromSession(it) }
+                if (updated != null) {
+                    upsertSession(updated)
+                    openSessionInfoSheet()
+                    showNotice("已切回完整访问")
+                }
+            }
+        ) {
+            return
+        }
+    }
+
 internal fun MainActivity.interruptCurrentTurn() {
         if (!ensureConnected()) return
         if (activeSessionId.isNullOrBlank() || activeTurnId.isNullOrBlank()) {
@@ -558,6 +580,7 @@ internal fun MainActivity.openSessionInfoSheet() {
         sessionInfoSheetState =
             SessionInfoSheetState(
                 title = session.titleLine(),
+                canSwitchToFullAccess = !session.isDangerFullAccess(),
                 rows =
                     buildList {
                         add("目录" to session.cwd.ifBlank { "未提供" })

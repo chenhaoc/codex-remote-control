@@ -52,9 +52,14 @@ function mergeSessionSummary(summary, stored) {
   }
 
   if (summary.sandbox != null) {
-    merged.sandbox = clone(summary.sandbox);
+    merged.sandbox = stored.sandboxOverride && stored.sandbox != null
+      ? clone(stored.sandbox)
+      : clone(summary.sandbox);
   } else if (stored.sandbox != null) {
     merged.sandbox = clone(stored.sandbox);
+  }
+  if (stored.sandboxOverride) {
+    merged.sandboxOverride = true;
   }
 
   if (Number.isFinite(summary.contextWindow) && summary.contextWindow > 0) {
@@ -543,6 +548,38 @@ export class BridgeServer extends EventEmitter {
         ws.send(JSON.stringify(createResponse(id, { session })));
         return;
       }
+      case 'session.update': {
+        const sessionId = payload.session_id ?? payload.thread_id;
+        const current = this.store.getSession(sessionId);
+        if (!current) {
+          ws.send(JSON.stringify(createError(id, 'not_found', `unknown session: ${sessionId}`)));
+          return;
+        }
+        const patch = {
+          session_id: current.session_id,
+        };
+        if (Object.prototype.hasOwnProperty.call(payload, 'approvalPolicy')) {
+          patch.approvalPolicy = payload.approvalPolicy;
+        }
+        if (Object.prototype.hasOwnProperty.call(payload, 'permissions')) {
+          patch.permissions = normalizePermissionSelection(payload.permissions);
+        }
+        if (Object.prototype.hasOwnProperty.call(payload, 'sandbox') || Object.prototype.hasOwnProperty.call(payload, 'sandboxPolicy')) {
+          const normalizedSandbox = normalizeSandboxPolicy(
+            Object.prototype.hasOwnProperty.call(payload, 'sandbox') ? payload.sandbox : payload.sandboxPolicy,
+          );
+          if (normalizedSandbox == null) {
+            ws.send(JSON.stringify(createError(id, 'invalid_request', 'invalid sandbox')));
+            return;
+          }
+          patch.sandbox = normalizedSandbox;
+          patch.sandboxOverride = true;
+        }
+        const session = await this.store.upsertSession(patch, { touch: true });
+        this.#emitSessionChanged(sessionId);
+        ws.send(JSON.stringify(createResponse(id, { session })));
+        return;
+      }
       case 'turn.send': {
         const sessionId = payload.session_id ?? payload.thread_id;
         const inputItemId = getTurnInputItemId({ payload, requestId: id, sessionId });
@@ -601,7 +638,7 @@ export class BridgeServer extends EventEmitter {
           cwd: turnParams.cwd,
           approvalPolicy: turnParams.approvalPolicy,
           approvalsReviewer: turnParams.approvalsReviewer,
-          sandbox: null,
+          sandbox: requestedSandboxPolicy,
           permissions: turnParams.permissions,
           personality: turnParams.personality,
           excludeTurns: true,
@@ -617,6 +654,7 @@ export class BridgeServer extends EventEmitter {
             cwd: turnParams.cwd,
             approvalPolicy: turnParams.approvalPolicy,
             approvalsReviewer: turnParams.approvalsReviewer,
+            sandbox: requestedSandboxPolicy,
             permissions: turnParams.permissions,
             personality: turnParams.personality,
             excludeTurns: true,
@@ -854,6 +892,9 @@ export class BridgeServer extends EventEmitter {
     const session = this.store.getSession(sessionId);
     if (!session) return null;
     const explicitPath = Object.prototype.hasOwnProperty.call(params, 'path') ? params.path : null;
+    const requestedSandbox = Object.prototype.hasOwnProperty.call(params, 'sandbox')
+      ? params.sandbox
+      : session.sandbox ?? defaultSandboxPolicy();
     const resumed = await this.backend.resumeThread(session.thread_id ?? sessionId, {
       threadId: session.thread_id ?? sessionId,
       path: explicitPath,
@@ -861,7 +902,7 @@ export class BridgeServer extends EventEmitter {
       cwd: params.cwd ?? session.cwd ?? null,
       approvalPolicy: params.approvalPolicy ?? null,
       approvalsReviewer: params.approvalsReviewer ?? null,
-      sandbox: toSandboxMode(params.sandbox),
+      sandbox: toSandboxMode(requestedSandbox),
       permissions: normalizePermissionSelection(params.permissions),
       personality: params.personality ?? null,
       excludeTurns: params.excludeTurns ?? null,
@@ -1361,7 +1402,7 @@ export class BridgeServer extends EventEmitter {
         if (thread) {
           const normalized = normalizeThreadSummary(thread, this.backend.constructor.name.replace('Backend', '').toLowerCase() || 'mock');
           if (normalized) {
-            await this.store.upsertSession(normalized);
+            await this.store.upsertSession(mergeSessionSummary(normalized, this.store.getSession(sessionId)));
           }
           return thread;
         }

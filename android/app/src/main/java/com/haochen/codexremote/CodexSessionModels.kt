@@ -328,6 +328,17 @@ internal data class SessionInfo(
         }
     }
 
+    fun isDangerFullAccess(): Boolean {
+        val raw = sandbox
+        val type =
+            when (raw) {
+                is String -> raw
+                is JSONObject -> raw.optString("type", "")
+                else -> raw?.toString().orEmpty()
+            }.trim()
+        return type == "dangerFullAccess" || type == "danger-full-access"
+    }
+
     fun reasoningEffortSummary(): String {
         val effort = reasoningEffort.trim()
         return if (effort.isBlank()) {
