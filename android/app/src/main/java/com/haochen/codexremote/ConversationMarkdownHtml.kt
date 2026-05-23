@@ -380,7 +380,7 @@ internal fun buildConversationInlineHtml(text: String): String {
 
                     source.startsWith("***", index) || source.startsWith("___", index) -> {
                         val delimiter = source.substring(index, index + 3)
-                        val end = source.indexOf(delimiter, startIndex = index + 3)
+                        val end = findConversationEmphasisEnd(source, index, delimiter)
                         if (end != -1) {
                             append("<strong><em>")
                             append(parseSegment(source.substring(index + 3, end)))
@@ -392,7 +392,7 @@ internal fun buildConversationInlineHtml(text: String): String {
 
                     source.startsWith("**", index) || source.startsWith("__", index) -> {
                         val delimiter = source.substring(index, index + 2)
-                        val end = source.indexOf(delimiter, startIndex = index + 2)
+                        val end = findConversationEmphasisEnd(source, index, delimiter)
                         if (end != -1) {
                             append(buildConversationHtmlTag("strong", parseSegment(source.substring(index + 2, end))))
                             index = end + 2
@@ -469,7 +469,7 @@ internal fun buildConversationInlineHtml(text: String): String {
 
                     source.startsWith("*", index) || source.startsWith("_", index) -> {
                         val delimiter = source[index]
-                        val end = source.indexOf(delimiter, startIndex = index + 1)
+                        val end = findConversationEmphasisEnd(source, index, delimiter.toString())
                         if (end != -1) {
                             append(buildConversationHtmlTag("em", parseSegment(source.substring(index + 1, end))))
                             index = end + 1
@@ -485,3 +485,43 @@ internal fun buildConversationInlineHtml(text: String): String {
 
     return text.split('\n').joinToString("<br />") { line -> parseSegment(line) }
 }
+
+internal fun findConversationEmphasisEnd(
+    source: String,
+    startIndex: Int,
+    delimiter: String,
+): Int {
+    if (delimiter.firstOrNull() != '_') {
+        return source.indexOf(delimiter, startIndex = startIndex + delimiter.length)
+    }
+
+    var searchIndex = startIndex + delimiter.length
+    while (searchIndex < source.length) {
+        val end = source.indexOf(delimiter, startIndex = searchIndex)
+        if (end == -1) return -1
+        if (isConversationUnderscoreEmphasisPair(source, startIndex, end, delimiter.length)) {
+            return end
+        }
+        searchIndex = end + delimiter.length
+    }
+    return -1
+}
+
+private fun isConversationUnderscoreEmphasisPair(
+    source: String,
+    startIndex: Int,
+    endIndex: Int,
+    delimiterLength: Int,
+): Boolean {
+    val beforeOpen = source.getOrNull(startIndex - 1)
+    val afterOpen = source.getOrNull(startIndex + delimiterLength)
+    val beforeClose = source.getOrNull(endIndex - 1)
+    val afterClose = source.getOrNull(endIndex + delimiterLength)
+    return !beforeOpen.isConversationIdentifierChar() &&
+        !afterClose.isConversationIdentifierChar() &&
+        afterOpen?.isWhitespace() == false &&
+        beforeClose?.isWhitespace() == false
+}
+
+private fun Char?.isConversationIdentifierChar(): Boolean =
+    this?.let { it == '_' || it.isLetterOrDigit() } == true
