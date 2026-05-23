@@ -1501,7 +1501,7 @@ test('session content returns final thread items and pending approvals in stable
         model: 'gpt-5',
         modelProvider: 'custom',
         createdAt: 1,
-        updatedAt: 2,
+        updatedAt: 99,
         status: { type: 'idle' },
         path: null,
         cwd: '/tmp',
@@ -1618,6 +1618,7 @@ test('session content returns final thread items and pending approvals in stable
   assert.equal(contentResponse.payload.entries[4].item.id, 'content_file_1');
   assert.equal(contentResponse.payload.pending_approvals.length, 1);
   assert.equal(contentResponse.payload.pending_approvals[0].request_id, 'approval_1');
+  assert.equal(store.getSession('content_thread_1').updatedAt, '1970-01-01T00:00:11.000Z');
 
   ws.close();
   await once(ws, 'close');

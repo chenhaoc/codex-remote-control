@@ -312,7 +312,8 @@ internal fun MainActivity.replaceSessions(newSessions: List<SessionInfo>) {
 internal fun MainActivity.upsertSession(info: SessionInfo) {
         val merged = info.mergedWith(sessions.firstOrNull { it.sessionId == info.sessionId })
         sessions.removeAll { it.sessionId == info.sessionId }
-        sessions.add(0, merged)
+        sessions.add(merged)
+        sessions.sortByDescending { it.updatedAt }
     }
 
 internal fun MainActivity.clearConversation() {

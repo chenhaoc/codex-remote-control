@@ -63,7 +63,8 @@ export class StateStore {
     return clone(approvals).sort((a, b) => String(a.at ?? '').localeCompare(String(b.at ?? '')));
   }
 
-  async upsertSession(session) {
+  async upsertSession(session, { touch = false } = {}) {
+    const now = nowIso();
     const current = this.state.sessions[session.session_id] ?? {
       session_id: session.session_id,
       thread_id: session.thread_id ?? session.session_id,
@@ -73,8 +74,8 @@ export class StateStore {
       backend: session.backend ?? 'mock',
       preview: session.preview ?? '',
       active: true,
-      createdAt: session.createdAt ?? nowIso(),
-      updatedAt: session.updatedAt ?? nowIso(),
+      createdAt: session.createdAt ?? now,
+      updatedAt: session.updatedAt ?? now,
       lastSeq: 0,
       thread: null,
       events: [],
@@ -88,7 +89,7 @@ export class StateStore {
       thread: session.thread ?? current.thread,
       events: current.events ?? [],
       pending_approvals: current.pending_approvals ?? {},
-      updatedAt: nowIso(),
+      updatedAt: touch ? now : (session.updatedAt ?? current.updatedAt ?? now),
     };
     this.state.sessions[next.session_id] = next;
     await this.save();

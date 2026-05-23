@@ -180,6 +180,7 @@ function normalizeThreadSummary(thread, backend = 'mock') {
   const sandbox = normalizeSandboxPolicy(envelope.sandbox ?? raw.sandbox ?? raw.sandboxPolicy);
   const tokenUsage = envelope.tokenUsage ?? raw.tokenUsage ?? null;
   const reasoningEffort = envelope.reasoningEffort ?? raw.reasoningEffort ?? null;
+  const historyUpdatedAt = inferThreadHistoryUpdatedAt(raw);
   return {
     session_id: id,
     thread_id: id,
@@ -190,7 +191,7 @@ function normalizeThreadSummary(thread, backend = 'mock') {
     active: raw.status ? String(raw.status) === 'active' || String(raw.status) === 'running' : true,
     backend,
     createdAt: raw.createdAt ? new Date(raw.createdAt * 1000).toISOString() : nowIso(),
-    updatedAt: raw.updatedAt ? new Date(raw.updatedAt * 1000).toISOString() : nowIso(),
+    updatedAt: historyUpdatedAt ?? (raw.updatedAt ? new Date(raw.updatedAt * 1000).toISOString() : nowIso()),
     ...(approvalPolicy != null ? { approvalPolicy } : {}),
     ...(permissions != null ? { permissions } : {}),
     ...(sandbox != null ? { sandbox } : {}),
@@ -200,6 +201,20 @@ function normalizeThreadSummary(thread, backend = 'mock') {
     ...(firstNonEmptyString(reasoningEffort ?? '') ? { reasoningEffort } : {}),
     thread: clone(raw),
   };
+}
+
+function inferThreadHistoryUpdatedAt(thread) {
+  const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+  let latestSeconds = 0;
+  for (const turn of turns) {
+    const candidates = [turn?.completedAt, turn?.startedAt, turn?.createdAt, turn?.updatedAt];
+    for (const value of candidates) {
+      if (Number.isFinite(value) && value > latestSeconds) {
+        latestSeconds = value;
+      }
+    }
+  }
+  return latestSeconds > 0 ? new Date(latestSeconds * 1000).toISOString() : null;
 }
 
 function getThreadStatusType(thread) {
@@ -499,7 +514,7 @@ export class BridgeServer extends EventEmitter {
           persistExtendedHistory: payload.persistExtendedHistory ?? false,
         });
         const session = normalizeThreadSummary(started, this.backend.constructor.name.replace('Backend', '').toLowerCase() || 'mock');
-        await this.store.upsertSession(session);
+        await this.store.upsertSession(session, { touch: true });
         ws.send(JSON.stringify(createResponse(id, { session })));
         return;
       }
@@ -718,7 +733,7 @@ export class BridgeServer extends EventEmitter {
             preview: payload.thread?.preview ?? '',
             active: true,
             thread: payload.thread ?? null,
-          });
+          }, { touch: true });
           broadcastEvent = await this.store.appendEvent(sessionId, event);
         }
       }
