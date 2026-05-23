@@ -277,10 +277,6 @@ private fun explainConversationIncrementalPatch(
         }
         lastMatchedIndex = currentIndex
     }
-    val changedIndexes =
-        current.ids.mapIndexedNotNull { index, id ->
-            if (previous.htmlById[id] != current.htmlById[id]) index else null
-        }
     return ConversationPatchCheck(true)
 }
 

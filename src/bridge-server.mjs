@@ -1566,7 +1566,7 @@ export class BridgeServer extends EventEmitter {
     const rawThread = thread?.thread ?? thread;
     const turns = this.#sortTurnsForRendering(Array.isArray(rawThread?.turns) ? rawThread.turns : []);
     const threadId = rawThread?.id ?? rawThread?.threadId ?? rawThread?.sessionId ?? sessionId;
-    const storedUserInputItemIds = this.#buildStoredTurnInputItemIdMap(sessionId);
+    const storedUserInputItemIds = this.#buildStoredTurnInputItemIdIndex(sessionId);
     const events = [];
 
     for (const turn of turns) {
@@ -1585,7 +1585,7 @@ export class BridgeServer extends EventEmitter {
           const text = extractUserMessageText(item.content ?? []);
           if (text) {
             const fallbackSeq = item.id ? null : String(++turnItemSeq).padStart(4, '0');
-            const itemId = storedUserInputItemIds.get(`${turn.id}|${text}`)
+            const itemId = this.#resolveStoredTurnInputItemId(storedUserInputItemIds, turn.id, text)
               ?? item.id
               ?? `turn_${turn.id}_user_${fallbackSeq}`;
             events.push(createEvent('turn/input', {
@@ -1642,7 +1642,7 @@ export class BridgeServer extends EventEmitter {
     const rawThread = thread?.thread ?? thread;
     const turns = this.#sortTurnsForRendering(Array.isArray(rawThread?.turns) ? rawThread.turns : []);
     const threadId = rawThread?.id ?? rawThread?.threadId ?? rawThread?.sessionId ?? sessionId;
-    const storedUserInputItemIds = this.#buildStoredTurnInputItemIdMap(sessionId);
+    const storedUserInputItemIds = this.#buildStoredTurnInputItemIdIndex(sessionId);
     const entries = [];
 
     for (const turn of turns) {
@@ -1656,9 +1656,15 @@ export class BridgeServer extends EventEmitter {
         }
         const text = item.type === 'userMessage' ? extractUserMessageText(item.content ?? []) : '';
         const fallbackSeq = item.id ? null : String(++turnItemSeq).padStart(4, '0');
+        const storedUserInputItemId = item.type === 'userMessage'
+          ? this.#resolveStoredTurnInputItemId(storedUserInputItemIds, turn.id, text)
+          : null;
+        const fallbackItemId = item.type === 'userMessage'
+          ? `turn_${turn.id}_user_${fallbackSeq}`
+          : `turn_${turn.id}_item_${fallbackSeq}`;
         const itemId = item.type === 'userMessage'
-          ? storedUserInputItemIds.get(`${turn.id}|${text}`) ?? item.id ?? `turn_${turn.id}_user_${fallbackSeq}`
-          : item.id ?? `turn_${turn.id}_item_${fallbackSeq}`;
+          ? storedUserInputItemId ?? item.id ?? fallbackItemId
+          : item.id ?? fallbackItemId;
         entries.push({
           type: 'item',
           session_id: sessionId,
@@ -1700,20 +1706,41 @@ export class BridgeServer extends EventEmitter {
     });
   }
 
-  #buildStoredTurnInputItemIdMap(sessionId) {
+  #buildStoredTurnInputItemIdIndex(sessionId) {
     const session = this.store.getSession(sessionId);
     const events = session?.events ?? [];
-    const itemIds = new Map();
+    const byTurnAndText = new Map();
+    const unresolvedByText = new Map();
     for (const event of events) {
       if (event?.event !== 'turn/input') continue;
       const turnId = event.turn_id ?? '';
       const text = String(event?.payload?.text ?? '').trim();
       const itemId = getTurnInputItemId({ payload: event?.payload, requestId: event?.request_id ?? '' });
-      if (turnId && text && itemId) {
-        itemIds.set(`${turnId}|${text}`, itemId);
+      if (!text || !itemId) continue;
+      if (turnId) {
+        byTurnAndText.set(`${turnId}|${text}`, itemId);
+      } else {
+        const queue = unresolvedByText.get(text) ?? [];
+        if (!queue.includes(itemId)) {
+          queue.push(itemId);
+        }
+        unresolvedByText.set(text, queue);
       }
     }
-    return itemIds;
+    return { byTurnAndText, unresolvedByText };
+  }
+
+  #resolveStoredTurnInputItemId(index, turnId, text) {
+    if (!text) return null;
+    const exact = turnId ? index.byTurnAndText.get(`${turnId}|${text}`) : null;
+    if (exact) return exact;
+    const unresolved = index.unresolvedByText.get(text);
+    if (!unresolved || unresolved.length === 0) return null;
+    const itemId = unresolved.shift() ?? null;
+    if (unresolved.length === 0) {
+      index.unresolvedByText.delete(text);
+    }
+    return itemId;
   }
 
   async #loadTurnItems(threadId, turn) {
