@@ -101,7 +101,7 @@ internal fun MainActivity.handleEvent(message: JSONObject) {
                     message.optString("turn_id", ""),
                     payload.optJSONObject("turn")?.optString("id", "") ?: "",
                 )
-                updateLiveTurnStatus("Codex 正在响应…")
+                updateLiveTurnStatus("已开始，等待输出…")
             }
 
             "item/agentMessage/delta" -> {

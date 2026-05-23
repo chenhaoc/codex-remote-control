@@ -1626,6 +1626,99 @@ test('session content returns final thread items and pending approvals in stable
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test('session content reports active stored turns', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-active-turn-test-'));
+
+  class EmptyBackend extends EventEmitter {
+    async start() {}
+
+    async stop() {}
+
+    async listThreads() {
+      return [];
+    }
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  await store.load();
+  await store.upsertSession({
+    session_id: 'active_turn_thread',
+    thread_id: 'active_turn_thread',
+    title: 'Active turn',
+    cwd: '/tmp',
+    model: 'gpt-5',
+    backend: 'mock',
+    preview: 'Active turn',
+    active: true,
+    thread: {
+      id: 'active_turn_thread',
+      sessionId: 'active_turn_thread',
+      status: { type: 'idle' },
+      turns: [],
+    },
+  });
+  await store.appendEvent('active_turn_thread', {
+    type: 'event',
+    event: 'turn/started',
+    session_id: 'active_turn_thread',
+    thread_id: 'active_turn_thread',
+    turn_id: 'active_turn_1',
+    payload: { turn: { id: 'active_turn_1' } },
+  });
+  await store.appendEvent('active_turn_thread', {
+    type: 'event',
+    event: 'turn/input',
+    session_id: 'active_turn_thread',
+    thread_id: 'active_turn_thread',
+    turn_id: 'active_turn_1',
+    payload: {
+      text: '远端问题',
+      input: null,
+    },
+  });
+  await store.appendEvent('active_turn_thread', {
+    type: 'event',
+    event: 'item/agentMessage/delta',
+    session_id: 'active_turn_thread',
+    thread_id: 'active_turn_thread',
+    turn_id: 'active_turn_1',
+    payload: {
+      itemId: 'active_agent_stream',
+      delta: '处理中',
+    },
+  });
+
+  const bridge = new BridgeServer({ backend: new EmptyBackend(), store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'session.content', payload: { session_id: 'active_turn_thread' } }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+
+  const contentResponse = messages.find((m) => m.type === 'response' && m.id === '1');
+  assert.equal(contentResponse.ok, true);
+  assert.equal(contentResponse.payload.active_turns.length, 1);
+  assert.equal(contentResponse.payload.active_turns[0].turn_id, 'active_turn_1');
+  assert.equal(contentResponse.payload.active_turns[0].thread_id, 'active_turn_thread');
+  assert.equal(contentResponse.payload.active_turns[0].last_event, 'item/agentMessage/delta');
+  assert.equal(contentResponse.payload.active_turns[0].last_item_type, 'agentMessage');
+  assert.equal(contentResponse.payload.active_turns[0].output_chars, 3);
+  assert.equal(contentResponse.payload.active_turns[0].detail, null);
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 test('bridge emits session changed notifications for turn sends', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-session-changed-test-'));
 

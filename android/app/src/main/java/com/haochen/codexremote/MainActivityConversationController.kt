@@ -255,15 +255,15 @@ internal fun MainActivity.updateLiveTurnStatusFromItem(eventName: String, item: 
 
 internal fun MainActivity.buildItemLiveStatus(item: JSONObject, started: Boolean): String? {
         return when (item.optString("type", "")) {
-            "contextCompaction" -> if (started) "Codex 正在整理上下文…" else "Codex 继续响应中…"
-            "reasoning" -> if (started) buildReasoningLiveStatus(item) else "Codex 继续响应中…"
-            "plan" -> if (started) "Codex 正在整理计划…" else "Codex 继续响应中…"
+            "contextCompaction" -> if (started) "正在整理上下文…" else "继续响应中…"
+            "reasoning" -> if (started) buildReasoningLiveStatus(item) else "继续响应中…"
+            "plan" -> if (started) "正在整理计划…" else "继续响应中…"
             "commandExecution" -> if (started) buildCommandExecutionLiveStatus(item) else buildCompletedItemLiveStatus(item, "命令执行完成")
             "fileChange" -> if (started) buildFileChangeItemLiveStatus(item) else buildCompletedItemLiveStatus(item, "文件修改完成")
             "mcpToolCall" -> if (started) buildMcpToolLiveStatus(item) else buildCompletedItemLiveStatus(item, "工具调用完成")
             "dynamicToolCall" -> if (started) buildDynamicToolLiveStatus(item) else buildCompletedItemLiveStatus(item, "工具运行完成")
             "collabAgentToolCall" -> if (started) buildCollabAgentLiveStatus(item) else buildCompletedItemLiveStatus(item, "子任务完成")
-            "agentMessage" -> if (started) "Codex 正在准备回复…" else "Codex 回复已完成，正在同步…"
+            "agentMessage" -> if (started) "正在准备回复…" else "回复完成，正在同步…"
             else -> null
         }
     }
@@ -271,9 +271,9 @@ internal fun MainActivity.buildItemLiveStatus(item: JSONObject, started: Boolean
 internal fun MainActivity.buildAssistantOutputLiveStatus(turnKey: String, itemKey: String): String {
         val bufferedLength = assistantDeltaBuffers[buildAssistantBubbleKey(turnKey, itemKey)]?.length ?: 0
         return if (bufferedLength > 0) {
-            "Codex 正在输出，已接收约 $bufferedLength 字…"
+            "正在输出: 约 $bufferedLength 字"
         } else {
-            "Codex 正在输出…"
+            "正在输出…"
         }
     }
 
@@ -295,12 +295,12 @@ internal fun MainActivity.buildApprovalLiveStatus(eventName: String, payload: JS
 
 internal fun MainActivity.buildFileChangePatchLiveStatus(payload: JSONObject): String {
         val diffEntries = payload.optJSONArray("changes").toConversationDiffEntries()
-        return joinLiveStatus("Codex 正在修改文件", describeDiffEntries(diffEntries))
+        return joinLiveStatus("正在改文件", describeDiffEntries(diffEntries))
     }
 
 internal fun MainActivity.buildTurnDiffLiveStatus(payload: JSONObject): String {
         val stats = buildDiffStatsLine(diffEntries = emptyList(), fallbackDiff = payload.optString("diff", ""))
-        return joinLiveStatus("Codex 正在修改文件", stats.orEmpty())
+        return joinLiveStatus("正在改文件", stats.orEmpty())
     }
 
 internal fun MainActivity.buildReasoningLiveStatus(item: JSONObject): String {
@@ -312,20 +312,20 @@ internal fun MainActivity.buildReasoningLiveStatus(item: JSONObject): String {
             contentCount > 0 -> "$contentCount 段思考"
             else -> ""
         }
-        return joinLiveStatus("Codex 正在思考", detail)
+        return joinLiveStatus("正在思考", detail)
     }
 
 internal fun MainActivity.buildCommandExecutionLiveStatus(item: JSONObject): String {
-        return joinLiveStatus("Codex 正在执行命令", item.optString("command", "").trim())
+        return joinLiveStatus("正在执行命令", item.optString("command", "").trim())
     }
 
 internal fun MainActivity.buildFileChangeItemLiveStatus(item: JSONObject): String {
         val diffEntries = item.optJSONArray("changes").toConversationDiffEntries()
-        return joinLiveStatus("Codex 正在修改文件", describeDiffEntries(diffEntries))
+        return joinLiveStatus("正在改文件", describeDiffEntries(diffEntries))
     }
 
 internal fun MainActivity.buildMcpToolLiveStatus(item: JSONObject): String {
-        return joinLiveStatus("Codex 正在调用 MCP 工具", firstNonEmpty(item.optString("server", ""), item.optString("tool", "")))
+        return joinLiveStatus("正在调用工具", firstNonEmpty(item.optString("server", ""), item.optString("tool", "")))
     }
 
 internal fun MainActivity.buildDynamicToolLiveStatus(item: JSONObject): String {
@@ -333,19 +333,19 @@ internal fun MainActivity.buildDynamicToolLiveStatus(item: JSONObject): String {
             .map { it.trim() }
             .filter { it.isNotBlank() }
             .joinToString(".")
-        return joinLiveStatus("Codex 正在运行工具", toolName)
+        return joinLiveStatus("正在运行工具", toolName)
     }
 
 internal fun MainActivity.buildCollabAgentLiveStatus(item: JSONObject): String {
         val prompt = item.optString("prompt", "").trim()
-        return joinLiveStatus("Codex 正在协调子任务", item.optString("tool", "").ifBlank { prompt })
+        return joinLiveStatus("正在处理子任务", item.optString("tool", "").ifBlank { prompt })
     }
 
 internal fun MainActivity.buildCompletedItemLiveStatus(item: JSONObject, fallback: String): String {
         val status = item.optString("status", "").trim()
         return when (status) {
-            "failed" -> "Codex ${fallback.removeSuffix("完成")}失败"
-            "declined" -> "Codex ${fallback.removeSuffix("完成")}已拒绝"
+            "failed" -> "${fallback.removeSuffix("完成")}失败"
+            "declined" -> "${fallback.removeSuffix("完成")}已拒绝"
             else -> "$fallback，继续响应中…"
         }
     }
@@ -396,7 +396,7 @@ internal fun compactLiveStatusDetail(value: String, maxLength: Int = 42): String
 internal fun MainActivity.updateLiveTurnStatusFromWarning(payload: JSONObject) {
         val message = extractWarningText(payload)
         if (message.contains("Long threads", ignoreCase = true)) {
-            updateLiveTurnStatus("Codex 正在整理长上下文…")
+            updateLiveTurnStatus("正在整理长上下文…")
         }
     }
 
@@ -412,8 +412,8 @@ internal fun MainActivity.updateLiveTurnStatusFromError(payload: JSONObject) {
 
 internal fun MainActivity.updateLiveTurnStatusFromThreadStatus(status: JSONObject?) {
         when (status?.optString("type", "")?.trim()) {
-            "active" -> updateLiveTurnStatus("Codex 正在处理中…")
-            "idle" -> if (activeTurnId != null) updateLiveTurnStatus("Codex 正在处理中…")
+            "active" -> updateLiveTurnStatus("回合进行中…")
+            "idle" -> if (activeTurnId != null) updateLiveTurnStatus("回合进行中…")
             "systemError" -> updateLiveTurnStatus("Codex 响应异常")
         }
     }

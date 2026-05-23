@@ -133,7 +133,7 @@ internal fun MainActivity.updateLiveTurnStatusFromSnapshot(payload: JSONObject?)
         val status = inferLiveTurnStatusFromSnapshot(payload)
         when {
             status != null -> updateLiveTurnStatus(status)
-            snapshotGrew || snapshotChanged -> updateLiveTurnStatus("Codex 正在同步桌面端输出…")
+            snapshotGrew || snapshotChanged -> updateLiveTurnStatus("正在同步…")
             activeTurnId == null -> updateLiveTurnStatus(null)
             else -> Unit
         }
@@ -146,8 +146,78 @@ internal fun MainActivity.updateLiveTurnStatusFromSnapshot(payload: JSONObject?)
 internal fun MainActivity.inferLiveTurnStatusFromSnapshot(payload: JSONObject?): String? {
         val session = payload?.optJSONObject("session")
         inferLiveTurnStatusFromSession(session)?.let { return it }
+        inferLiveTurnStatusFromActiveTurns(payload?.optJSONArray("active_turns"))?.let { return it }
         val entries = payload?.optJSONArray("entries") ?: return null
         return inferLiveTurnStatusFromSnapshotEntries(entries)
+    }
+
+internal fun MainActivity.inferLiveTurnStatusFromActiveTurns(activeTurns: JSONArray?): String? {
+        if (activeTurns == null || activeTurns.length() == 0) return null
+        val activeTurn = activeTurns.optJSONObject(activeTurns.length() - 1) ?: return "回合进行中…"
+        val eventStatus = when (activeTurn.optString("last_event", "")) {
+            "item/agentMessage/delta" -> buildActiveTurnOutputStatus(activeTurn)
+            "item/fileChange/patchUpdated", "turn/diff/updated" -> buildActiveTurnFileStatus(activeTurn)
+            "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval",
+            "item/permissions/requestApproval",
+            "applyPatchApproval",
+            "execCommandApproval" -> buildActiveTurnApprovalStatus(activeTurn)
+            "item/completed" -> null
+            "item/started" -> null
+            "turn/input" -> "已开始，等待输出…"
+            else -> null
+        }
+        return eventStatus ?: when (activeTurn.optString("last_item_type", "")) {
+            "agentMessage" -> buildActiveTurnOutputStatus(activeTurn)
+            "fileChange" -> buildActiveTurnFileStatus(activeTurn)
+            "commandExecution" -> joinLiveStatus("正在执行命令", activeTurn.optString("detail", ""))
+            "reasoning" -> "正在思考…"
+            "plan" -> "正在整理计划…"
+            "mcpToolCall" -> joinLiveStatus("正在调用工具", activeTurn.optString("detail", ""))
+            "dynamicToolCall" -> joinLiveStatus("正在运行工具", activeTurn.optString("detail", ""))
+            "collabAgentToolCall" -> joinLiveStatus("正在处理子任务", activeTurn.optString("detail", ""))
+            "userMessage" -> "已开始，等待输出…"
+            else -> "回合进行中…"
+        }
+    }
+
+internal fun MainActivity.buildActiveTurnOutputStatus(activeTurn: JSONObject): String {
+        val outputChars = activeTurn.optInt("output_chars", 0)
+        return if (outputChars > 0) joinLiveStatus("正在输出", "约 $outputChars 字") else "正在输出…"
+    }
+
+internal fun MainActivity.buildActiveTurnFileStatus(activeTurn: JSONObject): String {
+        val detail = firstNonEmpty(
+            activeTurn.optString("detail", ""),
+            activeTurn.optString("diff_stats", ""),
+            activeTurn.optInt("file_count", 0).takeIf { it > 0 }?.let { "$it 个文件" } ?: "",
+        )
+        return joinLiveStatus("正在改文件", detail)
+    }
+
+internal fun MainActivity.buildActiveTurnApprovalStatus(activeTurn: JSONObject): String {
+        val label = when (activeTurn.optString("approval_type", "")) {
+            "command" -> "等待命令审批"
+            "fileChange" -> "等待文件审批"
+            "permission" -> "等待权限审批"
+            else -> "等待审批"
+        }
+        return joinLiveStatus(label, activeTurn.optString("detail", ""))
+    }
+
+internal fun MainActivity.inferLiveTurnStatusFromActiveTurnItem(item: JSONObject): String? {
+        return when (item.optString("type", "")) {
+            "agentMessage" -> "正在输出…"
+            "fileChange" -> "正在改文件…"
+            "commandExecution" -> "正在执行命令…"
+            "reasoning" -> "正在思考…"
+            "plan" -> "正在整理计划…"
+            "mcpToolCall" -> "正在调用工具…"
+            "dynamicToolCall" -> "正在运行工具…"
+            "collabAgentToolCall" -> "正在处理子任务…"
+            "userMessage" -> "已开始，等待输出…"
+            else -> null
+        }
     }
 
 internal fun MainActivity.inferLiveTurnStatusFromSession(session: JSONObject?): String? {
@@ -155,7 +225,7 @@ internal fun MainActivity.inferLiveTurnStatusFromSession(session: JSONObject?): 
         val thread = session.optJSONObject("thread") ?: session
         inferLiveTurnStatusFromThreadTurns(thread)?.let { return it }
         return when (threadStatusType(thread.opt("status"))) {
-            "active", "running" -> "Codex 正在处理中…"
+            "active", "running" -> "回合进行中…"
             "systemError" -> "Codex 响应异常"
             else -> null
         }
@@ -169,12 +239,21 @@ internal fun MainActivity.inferLiveTurnStatusFromThreadTurns(thread: JSONObject)
             val errorText = extractErrorText(turn.optJSONObject("error"))
             when {
                 errorText.isNotBlank() -> return "Codex 响应异常"
-                status == "inProgress" -> return "Codex 正在处理中…"
+                status == "inProgress" -> return inferLiveTurnStatusFromThreadTurn(turn) ?: "回合进行中…"
                 status == "failed" -> return "Codex 响应异常"
                 status == "completed" -> Unit
                 status == "interrupted" -> Unit
-                status.isNotBlank() -> return "Codex 正在处理中…"
+                status.isNotBlank() -> return "回合进行中…"
             }
+        }
+        return null
+    }
+
+internal fun MainActivity.inferLiveTurnStatusFromThreadTurn(turn: JSONObject): String? {
+        val items = turn.optJSONArray("items") ?: return null
+        for (index in items.length() - 1 downTo 0) {
+            val item = items.optJSONObject(index) ?: continue
+            inferLiveTurnStatusFromActiveTurnItem(item)?.let { return it }
         }
         return null
     }
@@ -188,6 +267,7 @@ internal fun threadStatusType(value: Any?): String {
     }
 
 internal fun MainActivity.inferLiveTurnStatusFromSnapshotEntries(entries: JSONArray): String? {
+        inferOpenTurnLiveStatusFromSnapshotEntries(entries)?.let { return it }
         for (index in entries.length() - 1 downTo 0) {
             val entry = entries.optJSONObject(index) ?: continue
             when (entry.optString("type", "")) {
@@ -206,17 +286,49 @@ internal fun MainActivity.inferLiveTurnStatusFromSnapshotEntries(entries: JSONAr
                     val itemStatus = item.optString("status", "").trim()
                     if (itemStatus == "inProgress") {
                         return when (item.optString("type", "")) {
-                            "fileChange" -> "Codex 正在修改文件…"
-                            "commandExecution" -> "Codex 正在执行命令…"
-                            "reasoning" -> "Codex 正在思考…"
-                            "plan" -> "Codex 正在整理计划…"
-                            else -> "Codex 正在处理中…"
+                            "fileChange" -> "正在改文件…"
+                            "commandExecution" -> "正在执行命令…"
+                            "reasoning" -> "正在思考…"
+                            "plan" -> "正在整理计划…"
+                            else -> "回合进行中…"
                         }
                     }
                 }
             }
         }
         return null
+    }
+
+internal fun MainActivity.inferOpenTurnLiveStatusFromSnapshotEntries(entries: JSONArray): String? {
+        val startedTurns = linkedSetOf<String>()
+        val completedTurns = mutableSetOf<String>()
+        val lastItemsByTurn = linkedMapOf<String, JSONObject>()
+
+        for (index in 0 until entries.length()) {
+            val entry = entries.optJSONObject(index) ?: continue
+            val turnId = entry.optString("turn_id", "").trim()
+            if (turnId.isBlank()) continue
+            when (entry.optString("type", "")) {
+                "turn_started" -> {
+                    startedTurns.add(turnId)
+                }
+                "turn_status" -> {
+                    val status = entry.optString("status", "").trim()
+                    if (status != "inProgress" && status.isNotBlank()) {
+                        completedTurns.add(turnId)
+                    }
+                }
+                "item" -> {
+                    entry.optJSONObject("item")?.let { item ->
+                        lastItemsByTurn[turnId] = item
+                    }
+                }
+            }
+        }
+
+        val openTurnId = startedTurns.lastOrNull { turnId -> !completedTurns.contains(turnId) } ?: return null
+        val item = lastItemsByTurn[openTurnId]
+        return item?.let(::inferLiveTurnStatusFromActiveTurnItem) ?: "回合进行中…"
     }
 
 private fun JSONArray.snapshotSignature(): String {
