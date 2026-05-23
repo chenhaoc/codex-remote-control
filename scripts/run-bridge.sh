@@ -39,6 +39,23 @@ list_reachable_ips() {
   fi
 }
 
+check_port_available() {
+  if ! command -v lsof >/dev/null 2>&1; then
+    return
+  fi
+
+  local listeners
+  listeners="$(lsof -nP "-iTCP:$PORT" -sTCP:LISTEN 2>/dev/null || true)"
+  if [[ -z "$listeners" ]]; then
+    return
+  fi
+
+  echo "Port $PORT is already in use; bridge cannot start." >&2
+  echo "$listeners" >&2
+  echo "Stop the existing bridge or set CODEX_REMOTE_PORT to another port." >&2
+  exit 1
+}
+
 TOKEN="$(ensure_token)"
 
 echo "Codex Remote Control bridge"
@@ -70,4 +87,5 @@ if [[ "$SYNC_LOG" == "1" || "$SYNC_LOG" == "true" || "$SYNC_LOG" == "yes" ]]; th
   echo "Sync log: $SYNC_LOG_FILE"
 fi
 
+check_port_available
 exec npm start -- "${ARGS[@]}" "$@"
