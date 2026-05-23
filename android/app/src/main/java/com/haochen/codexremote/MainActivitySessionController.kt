@@ -281,6 +281,7 @@ internal fun MainActivity.removePendingApproval(requestId: String) {
 
 internal fun MainActivity.selectSession(sessionId: String, syncHistory: Boolean) {
         if (sessionId.isBlank()) return
+        clearConversation()
         activeSessionId = sessionId
         prefs.edit().putString(KEY_SESSION, sessionId).apply()
         projectBuckets().firstOrNull { group -> group.sessions.any { it.sessionId == sessionId } }?.let { group ->
@@ -290,11 +291,10 @@ internal fun MainActivity.selectSession(sessionId: String, syncHistory: Boolean)
             ?.takeIf { it.isNotBlank() && isKnownModel(it) }
             ?.let { selectModel(it) }
         if (syncHistory && connected) {
-            clearConversation()
             requestSessionContent(sessionId)
             startSessionSyncLoop()
         } else {
-            clearConversation()
+            chatRestoreScrollY = Int.MAX_VALUE
             applyCachedSessionContent(sessionId)
             stopSessionSyncLoop()
         }

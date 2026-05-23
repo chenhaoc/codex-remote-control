@@ -10,6 +10,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -103,103 +104,105 @@ internal fun ConversationHistoryWebView(
         )
     }
 
-    AndroidView(
-        modifier =
-            modifier.onSizeChanged { size ->
-                val previousHeight = lastViewportHeight
-                if (previousHeight == null || previousHeight <= 0 || size.height <= 0) {
-                    if (size.height > 0) {
-                        lastViewportHeight = size.height
+    key(sessionId) {
+        AndroidView(
+            modifier =
+                modifier.onSizeChanged { size ->
+                    val previousHeight = lastViewportHeight
+                    if (previousHeight == null || previousHeight <= 0 || size.height <= 0) {
+                        if (size.height > 0) {
+                            lastViewportHeight = size.height
+                        }
+                        return@onSizeChanged
                     }
-                    return@onSizeChanged
-                }
-                if (previousHeight == size.height) return@onSizeChanged
-                if (restoreScrollY != null || lastLoadedHtml == null || fullRenderPending) return@onSizeChanged
-                lastViewportHeight = size.height
-                val anchorY = viewportResizeAnchorY ?: (webView.scrollY + previousHeight)
-                viewportResizeAnchorY = anchorY
-                viewportResizeSequence += 1
-                val sequence = viewportResizeSequence
-                CONVERSATION_VIEWPORT_RESIZE_RESTORE_DELAYS_MS.forEachIndexed { index, delayMs ->
-                    webView.postDelayed(
-                        {
-                            if (sequence != viewportResizeSequence) return@postDelayed
-                            val viewportHeight = webView.height.takeIf { it > 0 } ?: size.height
-                            webView.scrollTo(0, (anchorY - viewportHeight).coerceAtLeast(0))
-                            if (index == CONVERSATION_VIEWPORT_RESIZE_RESTORE_DELAYS_MS.lastIndex) {
-                                viewportResizeAnchorY = null
-                            }
+                    if (previousHeight == size.height) return@onSizeChanged
+                    if (restoreScrollY != null || lastLoadedHtml == null || fullRenderPending) return@onSizeChanged
+                    lastViewportHeight = size.height
+                    val anchorY = viewportResizeAnchorY ?: (webView.scrollY + previousHeight)
+                    viewportResizeAnchorY = anchorY
+                    viewportResizeSequence += 1
+                    val sequence = viewportResizeSequence
+                    CONVERSATION_VIEWPORT_RESIZE_RESTORE_DELAYS_MS.forEachIndexed { index, delayMs ->
+                        webView.postDelayed(
+                            {
+                                if (sequence != viewportResizeSequence) return@postDelayed
+                                val viewportHeight = webView.height.takeIf { it > 0 } ?: size.height
+                                webView.scrollTo(0, (anchorY - viewportHeight).coerceAtLeast(0))
+                                if (index == CONVERSATION_VIEWPORT_RESIZE_RESTORE_DELAYS_MS.lastIndex) {
+                                    viewportResizeAnchorY = null
+                                }
+                            },
+                            delayMs,
+                        )
+                    }
+                },
+            factory = { webView },
+            update = { view ->
+                val renderTag = renderSnapshot.tag()
+                if (pendingRenderTag == null && lastRenderSnapshot == renderSnapshot) return@AndroidView
+                if (pendingRenderTag == renderTag) return@AndroidView
+                if (fullRenderPending) return@AndroidView
+                val previousSnapshot = lastRenderSnapshot
+                val sessionChanged = previousSnapshot == null && pendingRenderTag == null
+                val wasAtBottom = isConversationNearBottom(view)
+                val scrollY = view.scrollY
+                val scrollMode =
+                    when {
+                        restoreScrollY != null && previousSnapshot == null -> ConversationScrollMode.Restore(restoreScrollY)
+                        sessionChanged -> ConversationScrollMode.Bottom
+                        fullRenderPending -> lastScrollMode
+                        wasAtBottom -> ConversationScrollMode.Bottom
+                        else -> ConversationScrollMode.Restore(scrollY)
+                    }
+                pendingScrollModes.clear()
+                pendingScrollModes[renderTag] = scrollMode
+                pendingRenderSnapshots.clear()
+                pendingRenderSnapshots[renderTag] = renderSnapshot
+                lastScrollMode = scrollMode
+                val patchCheck = previousSnapshot?.let { explainConversationIncrementalPatch(it, renderSnapshot) }
+                if (
+                    !fullRenderPending &&
+                    previousSnapshot != null &&
+                    patchCheck?.canPatch == true
+                ) {
+                    expectedHtmlTag = renderTag
+                    fullRenderPending = false
+                    pendingRenderTag = renderTag
+                    view.tag = renderTag
+                    applyConversationIncrementalPatch(
+                        webView = view,
+                        renderTag = renderTag,
+                        fallbackHtml = { buildConversationRenderedPageHtml(renderedItems, renderTag) },
+                        onPatchApplied = {
+                            lastLoadedHtml = renderTag
+                            lastRenderSnapshot = renderSnapshot
+                            pendingRenderSnapshots.remove(renderTag)
+                            pendingRenderTag = null
                         },
-                        delayMs,
+                        onFallbackRenderStarted = {
+                            fullRenderPending = true
+                        },
+                        previous = previousSnapshot,
+                        current = renderSnapshot,
+                        scrollMode = scrollMode,
+                    )
+                } else {
+                    val pageHtml = buildConversationRenderedPageHtml(renderedItems, renderTag)
+                    expectedHtmlTag = renderTag
+                    fullRenderPending = true
+                    pendingRenderTag = renderTag
+                    view.tag = renderTag
+                    view.loadDataWithBaseURL(
+                        null,
+                        pageHtml,
+                        "text/html",
+                        "utf-8",
+                        null,
                     )
                 }
             },
-        factory = { webView },
-        update = { view ->
-            val renderTag = renderSnapshot.tag()
-            if (pendingRenderTag == null && lastRenderSnapshot == renderSnapshot) return@AndroidView
-            if (pendingRenderTag == renderTag) return@AndroidView
-            if (fullRenderPending) return@AndroidView
-            val previousSnapshot = lastRenderSnapshot
-            val sessionChanged = previousSnapshot == null && pendingRenderTag == null
-            val wasAtBottom = isConversationNearBottom(view)
-            val scrollY = view.scrollY
-            val scrollMode =
-                when {
-                    restoreScrollY != null && previousSnapshot == null -> ConversationScrollMode.Restore(restoreScrollY)
-                    sessionChanged -> ConversationScrollMode.Bottom
-                    fullRenderPending -> lastScrollMode
-                    wasAtBottom -> ConversationScrollMode.Bottom
-                    else -> ConversationScrollMode.Restore(scrollY)
-                }
-            pendingScrollModes.clear()
-            pendingScrollModes[renderTag] = scrollMode
-            pendingRenderSnapshots.clear()
-            pendingRenderSnapshots[renderTag] = renderSnapshot
-            lastScrollMode = scrollMode
-            val patchCheck = previousSnapshot?.let { explainConversationIncrementalPatch(it, renderSnapshot) }
-            if (
-                !fullRenderPending &&
-                previousSnapshot != null &&
-                patchCheck?.canPatch == true
-            ) {
-                expectedHtmlTag = renderTag
-                fullRenderPending = false
-                pendingRenderTag = renderTag
-                view.tag = renderTag
-                applyConversationIncrementalPatch(
-                    webView = view,
-                    renderTag = renderTag,
-                    fallbackHtml = { buildConversationRenderedPageHtml(renderedItems, renderTag) },
-                    onPatchApplied = {
-                        lastLoadedHtml = renderTag
-                        lastRenderSnapshot = renderSnapshot
-                        pendingRenderSnapshots.remove(renderTag)
-                        pendingRenderTag = null
-                    },
-                    onFallbackRenderStarted = {
-                        fullRenderPending = true
-                    },
-                    previous = previousSnapshot,
-                    current = renderSnapshot,
-                    scrollMode = scrollMode,
-                )
-            } else {
-                val pageHtml = buildConversationRenderedPageHtml(renderedItems, renderTag)
-                expectedHtmlTag = renderTag
-                fullRenderPending = true
-                pendingRenderTag = renderTag
-                view.tag = renderTag
-                view.loadDataWithBaseURL(
-                    null,
-                    pageHtml,
-                    "text/html",
-                    "utf-8",
-                    null,
-                )
-            }
-        },
-    )
+        )
+    }
 }
 
 private fun buildCachedConversationRenderedItems(
