@@ -222,10 +222,12 @@ internal data class CodeBrowserFileContent(
 internal data class CodeBrowserRenderedContent(
     val text: AnnotatedString,
     val lines: List<CodeBrowserRenderedLine> = emptyList(),
+    val lineNumberWidth: Int = 0,
     val lightweight: Boolean,
 )
 
 internal data class CodeBrowserRenderedLine(
     val text: AnnotatedString,
     val kind: DiffLineKind?,
+    val lineNumber: Int? = null,
 )

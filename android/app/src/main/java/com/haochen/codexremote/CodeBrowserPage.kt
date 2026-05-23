@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -86,6 +87,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -119,7 +121,7 @@ internal fun MainActivity.CodeBrowserPage(
     Box(
         modifier = modifier
             .background(uiBackground)
-            .padding(14.dp),
+            .padding(horizontal = 10.dp, vertical = 12.dp),
     ) {
         Column(
             modifier = Modifier.fillMaxSize(),
@@ -208,8 +210,8 @@ internal fun MainActivity.CodeBrowserPage(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
-                shape = RoundedCornerShape(18.dp),
-                color = uiSurfaceAlt,
+                shape = RoundedCornerShape(14.dp),
+                color = uiSurface,
                 border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
             ) {
                 when (state.mode) {
@@ -223,7 +225,7 @@ internal fun MainActivity.CodeBrowserPage(
                             Column(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .padding(14.dp),
+                                    .padding(horizontal = 10.dp, vertical = 12.dp),
                                 verticalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
                                 if (selectedEntry != null) {
@@ -253,7 +255,7 @@ internal fun MainActivity.CodeBrowserPage(
                                 Column(
                                     modifier = Modifier
                                         .fillMaxSize()
-                                        .padding(14.dp),
+                                        .padding(horizontal = 10.dp, vertical = 12.dp),
                                     verticalArrangement = Arrangement.spacedBy(10.dp),
                                 ) {
                                     Text(
@@ -273,7 +275,7 @@ internal fun MainActivity.CodeBrowserPage(
                                 Column(
                                     modifier = Modifier
                                         .fillMaxSize()
-                                        .padding(14.dp),
+                                        .padding(horizontal = 10.dp, vertical = 12.dp),
                                     verticalArrangement = Arrangement.spacedBy(10.dp),
                                 ) {
                                     Text(
@@ -293,7 +295,7 @@ internal fun MainActivity.CodeBrowserPage(
                                 Column(
                                     modifier = Modifier
                                         .fillMaxSize()
-                                        .padding(14.dp),
+                                        .padding(horizontal = 10.dp, vertical = 12.dp),
                                     verticalArrangement = Arrangement.spacedBy(10.dp),
                                 ) {
                                     Text(
@@ -316,7 +318,7 @@ internal fun MainActivity.CodeBrowserPage(
                                 Column(
                                     modifier = Modifier
                                         .fillMaxSize()
-                                        .padding(14.dp),
+                                        .padding(horizontal = 10.dp, vertical = 12.dp),
                                     verticalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
                                     Text(
@@ -498,7 +500,7 @@ internal fun MainActivity.CodeBrowserTextPane(
     if (rendered == null) {
         Box(
             modifier = modifier
-                .background(uiSurfaceAlt),
+                .background(c(0xFFF8FBF9), RoundedCornerShape(10.dp)),
             contentAlignment = Alignment.Center,
         ) {
             CircularProgressIndicator(color = uiPrimary)
@@ -509,44 +511,26 @@ internal fun MainActivity.CodeBrowserTextPane(
     SelectionContainer {
         Box(
             modifier = modifier
-                .background(uiSurfaceAlt)
+                .background(c(0xFFF8FBF9), RoundedCornerShape(10.dp))
                 .verticalScroll(verticalScroll)
-                .padding(14.dp),
+                .padding(vertical = 8.dp),
         ) {
             val renderedContent = rendered
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (renderedContent?.lightweight == true) {
                     Text(
                         text = "大文件已切换到轻量渲染，优先保证打开速度。",
                         color = uiMuted,
                         fontSize = 11.sp,
+                        modifier = Modifier.padding(horizontal = 10.dp),
                     )
                 }
-                if (mode == CodeTextMode.Diff && !renderedContent?.lines.isNullOrEmpty()) {
-                    Column(verticalArrangement = Arrangement.spacedBy(1.dp), modifier = Modifier.fillMaxWidth()) {
-                        renderedContent?.lines.orEmpty().forEach { line ->
-                            val lineBackground =
-                                when (line.kind) {
-                                    DiffLineKind.Added -> c(0x3427A55A)
-                                    DiffLineKind.Deleted -> c(0x34DC2626)
-                                    else -> Color.Transparent
-                                }
-                            Text(
-                                text = line.text,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(lineBackground, RoundedCornerShape(6.dp))
-                                    .padding(horizontal = 4.dp, vertical = 1.dp),
-                                color = uiText,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 12.sp,
-                                lineHeight = 18.sp,
-                            )
-                        }
-                    }
+                if (!renderedContent?.lines.isNullOrEmpty()) {
+                    CodeBrowserLineBlock(renderedContent = renderedContent, mode = mode)
                 } else {
                     Text(
                         text = rendered?.text ?: AnnotatedString(""),
+                        modifier = Modifier.padding(horizontal = 10.dp),
                         color = uiText,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
@@ -555,5 +539,202 @@ internal fun MainActivity.CodeBrowserTextPane(
                 }
             }
         }
+    }
+}
+
+@Composable
+internal fun MainActivity.CodeBrowserLineBlock(
+    renderedContent: CodeBrowserRenderedContent?,
+    mode: CodeTextMode,
+) {
+    val lines = renderedContent?.lines.orEmpty()
+    val lineNumberWidth = maxOf(2, renderedContent?.lineNumberWidth ?: lines.size.toString().length)
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        color = c(0xFFFDFEFD),
+        border = androidx.compose.foundation.BorderStroke(1.dp, c(0xFFD8E8DB)),
+    ) {
+        Column {
+            CodeBrowserCodeBlockHeader(mode = mode, lineCount = lines.size)
+            HorizontalDivider(color = c(0xFFE0ECE4))
+            Column(
+                modifier = Modifier.background(c(0xFFFEFFFE)),
+            ) {
+                lines.forEachIndexed { index, line ->
+                    if (mode == CodeTextMode.Diff) {
+                        CodeBrowserDiffLine(index = index, line = line, lineNumberWidth = lineNumberWidth)
+                    } else {
+                        CodeBrowserFileLine(index = index, line = line, lineNumberWidth = lineNumberWidth)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun MainActivity.CodeBrowserCodeBlockHeader(
+    mode: CodeTextMode,
+    lineCount: Int,
+) {
+    val accentColor =
+        when (mode) {
+            CodeTextMode.Diff -> c(0xFF0EA5E9)
+            CodeTextMode.File -> uiPrimary
+        }
+    val label =
+        when (mode) {
+            CodeTextMode.Diff -> "diff"
+            CodeTextMode.File -> "code"
+        }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(c(0xFFF3F8F4))
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .background(accentColor, CircleShape),
+            )
+            Text(
+                text = label,
+                color = c(0xFF4F6F5A),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+        Text(
+            text = "$lineCount lines",
+            color = c(0xFF7C9484),
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+        )
+    }
+}
+
+@Composable
+internal fun MainActivity.CodeBrowserDiffLine(
+    index: Int,
+    line: CodeBrowserRenderedLine,
+    lineNumberWidth: Int,
+) {
+    val gutterWidth = (lineNumberWidth * 8 + 18).dp
+    val background =
+        when (line.kind) {
+            DiffLineKind.Added -> c(0xFFE5F7EA)
+            DiffLineKind.Deleted -> c(0xFFFFEBEB)
+            DiffLineKind.Hunk -> c(0xFFEFF8FF)
+            DiffLineKind.Meta -> c(0xFFF3F7F4)
+            else -> Color.Transparent
+        }
+    val gutterBackground =
+        when (line.kind) {
+            DiffLineKind.Added -> c(0xFFD5F1DE)
+            DiffLineKind.Deleted -> c(0xFFFFDADA)
+            DiffLineKind.Hunk -> c(0xFFE0F2FE)
+            DiffLineKind.Meta -> c(0xFFE8F0EB)
+            else -> c(0xFFEFF6F1)
+        }
+    val lineNumberColor =
+        when (line.kind) {
+            DiffLineKind.Added -> c(0xFF137A43)
+            DiffLineKind.Deleted -> c(0xFFB91C1C)
+            DiffLineKind.Hunk -> c(0xFF0369A1)
+            else -> c(0xFF789283)
+        }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(background)
+            .padding(end = 8.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            text = line.lineNumber?.toString()?.padStart(lineNumberWidth, ' ').orEmpty(),
+            modifier = Modifier
+                .width(gutterWidth)
+                .heightIn(min = 21.dp)
+                .background(gutterBackground)
+                .padding(end = 8.dp),
+            color = lineNumberColor,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 11.sp,
+            lineHeight = 18.sp,
+            textAlign = TextAlign.End,
+        )
+        Text(
+            text = line.contentTextWithoutDiffMarker(),
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 8.dp),
+            color = uiText,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+            lineHeight = 18.sp,
+        )
+    }
+}
+
+@Composable
+internal fun MainActivity.CodeBrowserFileLine(
+    index: Int,
+    line: CodeBrowserRenderedLine,
+    lineNumberWidth: Int,
+) {
+    val gutterWidth = (lineNumberWidth * 8 + 18).dp
+    val rowBackground = if (index % 2 == 0) Color.Transparent else c(0xFFFAFCFA)
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(rowBackground)
+            .padding(end = 8.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            text = (index + 1).toString().padStart(lineNumberWidth, ' '),
+            modifier = Modifier
+                .width(gutterWidth)
+                .heightIn(min = 21.dp)
+                .background(c(0xFFEFF6F1))
+                .padding(end = 8.dp),
+            color = c(0xFF789283),
+            fontFamily = FontFamily.Monospace,
+            fontSize = 11.sp,
+            lineHeight = 18.sp,
+            textAlign = TextAlign.End,
+        )
+        Text(
+            text = line.text,
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 8.dp),
+            color = uiText,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+            lineHeight = 18.sp,
+        )
+    }
+}
+
+internal fun CodeBrowserRenderedLine.contentTextWithoutDiffMarker(): AnnotatedString {
+    return if ((kind == DiffLineKind.Added || kind == DiffLineKind.Deleted) && text.length > 0) {
+        text.subSequence(1, text.length)
+    } else {
+        text
     }
 }

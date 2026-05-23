@@ -28,10 +28,7 @@ internal fun buildCodeBrowserAnnotatedText(
             countCodeBrowserLines(normalized) > CODE_BROWSER_FULL_HIGHLIGHT_MAX_LINES
     return when (mode) {
         CodeTextMode.Diff -> buildDiffRenderedContent(normalized, language, syntaxHighlight = !lightweight, lightweight = lightweight)
-        CodeTextMode.File -> {
-            val renderedText = buildFileAnnotatedText(normalized, language, syntaxHighlight = !lightweight)
-            CodeBrowserRenderedContent(text = renderedText, lightweight = lightweight)
-        }
+        CodeTextMode.File -> buildFileRenderedContent(normalized, language, syntaxHighlight = !lightweight, lightweight = lightweight)
     }
 }
 
@@ -67,11 +64,15 @@ internal fun buildDiffRenderedContent(
     lightweight: Boolean,
 ): CodeBrowserRenderedContent {
     val lines = text.split('\n')
+    val diffLineNumbers = computeDiffLineNumbers(lines)
+    val maxLineNumber = diffLineNumbers.filterNotNull().maxOrNull() ?: 0
+    val lineNumberWidth = maxOf(2, maxLineNumber.toString().length)
     val renderedLines =
-        lines.map { line ->
+        lines.mapIndexed { index, line ->
             CodeBrowserRenderedLine(
                 text = buildAnnotatedDiffLine(line, language, syntaxHighlight),
                 kind = classifyDiffLine(line),
+                lineNumber = diffLineNumbers.getOrNull(index),
             )
         }
     val renderedText =
@@ -84,6 +85,115 @@ internal fun buildDiffRenderedContent(
     return CodeBrowserRenderedContent(
         text = renderedText,
         lines = renderedLines,
+        lineNumberWidth = lineNumberWidth,
+        lightweight = lightweight,
+    )
+}
+
+internal fun computeDiffLineNumbers(lines: List<String>): List<Int?> {
+    val result = ArrayList<Int?>(lines.size)
+    var oldLine: Int? = null
+    var newLine: Int? = null
+
+    lines.forEach { line ->
+        val hunk = parseDiffHunkHeader(line)
+        if (hunk != null) {
+            oldLine = hunk.oldStart
+            newLine = hunk.newStart
+            result += null
+            return@forEach
+        }
+
+        when (classifyDiffLine(line)) {
+            DiffLineKind.Added -> {
+                val current = newLine
+                result += current
+                if (current != null) newLine = current + 1
+            }
+
+            DiffLineKind.Deleted -> {
+                val current = oldLine
+                result += current
+                if (current != null) oldLine = current + 1
+            }
+
+            DiffLineKind.Context -> {
+                val current = newLine
+                result += current
+                if (oldLine != null) oldLine = oldLine!! + 1
+                if (current != null) newLine = current + 1
+            }
+
+            DiffLineKind.Meta,
+            DiffLineKind.Hunk -> result += null
+        }
+    }
+
+    return result
+}
+
+internal data class DiffHunkHeader(
+    val oldStart: Int,
+    val newStart: Int,
+)
+
+internal fun parseDiffHunkHeader(line: String): DiffHunkHeader? {
+    if (!line.startsWith("@@")) return null
+    val oldMarkerStart = line.indexOf('-')
+    if (oldMarkerStart < 0) return null
+    val oldMarkerEnd = line.indexOf(' ', startIndex = oldMarkerStart)
+    if (oldMarkerEnd < 0) return null
+    val newMarkerStart = line.indexOf('+', startIndex = oldMarkerEnd)
+    if (newMarkerStart < 0) return null
+    val newMarkerEnd = line.indexOf(' ', startIndex = newMarkerStart).let { if (it < 0) line.length else it }
+
+    val oldStart = parseDiffHunkStart(line.substring(oldMarkerStart + 1, oldMarkerEnd)) ?: return null
+    val newStart = parseDiffHunkStart(line.substring(newMarkerStart + 1, newMarkerEnd)) ?: return null
+    return DiffHunkHeader(oldStart = oldStart, newStart = newStart)
+}
+
+internal fun parseDiffHunkStart(marker: String): Int? {
+    val startText = marker.substringBefore(',').trim()
+    return startText.toIntOrNull()
+}
+
+internal fun buildFileRenderedContent(
+    text: String,
+    language: CodeLanguage,
+    syntaxHighlight: Boolean,
+    lightweight: Boolean,
+): CodeBrowserRenderedContent {
+    val rawLines = text.split('\n')
+    val lineNumberWidth = maxOf(2, rawLines.size.toString().length)
+    if (lightweight) {
+        return CodeBrowserRenderedContent(
+            text = buildFileAnnotatedText(text, language, syntaxHighlight),
+            lineNumberWidth = lineNumberWidth,
+            lightweight = true,
+        )
+    }
+    val renderedLines =
+        rawLines.map { line ->
+            CodeBrowserRenderedLine(
+                text = renderCodeBrowserLine(line, language, syntaxHighlight),
+                kind = null,
+            )
+        }
+    val renderedText =
+        buildAnnotatedString {
+            renderedLines.forEachIndexed { index, renderedLine ->
+                withStyle(SpanStyle(color = codeBrowserMuted)) {
+                    append((index + 1).toString().padStart(lineNumberWidth, ' '))
+                    append(" | ")
+                }
+                append(renderedLine.text)
+                if (index < renderedLines.lastIndex) append('\n')
+            }
+        }
+    return CodeBrowserRenderedContent(
+        text = renderedText,
+        lines = renderedLines,
+        lineNumberWidth = lineNumberWidth,
         lightweight = lightweight,
     )
 }
