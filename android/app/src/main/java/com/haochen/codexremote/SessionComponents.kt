@@ -2,6 +2,7 @@ package com.haochen.codexremote
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -349,6 +350,7 @@ internal fun MainActivity.SessionInfoSheet(
             state.rows.forEach { (label, value) ->
                 val showSandboxUpgrade = state.canSwitchToFullAccess && label == state.sandboxRowLabel
                 Surface(
+                    modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
                     color = uiSurfaceAlt,
                     border = BorderStroke(1.dp, uiBorder),
@@ -356,6 +358,16 @@ internal fun MainActivity.SessionInfoSheet(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .combinedClickable(
+                                onClick = {},
+                                onLongClick = {
+                                    if (copyTextToClipboard(label, value)) {
+                                        showNotice("已复制$label")
+                                    } else {
+                                        showNotice("复制失败")
+                                    }
+                                },
+                            )
                             .padding(horizontal = 14.dp, vertical = 12.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalAlignment = Alignment.CenterVertically,

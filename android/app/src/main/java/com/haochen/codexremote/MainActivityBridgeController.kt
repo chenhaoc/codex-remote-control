@@ -1,5 +1,6 @@
 package com.haochen.codexremote
 
+import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import java.io.IOException
@@ -319,6 +320,12 @@ internal fun MainActivity.pasteBridgeUrlFromClipboard(): String? {
         val clip = clipboard.primaryClip ?: return null
         if (clip.itemCount == 0) return null
         return clip.firstText()?.trim()?.takeIf { it.isNotBlank() }
+    }
+
+internal fun MainActivity.copyTextToClipboard(label: String, text: String): Boolean {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return false
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
+        return true
     }
 
 internal fun MainActivity.pasteBridgeUrl() {
