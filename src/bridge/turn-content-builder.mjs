@@ -1,0 +1,691 @@
+import { createEvent } from '../protocol.mjs';
+import {
+  extractUserMessageText,
+  getTurnInputItemId,
+  normalizeTurnStatusValue,
+} from './common.mjs';
+import { SYNC_LOG_EVENT_LIMIT, summarizeSyncEntries, syncItemTypeCounts } from './sync-log.mjs';
+import { eventSignature, mergeInitialSessionEvents, pruneHydratedEvents } from './session-event-signature.mjs';
+
+export class TurnContentBuilder {
+  constructor({ backend, store, loadHydrationThread, logSync = () => {} }) {
+    this.backend = backend;
+    this.store = store;
+    this.loadHydrationThread = loadHydrationThread;
+    this.logSync = logSync;
+  }
+
+  #logSync(event, details = {}) {
+    this.logSync(event, details);
+  }
+  buildContentEntriesFromStoredEvents(sessionId) {
+    const session = this.store.getSession(sessionId);
+    if (!session) return [];
+
+    const events = this.store.syncEvents(sessionId, 0);
+    const entries = [];
+    const seenItemIds = new Set();
+    const completedUserMessageSignatures = new Set();
+
+    for (const event of events) {
+      if (event?.event !== 'item/completed') continue;
+      const item = event?.payload?.item;
+      if (item?.type !== 'userMessage') continue;
+      const text = extractUserMessageText(item.content ?? []);
+      if (!text) continue;
+      completedUserMessageSignatures.add(`${event.turn_id ?? ''}|${text}`);
+    }
+
+    for (const event of events) {
+      if (event?.event === 'turn/input') {
+        const text = String(event?.payload?.text ?? '').trim();
+        if (!text) continue;
+        if (completedUserMessageSignatures.has(`${event.turn_id ?? ''}|${text}`)) {
+          continue;
+        }
+        const itemId = getTurnInputItemId({
+          payload: event?.payload,
+          requestId: event?.request_id ?? '',
+          turnId: event?.turn_id ?? '',
+          sessionId,
+          seq: event?.seq ?? entries.length,
+        });
+        entries.push({
+          type: 'item',
+          session_id: sessionId,
+          thread_id: session.thread_id ?? sessionId,
+          turn_id: event.turn_id ?? null,
+          item: {
+            type: 'userMessage',
+            id: itemId,
+            content: [{ type: 'text', text }],
+          },
+        });
+        continue;
+      }
+
+      if (event?.event !== 'item/completed') continue;
+      const item = event?.payload?.item;
+      if (!item?.type) continue;
+      if (item.type !== 'userMessage' && item.type !== 'agentMessage' && item.type !== 'fileChange') continue;
+
+      const itemId = item.id ?? `stored_item_${event.seq ?? entries.length}`;
+      if (seenItemIds.has(itemId)) continue;
+      seenItemIds.add(itemId);
+      entries.push({
+        type: 'item',
+        session_id: sessionId,
+        thread_id: session.thread_id ?? sessionId,
+        turn_id: event.turn_id ?? null,
+        item: {
+          ...item,
+          id: itemId,
+        },
+      });
+    }
+
+    return entries;
+  }
+
+  mergeStoredTurnInputEntries(sessionId, entries = []) {
+    const session = this.store.getSession(sessionId);
+    if (!session) return entries;
+
+    const merged = entries.slice();
+    const existingItemIds = new Set();
+    const existingInputSignatures = new Set();
+    for (const entry of merged) {
+      const item = entry?.item;
+      if (item?.id) existingItemIds.add(item.id);
+      if (item?.type !== 'userMessage') continue;
+      const text = extractUserMessageText(item.content ?? []);
+      if (text) {
+        existingInputSignatures.add(`${entry.turn_id ?? ''}|${text}`);
+      }
+    }
+
+    const events = this.store.syncEvents(sessionId, 0);
+    for (const event of events) {
+      if (event?.event !== 'turn/input') continue;
+      const text = String(event?.payload?.text ?? '').trim();
+      if (!text) continue;
+      const signature = `${event.turn_id ?? ''}|${text}`;
+      const itemId = getTurnInputItemId({
+        payload: event?.payload,
+        requestId: event?.request_id ?? '',
+        turnId: event?.turn_id ?? '',
+        sessionId,
+        seq: event?.seq ?? merged.length,
+      });
+      if (existingInputSignatures.has(signature) || existingItemIds.has(itemId)) continue;
+
+      const entry = {
+        type: 'item',
+        session_id: sessionId,
+        thread_id: session.thread_id ?? sessionId,
+        turn_id: event.turn_id ?? null,
+        item: {
+          type: 'userMessage',
+          id: itemId,
+          content: [{ type: 'text', text }],
+        },
+      };
+      const index = this.#lastContentEntryIndexForTurn(merged, event.turn_id ?? '');
+      if (index >= 0) {
+        merged.splice(index + 1, 0, entry);
+      } else {
+        merged.push(entry);
+      }
+      existingInputSignatures.add(signature);
+      existingItemIds.add(itemId);
+    }
+
+    return merged;
+  }
+
+  #lastContentEntryIndexForTurn(entries, turnId) {
+    if (!turnId) return -1;
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      if (entries[index]?.turn_id === turnId) return index;
+    }
+    return -1;
+  }
+
+  async buildEventsFromThread(sessionId, thread) {
+    const rawThread = thread?.thread ?? thread;
+    const turns = this.#sortTurnsForRendering(Array.isArray(rawThread?.turns) ? rawThread.turns : []);
+    const threadId = rawThread?.id ?? rawThread?.threadId ?? rawThread?.sessionId ?? sessionId;
+    const storedUserInputItemIds = this.#buildStoredTurnInputItemIdIndex(sessionId);
+    const events = [];
+
+    for (const turn of turns) {
+      if (!turn?.id) continue;
+      events.push(createEvent('turn/started', {
+        session_id: sessionId,
+        thread_id: threadId,
+        turn_id: turn.id,
+        payload: { turn: { id: turn.id } },
+      }));
+
+      const items = await this.#loadTurnItems(threadId, turn);
+      let turnItemSeq = 0;
+      for (const item of items) {
+        if (item?.type === 'userMessage') {
+          const text = extractUserMessageText(item.content ?? []);
+          if (text) {
+            const fallbackSeq = item.id ? null : String(++turnItemSeq).padStart(4, '0');
+            const itemId = this.#resolveStoredTurnInputItemId(storedUserInputItemIds, turn.id, text)
+              ?? item.id
+              ?? `turn_${turn.id}_user_${fallbackSeq}`;
+            events.push(createEvent('turn/input', {
+              session_id: sessionId,
+              thread_id: threadId,
+              turn_id: turn.id,
+              payload: {
+                itemId,
+                item_id: itemId,
+                text,
+                input: item.content ?? null,
+              },
+            }));
+          }
+          continue;
+        }
+
+        if (item?.type) {
+          const itemId = item.id ?? `turn_${turn.id}_item_${String(++turnItemSeq).padStart(4, '0')}`;
+          events.push(createEvent('item/completed', {
+            session_id: sessionId,
+            thread_id: threadId,
+            turn_id: turn.id,
+            payload: {
+              item: {
+                ...item,
+                id: itemId,
+              },
+            },
+          }));
+        }
+      }
+
+      if (turn.status && turn.status !== 'inProgress') {
+        events.push(createEvent('turn/completed', {
+          session_id: sessionId,
+          thread_id: threadId,
+          turn_id: turn.id,
+          payload: {
+            status: turn.status,
+            turn: {
+              id: turn.id,
+              status: turn.status,
+            },
+          },
+        }));
+      }
+    }
+
+    return events;
+  }
+
+  async buildContentEntriesFromThread(sessionId, thread) {
+    const rawThread = thread?.thread ?? thread;
+    const turns = this.#sortTurnsForRendering(Array.isArray(rawThread?.turns) ? rawThread.turns : []);
+    const threadId = rawThread?.id ?? rawThread?.threadId ?? rawThread?.sessionId ?? sessionId;
+    const storedUserInputItemIds = this.#buildStoredTurnInputItemIdIndex(sessionId);
+    const entries = [];
+
+    for (const turn of turns) {
+      if (!turn?.id) continue;
+      const items = await this.#loadTurnItems(threadId, turn);
+      let turnItemSeq = 0;
+      for (const item of items) {
+        if (!item?.type) continue;
+        if (item.type !== 'userMessage' && item.type !== 'agentMessage' && item.type !== 'fileChange') {
+          continue;
+        }
+        const text = item.type === 'userMessage' ? extractUserMessageText(item.content ?? []) : '';
+        const fallbackSeq = item.id ? null : String(++turnItemSeq).padStart(4, '0');
+        const storedUserInputItemId = item.type === 'userMessage'
+          ? this.#resolveStoredTurnInputItemId(storedUserInputItemIds, turn.id, text)
+          : null;
+        const fallbackItemId = item.type === 'userMessage'
+          ? `turn_${turn.id}_user_${fallbackSeq}`
+          : `turn_${turn.id}_item_${fallbackSeq}`;
+        const itemId = item.type === 'userMessage'
+          ? storedUserInputItemId ?? item.id ?? fallbackItemId
+          : item.id ?? fallbackItemId;
+        entries.push({
+          type: 'item',
+          session_id: sessionId,
+          thread_id: threadId,
+          turn_id: turn.id,
+          item: {
+            ...item,
+            id: itemId,
+          },
+        });
+      }
+
+      const turnStatus = normalizeTurnStatusValue(turn.status);
+      if (turnStatus && turnStatus !== 'inProgress') {
+        entries.push({
+          type: 'turn_status',
+          session_id: sessionId,
+          thread_id: threadId,
+          turn_id: turn.id,
+          status: turnStatus,
+          error: turn.error ?? null,
+        });
+      }
+    }
+
+    return entries;
+  }
+
+  async buildContentEntriesForTurns(sessionId, turnIds) {
+    const session = this.store.getSession(sessionId);
+    if (!session) {
+      this.#logSync('session.sync.turns.missing_session', { session_id: sessionId, turn_ids: turnIds });
+      return { entries: [], changedTurnIds: [], missingFinalAgentTurnIds: [] };
+    }
+
+    const uniqueTurnIds = Array.from(new Set(turnIds.map((turnId) => String(turnId ?? '').trim()).filter(Boolean)));
+    if (uniqueTurnIds.length === 0) {
+      this.#logSync('session.sync.turns.empty_turn_ids', { session_id: sessionId, turn_ids: turnIds });
+      return { entries: [], changedTurnIds: [], missingFinalAgentTurnIds: [] };
+    }
+
+    const threadId = session.thread_id ?? sessionId;
+    const thread = await this.loadHydrationThread(sessionId, session);
+    const rawThread = thread?.thread ?? thread ?? {};
+    const turns = this.#sortTurnsForRendering(Array.isArray(rawThread?.turns) ? rawThread.turns : []);
+    const turnsById = new Map(turns.map((turn) => [turn?.id, turn]).filter(([turnId]) => turnId));
+    this.#logSync('session.sync.turns.thread_loaded', {
+      session_id: sessionId,
+      thread_id: threadId,
+      requested_turn_ids: uniqueTurnIds,
+      thread_turns: turns.length,
+      matching_turn_ids: uniqueTurnIds.filter((turnId) => turnsById.has(turnId)),
+      thread_turn_tail: turns.slice(-SYNC_LOG_EVENT_LIMIT).map((turn) => ({
+        id: turn?.id ?? '',
+        items: Array.isArray(turn?.items) ? turn.items.length : null,
+        items_view: turn?.itemsView ?? null,
+        status: turn?.status?.type ?? turn?.status ?? '',
+      })),
+    });
+    const storedUserInputItemIds = this.#buildStoredTurnInputItemIdIndex(sessionId);
+    const entries = [];
+    const changedTurnIds = [];
+    const missingFinalAgentTurnIds = [];
+
+    for (const turnId of uniqueTurnIds) {
+      const turn = turnsById.get(turnId) ?? (this.turnRequiresAuthoritativeItems(sessionId, turnId) ? null : this.#buildStoredTurnStub(sessionId, turnId));
+      if (!turn) {
+        this.#logSync('session.sync.turn.missing_turn', {
+          session_id: sessionId,
+          thread_id: threadId,
+          turn_id: turnId,
+          requires_authoritative_items: this.turnRequiresAuthoritativeItems(sessionId, turnId),
+          has_completed_assistant_event: this.#turnHasCompletedAssistantEvent(sessionId, turnId),
+        });
+        continue;
+      }
+
+      const requiresAuthoritativeItems = this.turnRequiresAuthoritativeItems(sessionId, turnId);
+      const turnEntries = await this.#buildContentEntriesFromTurn(sessionId, threadId, turn, storedUserInputItemIds, {
+        requireAuthoritativeItems: requiresAuthoritativeItems,
+      });
+      if (turnEntries == null) {
+        this.#logSync('session.sync.turn.entries_null', {
+          session_id: sessionId,
+          thread_id: threadId,
+          turn_id: turnId,
+          requires_authoritative_items: requiresAuthoritativeItems,
+        });
+        missingFinalAgentTurnIds.push(turnId);
+        continue;
+      }
+      this.#logSync('session.sync.turn.entries', {
+        session_id: sessionId,
+        thread_id: threadId,
+        turn_id: turnId,
+        requires_authoritative_items: requiresAuthoritativeItems,
+        turn_status: turn?.status?.type ?? turn?.status ?? '',
+        turn_items_view: turn?.itemsView ?? null,
+        inline_items: Array.isArray(turn?.items) ? turn.items.length : null,
+        entries: turnEntries.length,
+        item_counts: syncItemTypeCounts(turnEntries),
+        entry_tail: summarizeSyncEntries(turnEntries),
+      });
+      entries.push(...turnEntries);
+      changedTurnIds.push(turnId);
+
+      if (
+        (
+          this.#turnHasCompletedAssistantEvent(sessionId, turnId)
+          || (requiresAuthoritativeItems && this.#isCompletedTurn(turn))
+        )
+        && !turnEntries.some((entry) => entry?.item?.type === 'agentMessage')
+      ) {
+        missingFinalAgentTurnIds.push(turnId);
+      }
+    }
+
+    return { entries, changedTurnIds, missingFinalAgentTurnIds };
+  }
+
+  async #buildContentEntriesFromTurn(sessionId, threadId, turn, storedUserInputItemIds, options = {}) {
+    const entries = [];
+    const turnId = turn?.id ?? '';
+    if (!turnId) {
+      this.#logSync('session.sync.turn.build_entries.blank_turn_id', { session_id: sessionId, thread_id: threadId });
+      return entries;
+    }
+
+    const items = options.requireAuthoritativeItems
+      ? await this.#loadAuthoritativeTurnItems(threadId, turn)
+      : await this.#loadTurnItems(threadId, turn);
+    if (items == null) {
+      this.#logSync('session.sync.turn.build_entries.items_null', {
+        session_id: sessionId,
+        thread_id: threadId,
+        turn_id: turnId,
+        require_authoritative_items: options.requireAuthoritativeItems ?? false,
+      });
+      return null;
+    }
+    this.#logSync('session.sync.turn.build_entries.items', {
+      session_id: sessionId,
+      thread_id: threadId,
+      turn_id: turnId,
+      require_authoritative_items: options.requireAuthoritativeItems ?? false,
+      item_count: items.length,
+      item_types: items.reduce((counts, item) => {
+        const key = item?.type ?? 'unknown';
+        counts[key] = (counts[key] ?? 0) + 1;
+        return counts;
+      }, {}),
+      item_tail: items.slice(-SYNC_LOG_EVENT_LIMIT).map((item) => ({
+        type: item?.type ?? '',
+        id: item?.id ?? '',
+        text_len: String(item?.text ?? item?.content?.[0]?.text ?? '').length,
+        status: item?.status ?? '',
+      })),
+    });
+
+    let turnItemSeq = 0;
+    for (const item of items) {
+      if (!item?.type) continue;
+      if (item.type !== 'userMessage' && item.type !== 'agentMessage' && item.type !== 'fileChange') {
+        continue;
+      }
+      const text = item.type === 'userMessage' ? extractUserMessageText(item.content ?? []) : '';
+      const fallbackSeq = item.id ? null : String(++turnItemSeq).padStart(4, '0');
+      const storedUserInputItemId = item.type === 'userMessage'
+        ? this.#resolveStoredTurnInputItemId(storedUserInputItemIds, turnId, text)
+        : null;
+      const fallbackItemId = item.type === 'userMessage'
+        ? `turn_${turnId}_user_${fallbackSeq}`
+        : `turn_${turnId}_item_${fallbackSeq}`;
+      const itemId = item.type === 'userMessage'
+        ? storedUserInputItemId ?? item.id ?? fallbackItemId
+        : item.id ?? fallbackItemId;
+      entries.push({
+        type: 'item',
+        session_id: sessionId,
+        thread_id: threadId,
+        turn_id: turnId,
+        item: {
+          ...item,
+          id: itemId,
+        },
+      });
+    }
+
+    const turnStatus = normalizeTurnStatusValue(turn.status);
+    if (turnStatus && turnStatus !== 'inProgress') {
+      entries.push({
+        type: 'turn_status',
+        session_id: sessionId,
+        thread_id: threadId,
+        turn_id: turnId,
+        status: turnStatus,
+        error: turn.error ?? null,
+      });
+    }
+
+    return entries;
+  }
+
+  async #loadAuthoritativeTurnItems(threadId, turn) {
+    const inlineItems = Array.isArray(turn?.items) ? turn.items : [];
+    if (turn?.itemsView === 'full') {
+      this.#logSync('session.sync.turn.authoritative_items.inline_full', {
+        thread_id: threadId,
+        turn_id: turn?.id ?? '',
+        items: inlineItems.length,
+      });
+      return inlineItems;
+    }
+    if (typeof this.backend.listTurnItems !== 'function' || !turn?.id || !threadId) {
+      this.#logSync('session.sync.turn.authoritative_items.unavailable', {
+        thread_id: threadId,
+        turn_id: turn?.id ?? '',
+        has_list_turn_items: typeof this.backend.listTurnItems === 'function',
+      });
+      return null;
+    }
+
+    try {
+      const loaded = [];
+      let cursor = null;
+      do {
+        const page = await this.backend.listTurnItems(threadId, turn.id, {
+          cursor,
+          limit: 200,
+          sortDirection: 'asc',
+        });
+        const data = Array.isArray(page) ? page : page?.data ?? [];
+        loaded.push(...data);
+        cursor = Array.isArray(page) ? null : page?.nextCursor ?? null;
+      } while (cursor);
+      this.#logSync('session.sync.turn.authoritative_items.loaded', {
+        thread_id: threadId,
+        turn_id: turn.id,
+        items: loaded.length,
+        item_types: loaded.reduce((counts, item) => {
+          const key = item?.type ?? 'unknown';
+          counts[key] = (counts[key] ?? 0) + 1;
+          return counts;
+        }, {}),
+      });
+      return loaded;
+    } catch (error) {
+      this.#logSync('session.sync.turn.authoritative_items.error', {
+        thread_id: threadId,
+        turn_id: turn.id,
+        message: error?.message ?? String(error),
+      });
+      return null;
+    }
+  }
+
+  #buildStoredTurnStub(sessionId, turnId) {
+    const session = this.store.getSession(sessionId);
+    if (!session) return null;
+
+    const items = [];
+    for (const event of session.events ?? []) {
+      if ((event?.turn_id ?? '') !== turnId) continue;
+      if (event.event === 'turn/input') {
+        const text = String(event?.payload?.text ?? '').trim();
+        if (!text) continue;
+        const itemId = getTurnInputItemId({
+          payload: event?.payload,
+          requestId: event?.request_id ?? '',
+          turnId,
+          sessionId,
+          seq: event?.seq ?? items.length,
+        });
+        items.push({
+          type: 'userMessage',
+          id: itemId,
+          content: [{ type: 'text', text }],
+        });
+        continue;
+      }
+
+      if (event.event !== 'item/completed') continue;
+      const item = event?.payload?.item;
+      if (!item?.type) continue;
+      if (item.type !== 'userMessage' && item.type !== 'agentMessage' && item.type !== 'fileChange') continue;
+      items.push({
+        ...item,
+        id: item.id ?? `stored_item_${event.seq ?? items.length}`,
+      });
+    }
+
+    if (items.length === 0) return null;
+    return {
+      id: turnId,
+      items,
+      itemsView: 'full',
+      status: this.#storedTurnStatus(sessionId, turnId),
+      error: null,
+      startedAt: null,
+      completedAt: null,
+      durationMs: null,
+    };
+  }
+
+  #storedTurnStatus(sessionId, turnId) {
+    const session = this.store.getSession(sessionId);
+    let status = null;
+    for (const event of session?.events ?? []) {
+      if ((event?.turn_id ?? '') !== turnId) continue;
+      if (event.event === 'turn/started') {
+        status = 'inProgress';
+      } else if (event.event === 'turn/completed') {
+        status = event?.payload?.status ?? event?.payload?.turn?.status ?? 'completed';
+      }
+    }
+    return status;
+  }
+
+  #turnHasCompletedAssistantEvent(sessionId, turnId) {
+    const session = this.store.getSession(sessionId);
+    return (session?.events ?? []).some((event) => (
+      (event?.turn_id ?? '') === turnId
+      && event?.event === 'item/completed'
+      && event?.payload?.item?.type === 'agentMessage'
+    ));
+  }
+
+  turnRequiresAuthoritativeItems(sessionId, turnId) {
+    const session = this.store.getSession(sessionId);
+    return (session?.events ?? []).some((event) => (
+      (event?.turn_id ?? '') === turnId
+      && (
+        (event?.event === 'item/completed' && event?.payload?.item?.type === 'agentMessage')
+        || event?.event === 'item/agentMessage/delta'
+      )
+    ));
+  }
+
+  #isCompletedTurn(turn) {
+    const status = turn?.status?.type ?? turn?.status ?? '';
+    return status === 'completed' || status === 'failed' || status === 'interrupted' || Boolean(turn?.completedAt);
+  }
+
+  #sortTurnsForRendering(turns) {
+    return turns.slice().sort((left, right) => {
+      const leftStarted = Number(left?.startedAt ?? left?.createdAt ?? 0);
+      const rightStarted = Number(right?.startedAt ?? right?.createdAt ?? 0);
+      if (leftStarted !== rightStarted) return leftStarted - rightStarted;
+
+      const leftCompleted = Number(left?.completedAt ?? 0);
+      const rightCompleted = Number(right?.completedAt ?? 0);
+      if (leftCompleted !== rightCompleted) return leftCompleted - rightCompleted;
+
+      return String(left?.id ?? '').localeCompare(String(right?.id ?? ''));
+    });
+  }
+
+  #buildStoredTurnInputItemIdIndex(sessionId) {
+    const session = this.store.getSession(sessionId);
+    const events = session?.events ?? [];
+    const byTurnAndText = new Map();
+    const unresolvedByText = new Map();
+    for (const event of events) {
+      if (event?.event !== 'turn/input') continue;
+      const turnId = event.turn_id ?? '';
+      const text = String(event?.payload?.text ?? '').trim();
+      const itemId = getTurnInputItemId({ payload: event?.payload, requestId: event?.request_id ?? '' });
+      if (!text || !itemId) continue;
+      if (turnId) {
+        byTurnAndText.set(`${turnId}|${text}`, itemId);
+      } else {
+        const queue = unresolvedByText.get(text) ?? [];
+        if (!queue.includes(itemId)) {
+          queue.push(itemId);
+        }
+        unresolvedByText.set(text, queue);
+      }
+    }
+    return { byTurnAndText, unresolvedByText };
+  }
+
+  #resolveStoredTurnInputItemId(index, turnId, text) {
+    if (!text) return null;
+    const exact = turnId ? index.byTurnAndText.get(`${turnId}|${text}`) : null;
+    if (exact) return exact;
+    const unresolved = index.unresolvedByText.get(text);
+    if (!unresolved || unresolved.length === 0) return null;
+    const itemId = unresolved.shift() ?? null;
+    if (unresolved.length === 0) {
+      index.unresolvedByText.delete(text);
+    }
+    return itemId;
+  }
+
+  async #loadTurnItems(threadId, turn) {
+    const inlineItems = Array.isArray(turn?.items) ? turn.items : [];
+    const canListTurnItems = typeof this.backend.listTurnItems === 'function';
+    const shouldLoadRemoteItems = canListTurnItems && turn?.id && threadId && (turn?.itemsView !== 'full' || inlineItems.length === 0);
+    if (!shouldLoadRemoteItems) {
+      return inlineItems;
+    }
+
+    try {
+      const loaded = [];
+      let cursor = null;
+      do {
+        const page = await this.backend.listTurnItems(threadId, turn.id, {
+          cursor,
+          limit: 200,
+          sortDirection: 'asc',
+        });
+        const data = Array.isArray(page) ? page : page?.data ?? [];
+        loaded.push(...data);
+        cursor = Array.isArray(page) ? null : page?.nextCursor ?? null;
+      } while (cursor);
+
+      return loaded.length > 0 ? loaded : inlineItems;
+    } catch {
+      return inlineItems;
+    }
+  }
+
+  mergeInitialSessionEvents(hydratedEvents, storedEvents) {
+    return mergeInitialSessionEvents(hydratedEvents, storedEvents);
+  }
+
+  pruneHydratedEvents(hydratedEvents, storedEvents) {
+    return pruneHydratedEvents(hydratedEvents, storedEvents);
+  }
+
+  eventSignature(event) {
+    return eventSignature(event);
+  }
+
+}
