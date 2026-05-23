@@ -175,6 +175,16 @@ export class CodexBackend extends EventEmitter {
     });
   }
 
+  async steerTurn(threadId, turnId, params = {}) {
+    const inputText = params.text ?? '';
+    return this.#request('turn/steer', {
+      threadId,
+      input: this.#normalizeInput(params.input, inputText),
+      responsesapiClientMetadata: params.responsesapiClientMetadata ?? null,
+      expectedTurnId: turnId,
+    });
+  }
+
   async interruptTurn(threadId, turnId) {
     return this.#request('turn/interrupt', { threadId, turnId });
   }

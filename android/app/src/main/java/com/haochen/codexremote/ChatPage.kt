@@ -6,11 +6,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -72,10 +73,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -94,6 +98,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun MainActivity.ChatPage() {
     val activeSession = activeSession()
@@ -178,7 +183,7 @@ internal fun MainActivity.ChatPage() {
                 minLines = 1,
                 maxLines = 5,
                 shape = RoundedCornerShape(18.dp),
-                placeholder = { Text("输入消息") },
+                placeholder = { Text(if (activeTurnId != null) "追加指令" else "输入消息") },
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(onSend = { sendComposerText() }),
                 colors = OutlinedTextFieldDefaults.colors(
@@ -190,22 +195,68 @@ internal fun MainActivity.ChatPage() {
                 ),
             )
 
-            Button(
-                onClick = { sendComposerText() },
-                enabled = connected && activeSessionId != null,
-                modifier = Modifier.size(46.dp),
-                shape = CircleShape,
-                contentPadding = PaddingValues(0.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = uiPrimary),
+            Box(
+                modifier = Modifier
+                    .size(46.dp)
+                    .background(
+                        if (connected && activeSessionId != null) {
+                            if (activeTurnId != null) uiPrimary.copy(alpha = 0.88f) else uiPrimary
+                        } else {
+                            uiOffline
+                        },
+                        CircleShape,
+                    )
+                    .combinedClickable(
+                        enabled = connected && activeSessionId != null,
+                        onClick = { sendComposerText() },
+                        onLongClick = {
+                            if (activeTurnId != null) {
+                                interruptCurrentTurn()
+                            }
+                        },
+                    ),
+                contentAlignment = Alignment.Center,
             ) {
-                Icon(
-                    painter = painterResource(id = android.R.drawable.ic_menu_send),
-                    contentDescription = "发送",
-                    tint = Color.White,
-                    modifier = Modifier.size(18.dp),
+                SendGlyph(
+                    contentDescription = if (activeTurnId != null) "发送追加指令，长按中断" else "发送",
+                    modifier = Modifier.size(26.dp),
                 )
+                if (activeTurnId != null) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .offset(x = 4.dp, y = 4.dp)
+                            .size(14.dp)
+                            .background(Color.White, RoundedCornerShape(4.dp))
+                            .padding(3.dp)
+                            .background(uiPrimary, RoundedCornerShape(1.dp)),
+                    )
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun SendGlyph(
+    contentDescription: String,
+    modifier: Modifier = Modifier,
+) {
+    Canvas(
+        modifier = modifier.semantics {
+            this.contentDescription = contentDescription
+        },
+    ) {
+        val path = Path().apply {
+            moveTo(size.width * 0.08f, size.height * 0.14f)
+            lineTo(size.width * 0.92f, size.height * 0.50f)
+            lineTo(size.width * 0.08f, size.height * 0.86f)
+            lineTo(size.width * 0.24f, size.height * 0.56f)
+            lineTo(size.width * 0.57f, size.height * 0.50f)
+            lineTo(size.width * 0.24f, size.height * 0.44f)
+            close()
+        }
+        drawPath(path, Color.White)
     }
 }
 

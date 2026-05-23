@@ -49,6 +49,7 @@ export class MockBackend extends EventEmitter {
     this.threads = new Map();
     this.pendingApprovals = new Map();
     this.turnControllers = new Map();
+    this.turnSteers = new Map();
     this.requestSeq = 0;
     this.turnSeq = 0;
     this.threadSeq = 0;
@@ -65,6 +66,7 @@ export class MockBackend extends EventEmitter {
       controller.abort();
     }
     this.turnControllers.clear();
+    this.turnSteers.clear();
     this.pendingApprovals.clear();
   }
 
@@ -165,8 +167,31 @@ export class MockBackend extends EventEmitter {
 
     const controller = new AbortController();
     this.turnControllers.set(turnId, controller);
+    this.turnSteers.set(turnId, []);
     queueMicrotask(() => this.#runTurn(threadId, turnId, params, controller.signal));
     return structuredClone(turn);
+  }
+
+  async steerTurn(threadId, turnId, params = {}) {
+    if (!this.turnControllers.has(turnId)) {
+      throw new Error(`active turn not found: ${turnId}`);
+    }
+    const inputText = this.#extractText(params.input) || params.text || '';
+    const steerText = inputText || '空追加指令';
+    const steers = this.turnSteers.get(turnId) ?? [];
+    steers.push(steerText);
+    this.turnSteers.set(turnId, steers);
+    this.emit('message', {
+      type: 'notification',
+      method: 'item/agentMessage/delta',
+      params: {
+        threadId,
+        turnId,
+        itemId: `item_${turnId}`,
+        delta: `追加指令: ${steerText}`,
+      },
+    });
+    return { turnId };
   }
 
   async interruptTurn(threadId, turnId) {
@@ -174,6 +199,7 @@ export class MockBackend extends EventEmitter {
     if (controller) {
       controller.abort();
       this.turnControllers.delete(turnId);
+      this.turnSteers.delete(turnId);
     }
     this.emit('message', {
       type: 'notification',
@@ -281,6 +307,7 @@ export class MockBackend extends EventEmitter {
       },
     });
     this.turnControllers.delete(turnId);
+    this.turnSteers.delete(turnId);
   }
 
   #extractText(input) {

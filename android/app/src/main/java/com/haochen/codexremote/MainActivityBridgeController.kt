@@ -37,6 +37,7 @@ internal fun MainActivity.disconnectBridge(
         bridgeClient = null
         connected = false
         activeTurnId = null
+        interruptingTurnId = null
         sessionContentDirty = false
         assistantDeltaBuffers.clear()
         pendingApprovals.clear()
@@ -109,6 +110,7 @@ internal fun MainActivity.connectToBridge(url: String, isAutoReconnect: Boolean 
                 mainHandler.post {
                     connected = false
                     activeTurnId = null
+                    interruptingTurnId = null
                     sessionContentDirty = false
                     assistantDeltaBuffers.clear()
                     pendingApprovals.clear()

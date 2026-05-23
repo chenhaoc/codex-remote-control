@@ -111,14 +111,25 @@ internal fun MainActivity.sendComposerText() {
         val text = composerText.trim()
         if (text.isEmpty()) return
         if (!ensureConnected()) return
-        if (activeSessionId.isNullOrBlank()) {
+        val sessionId = activeSessionId
+        if (sessionId.isNullOrBlank()) {
             appendSystemNote("先创建或选择一个会话")
+            return
+        }
+        val turnId = activeTurnId
+        if (!turnId.isNullOrBlank() && interruptingTurnId == turnId) {
+            showNotice("正在中断当前回合")
+            return
+        }
+
+        if (!turnId.isNullOrBlank()) {
+            steerCurrentTurn(sessionId, turnId, text)
             return
         }
 
         val model = resolveModelForSend()
         val payload = JSONObject().apply {
-            put("session_id", activeSessionId)
+            put("session_id", sessionId)
             put("text", text)
             if (model.isNotBlank()) {
                 put("model", model)
@@ -131,6 +142,26 @@ internal fun MainActivity.sendComposerText() {
             if (turn != null) {
                 activeTurnId = turn.optString("id", activeTurnId.orEmpty())
             }
+        }) {
+            return
+        }
+
+        startSessionSyncLoop()
+        composerText = ""
+    }
+
+internal fun MainActivity.steerCurrentTurn(sessionId: String, turnId: String, text: String) {
+        val payload = JSONObject().apply {
+            put("session_id", sessionId)
+            put("turn_id", turnId)
+            put("text", text)
+        }
+
+        if (!sendRequest("turn.steer", payload) { response ->
+            activeTurnId = firstNonEmpty(
+                response.optJSONObject("payload")?.optString("turn_id", "") ?: "",
+                turnId,
+            )
         }) {
             return
         }
@@ -163,19 +194,38 @@ internal fun MainActivity.switchActiveSessionToFullAccess() {
 
 internal fun MainActivity.interruptCurrentTurn() {
         if (!ensureConnected()) return
-        if (activeSessionId.isNullOrBlank() || activeTurnId.isNullOrBlank()) {
+        val sessionId = activeSessionId
+        val turnId = activeTurnId
+        if (sessionId.isNullOrBlank() || turnId.isNullOrBlank()) {
             appendSystemNote("当前没有可中断的回合")
+            return
+        }
+        if (interruptingTurnId == turnId) {
+            showNotice("正在中断当前回合")
             return
         }
 
         val payload = JSONObject().apply {
-            put("session_id", activeSessionId)
-            put("turn_id", activeTurnId)
+            put("session_id", sessionId)
+            put("turn_id", turnId)
         }
 
-        sendRequest("turn.interrupt", payload) {
-            appendSystemNote("已请求中断")
-            activeTurnId = null
+        interruptingTurnId = turnId
+        updateLiveTurnStatus("正在中断当前回合…")
+        if (!sendRequest("turn.interrupt", payload, object : ResponseHandler {
+            override fun onResponse(response: JSONObject) {
+                showNotice("已请求中断")
+            }
+
+            override fun onError(errorText: String) {
+                if (interruptingTurnId == turnId) {
+                    interruptingTurnId = null
+                }
+            }
+        })) {
+            if (interruptingTurnId == turnId) {
+                interruptingTurnId = null
+            }
         }
     }
 

@@ -148,11 +148,15 @@ internal fun MainActivity.reconcileActiveTurnFromSnapshot(payload: JSONObject?) 
         val activeTurns = payload?.optJSONArray("active_turns") ?: return
         if (activeTurns.length() == 0) {
             activeTurnId = null
+            interruptingTurnId = null
             return
         }
         val turnId = activeTurns.optJSONObject(activeTurns.length() - 1)?.optString("turn_id", "")?.trim().orEmpty()
         if (turnId.isNotBlank()) {
             activeTurnId = turnId
+            if (interruptingTurnId == turnId) {
+                interruptingTurnId = null
+            }
         }
     }
 

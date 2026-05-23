@@ -169,6 +169,201 @@ test('bridge does not resume brand-new session before first turn', async () => {
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test('bridge forwards active turn text as steer', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-steer-test-'));
+  const store = new StateStore(path.join(dir, 'state.json'));
+  await store.load();
+  await store.upsertSession({
+    session_id: 'session_for_steer',
+    thread_id: 'thread_for_steer',
+    title: 'Steer session',
+    cwd: '/tmp/steer-workspace',
+    model: 'gpt-5',
+    backend: 'custom',
+    preview: '',
+    active: true,
+  });
+
+  class SteerBackend extends EventEmitter {
+    constructor() {
+      super();
+      this.calls = [];
+    }
+
+    async start() {}
+
+    async stop() {}
+
+    async steerTurn(threadId, turnId, params = {}) {
+      this.calls.push({ threadId, turnId, params });
+      return { turnId };
+    }
+  }
+
+  const backend = new SteerBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({
+    id: '1',
+    type: 'turn.steer',
+    payload: {
+      session_id: 'session_for_steer',
+      turn_id: 'turn_active_1',
+      text: 'please adjust course',
+    },
+  }));
+
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+  const steerResponse = messages.find((m) => m.type === 'response' && m.id === '1');
+  assert.equal(steerResponse.ok, true);
+  assert.equal(steerResponse.payload.turn_id, 'turn_active_1');
+  assert.equal(backend.calls.length, 1);
+  assert.equal(backend.calls[0].threadId, 'thread_for_steer');
+  assert.equal(backend.calls[0].turnId, 'turn_active_1');
+  assert.equal(backend.calls[0].params.text, 'please adjust course');
+
+  const inputEvent = messages.find((m) => m.type === 'event' && m.event === 'turn/input');
+  assert.equal(inputEvent.session_id, 'session_for_steer');
+  assert.equal(inputEvent.thread_id, 'thread_for_steer');
+  assert.equal(inputEvent.turn_id, 'turn_active_1');
+  assert.equal(inputEvent.payload.text, 'please adjust course');
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('session content keeps stored steer input alongside hydrated thread items', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-steer-content-test-'));
+  const store = new StateStore(path.join(dir, 'state.json'));
+  await store.load();
+  await store.upsertSession({
+    session_id: 'session_steer_content',
+    thread_id: 'thread_steer_content',
+    title: 'Steer content session',
+    cwd: '/tmp/steer-content-workspace',
+    model: 'gpt-5',
+    backend: 'custom',
+    preview: '',
+    active: true,
+    thread: {
+      id: 'thread_steer_content',
+      sessionId: 'thread_steer_content',
+      status: { type: 'active' },
+      turns: [],
+    },
+  });
+  await store.appendEvent('session_steer_content', {
+    type: 'event',
+    event: 'turn/started',
+    session_id: 'session_steer_content',
+    thread_id: 'thread_steer_content',
+    turn_id: 'turn_steer_content',
+    payload: {
+      turn: { id: 'turn_steer_content' },
+    },
+  });
+  await store.appendEvent('session_steer_content', {
+    type: 'event',
+    event: 'turn/input',
+    session_id: 'session_steer_content',
+    thread_id: 'thread_steer_content',
+    turn_id: 'turn_steer_content',
+    request_id: 'steer_req_1',
+    payload: {
+      itemId: 'input_steer_req_1',
+      item_id: 'input_steer_req_1',
+      text: '追加一个约束',
+      input: null,
+    },
+  });
+
+  class HydratedThreadBackend extends EventEmitter {
+    async start() {}
+
+    async stop() {}
+
+    async readThread() {
+      return {
+        thread: {
+          id: 'thread_steer_content',
+          sessionId: 'thread_steer_content',
+          forkedFromId: null,
+          preview: 'Steer content session',
+          ephemeral: false,
+          modelProvider: 'custom',
+          createdAt: 1,
+          updatedAt: 2,
+          status: { type: 'active' },
+          path: null,
+          cwd: '/tmp/steer-content-workspace',
+          cliVersion: 'mock',
+          source: 'app-server',
+          threadSource: null,
+          agentNickname: null,
+          agentRole: null,
+          gitInfo: null,
+          name: 'Steer content session',
+          turns: [{
+            id: 'turn_steer_content',
+            status: 'inProgress',
+            startedAt: 10,
+            items: [{
+              type: 'agentMessage',
+              id: 'agent_existing',
+              text: '已有输出',
+            }],
+          }],
+        },
+      };
+    }
+  }
+
+  const backend = new HydratedThreadBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({
+    id: '1',
+    type: 'session.content',
+    payload: { session_id: 'session_steer_content' },
+  }));
+
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+  const contentResponse = messages.find((m) => m.type === 'response' && m.id === '1');
+  assert.equal(contentResponse.ok, true);
+  assert.ok(contentResponse.payload.entries.some((entry) => entry.item?.id === 'agent_existing'));
+  const steerEntry = contentResponse.payload.entries.find((entry) => entry.item?.id === 'input_steer_req_1');
+  assert.equal(steerEntry?.turn_id, 'turn_steer_content');
+  assert.equal(steerEntry?.item?.content?.[0]?.text, '追加一个约束');
+  assert.equal(contentResponse.payload.active_turns[0]?.turn_id, 'turn_steer_content');
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 test('bridge preserves top-level model metadata from session start responses', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-start-model-test-'));
 

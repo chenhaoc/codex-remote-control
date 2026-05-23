@@ -769,8 +769,55 @@ export class BridgeServer extends EventEmitter {
         ws.send(JSON.stringify(createResponse(id, { turn, session_id: sessionId })));
         return;
       }
+      case 'turn.steer': {
+        const sessionId = payload.session_id ?? payload.thread_id;
+        const turnId = payload.turn_id ?? payload.turnId ?? payload.expectedTurnId;
+        if (!sessionId || !turnId) {
+          ws.send(JSON.stringify(createError(id, 'invalid_request', 'session_id and turn_id are required')));
+          return;
+        }
+
+        const session = this.store.getSession(sessionId);
+        if (!session) {
+          ws.send(JSON.stringify(createError(id, 'not_found', `unknown session: ${sessionId}`)));
+          return;
+        }
+        const targetThreadId = payload.thread_id ?? session?.thread_id ?? sessionId;
+        const inputItemId = getTurnInputItemId({ payload, requestId: id, turnId, sessionId });
+        const inputEvent = createEvent('turn/input', {
+          session_id: sessionId,
+          thread_id: targetThreadId,
+          turn_id: turnId,
+          request_id: id,
+          payload: {
+            itemId: inputItemId,
+            item_id: inputItemId,
+            text: payload.text ?? '',
+            input: payload.input ?? null,
+          },
+        });
+        const storedInputEvent = await this.store.appendEvent(sessionId, inputEvent);
+        this.#broadcast(storedInputEvent);
+
+        const result = await this.backend.steerTurn(targetThreadId, turnId, {
+          text: payload.text ?? '',
+          input: payload.input ?? null,
+          responsesapiClientMetadata: payload.responsesapiClientMetadata ?? null,
+        });
+        this.#emitSessionChanged(sessionId);
+        ws.send(JSON.stringify(createResponse(id, {
+          turn_id: result?.turnId ?? result?.turn_id ?? turnId,
+          session_id: sessionId,
+        })));
+        return;
+      }
       case 'turn.interrupt': {
-        await this.backend.interruptTurn(payload.session_id ?? payload.thread_id, payload.turn_id ?? payload.turnId);
+        const sessionId = payload.session_id ?? payload.thread_id;
+        const session = this.store.getSession(sessionId);
+        await this.backend.interruptTurn(
+          payload.thread_id ?? session?.thread_id ?? sessionId,
+          payload.turn_id ?? payload.turnId,
+        );
         ws.send(JSON.stringify(createResponse(id, { ok: true })));
         return;
       }
@@ -1414,6 +1461,7 @@ export class BridgeServer extends EventEmitter {
         });
       }
     }
+    entries = this.#mergeStoredTurnInputEntries(sessionId, entries);
 
     return {
       session_id: sessionId,
@@ -2066,6 +2114,70 @@ export class BridgeServer extends EventEmitter {
     }
 
     return entries;
+  }
+
+  #mergeStoredTurnInputEntries(sessionId, entries = []) {
+    const session = this.store.getSession(sessionId);
+    if (!session) return entries;
+
+    const merged = entries.slice();
+    const existingItemIds = new Set();
+    const existingInputSignatures = new Set();
+    for (const entry of merged) {
+      const item = entry?.item;
+      if (item?.id) existingItemIds.add(item.id);
+      if (item?.type !== 'userMessage') continue;
+      const text = extractUserMessageText(item.content ?? []);
+      if (text) {
+        existingInputSignatures.add(`${entry.turn_id ?? ''}|${text}`);
+      }
+    }
+
+    const events = this.store.syncEvents(sessionId, 0);
+    for (const event of events) {
+      if (event?.event !== 'turn/input') continue;
+      const text = String(event?.payload?.text ?? '').trim();
+      if (!text) continue;
+      const signature = `${event.turn_id ?? ''}|${text}`;
+      const itemId = getTurnInputItemId({
+        payload: event?.payload,
+        requestId: event?.request_id ?? '',
+        turnId: event?.turn_id ?? '',
+        sessionId,
+        seq: event?.seq ?? merged.length,
+      });
+      if (existingInputSignatures.has(signature) || existingItemIds.has(itemId)) continue;
+
+      const entry = {
+        type: 'item',
+        session_id: sessionId,
+        thread_id: session.thread_id ?? sessionId,
+        turn_id: event.turn_id ?? null,
+        item: {
+          type: 'userMessage',
+          id: itemId,
+          content: [{ type: 'text', text }],
+        },
+      };
+      const index = this.#lastContentEntryIndexForTurn(merged, event.turn_id ?? '');
+      if (index >= 0) {
+        merged.splice(index + 1, 0, entry);
+      } else {
+        merged.push(entry);
+      }
+      existingInputSignatures.add(signature);
+      existingItemIds.add(itemId);
+    }
+
+    return merged;
+  }
+
+  #lastContentEntryIndexForTurn(entries, turnId) {
+    if (!turnId) return -1;
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      if (entries[index]?.turn_id === turnId) return index;
+    }
+    return -1;
   }
 
   async #loadHydrationThread(sessionId, session) {

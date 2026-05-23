@@ -101,6 +101,7 @@ internal fun MainActivity.handleEvent(message: JSONObject) {
                     message.optString("turn_id", ""),
                     payload.optJSONObject("turn")?.optString("id", "") ?: "",
                 )
+                interruptingTurnId = null
                 updateLiveTurnStatus("已开始，等待输出…")
             }
 
@@ -134,9 +135,13 @@ internal fun MainActivity.handleEvent(message: JSONObject) {
             "error" -> updateLiveTurnStatusFromError(payload)
             "thread/status/changed" -> updateLiveTurnStatusFromThreadStatus(payload.optJSONObject("status"))
             "turn/completed" -> {
-                removeCompletedTurnApprovalItems(message.optString("turn_id", ""))
-                if (activeTurnId != null && activeTurnId == message.optString("turn_id", "")) {
+                val completedTurnId = message.optString("turn_id", "")
+                removeCompletedTurnApprovalItems(completedTurnId)
+                if (activeTurnId != null && activeTurnId == completedTurnId) {
                     activeTurnId = null
+                }
+                if (interruptingTurnId != null && interruptingTurnId == completedTurnId) {
+                    interruptingTurnId = null
                 }
                 updateLiveTurnStatus(null)
             }

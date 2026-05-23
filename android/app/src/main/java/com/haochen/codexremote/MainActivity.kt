@@ -101,6 +101,7 @@ class MainActivity : ComponentActivity() {
     internal var composerText by mutableStateOf("")
     internal var newChatDraft by mutableStateOf<NewChatDraft?>(null)
     internal var liveTurnStatus by mutableStateOf<String?>(null)
+    internal var interruptingTurnId by mutableStateOf<String?>(null)
     internal var chatRestoreScrollY by mutableStateOf<Int?>(null)
     internal var codeBrowserState by mutableStateOf<CodeBrowserState?>(null)
     internal var disconnectRequested = false
