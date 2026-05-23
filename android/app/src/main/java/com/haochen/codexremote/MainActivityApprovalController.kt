@@ -1,6 +1,15 @@
 package com.haochen.codexremote
 
+import android.util.Log
 import org.json.JSONObject
+
+internal const val APPROVAL_LOG_TAG = "CodexRemoteApproval"
+
+internal inline fun approvalDebugLog(message: () -> String) {
+    if (Log.isLoggable(APPROVAL_LOG_TAG, Log.DEBUG)) {
+        Log.d(APPROVAL_LOG_TAG, message())
+    }
+}
 
 internal fun MainActivity.sendApproval(requestId: String, action: ApprovalAction) {
         val payload = JSONObject().apply {
@@ -10,13 +19,24 @@ internal fun MainActivity.sendApproval(requestId: String, action: ApprovalAction
                 put(key, cloneJsonValue(action.responsePayload.opt(key)))
             }
         }
+        approvalDebugLog {
+            "sendApproval requestId=$requestId sessionId=${activeSessionId.orEmpty()} action=${action.label} payload=${payload.toString()}"
+        }
 
         if (!sendRequest("approval.response", payload, object : ResponseHandler {
             override fun onResponse(response: JSONObject) {
+                approvalDebugLog {
+                    "sendApproval response_ok requestId=$requestId activeTurnId=${activeTurnId.orEmpty()} pendingApprovals=${pendingApprovals.size}"
+                }
                 appendSystemNote("审批结果已提交")
                 removePendingApproval(requestId)
             }
+
+            override fun onError(errorText: String) {
+                approvalDebugLog { "sendApproval response_error requestId=$requestId error=$errorText" }
+            }
         })) {
+            approvalDebugLog { "sendApproval send_failed requestId=$requestId" }
             appendSystemNote("审批发送失败")
         } else {
             appendSystemNote("已发送审批: ${action.label}")

@@ -63,6 +63,12 @@ export class StateStore {
     return clone(approvals).sort((a, b) => String(a.at ?? '').localeCompare(String(b.at ?? '')));
   }
 
+  getPendingApproval(sessionId, requestId) {
+    if (!sessionId) return null;
+    const approval = this.state.sessions[sessionId]?.pending_approvals?.[String(requestId)];
+    return approval ? clone(approval) : null;
+  }
+
   async upsertSession(session, { touch = false } = {}) {
     const now = nowIso();
     const current = this.state.sessions[session.session_id] ?? {
@@ -148,7 +154,7 @@ export class StateStore {
       throw new Error(`unknown session: ${sessionId}`);
     }
     session.pending_approvals = session.pending_approvals ?? {};
-    session.pending_approvals[approval.request_id] = clone(approval);
+    session.pending_approvals[String(approval.request_id)] = clone(approval);
     session.updatedAt = nowIso();
     await this.save();
     return clone(approval);
@@ -159,8 +165,9 @@ export class StateStore {
     if (!session) {
       throw new Error(`unknown session: ${sessionId}`);
     }
-    if (session.pending_approvals?.[requestId]) {
-      delete session.pending_approvals[requestId];
+    const key = String(requestId);
+    if (session.pending_approvals?.[key]) {
+      delete session.pending_approvals[key];
       session.updatedAt = nowIso();
       await this.save();
     }

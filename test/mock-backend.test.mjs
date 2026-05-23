@@ -3258,6 +3258,92 @@ test('bridge backfills historical session metadata from local rollout without re
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test('approval response uses original backend request id type', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-approval-id-test-'));
+
+  class ApprovalIdBackend extends EventEmitter {
+    constructor() {
+      super();
+      this.responses = [];
+    }
+
+    async start() {}
+
+    async stop() {}
+
+    async respondRequest(requestId, result, error = null) {
+      this.responses.push({ requestId, result, error });
+    }
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  await store.load();
+  await store.upsertSession({
+    session_id: 'approval_thread_1',
+    thread_id: 'approval_thread_1',
+    title: 'Approval id session',
+    cwd: '/tmp/approval-id-workspace',
+    model: 'gpt-5',
+    backend: 'custom',
+    preview: '',
+    active: true,
+  });
+
+  const backend = new ApprovalIdBackend();
+  const bridge = new BridgeServer({ backend, store, host: '127.0.0.1', port: 0, token: 'test-token' });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  try {
+    await once(ws, 'open');
+
+    const messages = [];
+    ws.on('message', (buffer) => {
+      messages.push(JSON.parse(buffer.toString('utf8')));
+    });
+
+    backend.emit('message', {
+      type: 'request',
+      method: 'item/commandExecution/requestApproval',
+      id: 42,
+      params: {
+        threadId: 'approval_thread_1',
+        turnId: 'approval_turn_1',
+        itemId: 'approval_item_1',
+        command: 'echo hello',
+        availableDecisions: ['accept', 'decline'],
+      },
+    });
+
+    await waitFor(() => messages.find((m) => m.type === 'event' && m.event === 'item/commandExecution/requestApproval'));
+    const approvalEvent = messages.find((m) => m.type === 'event' && m.event === 'item/commandExecution/requestApproval');
+    assert.equal(approvalEvent.request_id, '42');
+
+    ws.send(JSON.stringify({
+      id: 'client-approval-response',
+      type: 'approval.response',
+      payload: {
+        session_id: 'approval_thread_1',
+        request_id: approvalEvent.request_id,
+        decision: 'accept',
+      },
+    }));
+
+    await waitFor(() => backend.responses.length === 1);
+    assert.equal(backend.responses[0].requestId, 42);
+    assert.deepEqual(backend.responses[0].result, { decision: 'accept' });
+    assert.equal(backend.responses[0].error, null);
+  } finally {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.close();
+      await once(ws, 'close');
+    }
+    await bridge.stop();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 async function waitFor(predicate, timeoutMs = 8000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {

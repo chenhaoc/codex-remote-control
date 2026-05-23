@@ -10,6 +10,11 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function requestKey(value) {
+  if (value === undefined || value === null) return '';
+  return String(value);
+}
+
 function normalizeTurnStatusValue(status) {
   if (typeof status === 'string') return status.trim();
   if (status && typeof status === 'object') {
@@ -91,6 +96,50 @@ function syncItemTypeCounts(entries = []) {
     counts[key] = (counts[key] ?? 0) + 1;
   }
   return counts;
+}
+
+function summarizeApprovalPayload(payload = {}) {
+  const availableDecisions = Array.isArray(payload?.availableDecisions)
+    ? payload.availableDecisions
+    : [];
+  return {
+    item_id: payload?.itemId ?? payload?.item_id ?? '',
+    command: payload?.command ?? '',
+    cwd: payload?.cwd ?? '',
+    reason: payload?.reason ?? '',
+    available_decisions: availableDecisions,
+    permissions: payload?.permissions ?? null,
+  };
+}
+
+function summarizeClientPayload(type, payload = {}) {
+  if (!payload || typeof payload !== 'object') return {};
+  switch (type) {
+    case 'session.content':
+    case 'session.sync':
+    case 'turn.send':
+    case 'turn.steer':
+    case 'turn.interrupt':
+    case 'approval.response':
+      return {
+        session_id: payload.session_id ?? payload.thread_id ?? '',
+        request_id: payload.request_id ?? payload.requestId ?? '',
+        turn_id: payload.turn_id ?? payload.turnId ?? '',
+        text_len: String(payload.text ?? '').length,
+        decision: payload.decision ?? payload.result?.decision ?? '',
+      };
+    case 'session.start':
+      return {
+        title: payload.title ?? '',
+        cwd: payload.cwd ?? '',
+        model: payload.model ?? '',
+        approvalPolicy: payload.approvalPolicy ?? '',
+      };
+    case 'model.list':
+      return { includeHidden: payload.includeHidden ?? null };
+    default:
+      return {};
+  }
 }
 
 function diffStatsLabel(diff) {
@@ -471,6 +520,10 @@ export class BridgeServer extends EventEmitter {
       .catch(() => {});
   }
 
+  #logApproval(event, details = {}) {
+    this.#logSync(`approval.${event}`, details);
+  }
+
   async start() {
     await this.store.load();
     await this.backend.start();
@@ -531,11 +584,21 @@ export class BridgeServer extends EventEmitter {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
     const providedToken = url.searchParams.get('token') ?? req.headers['x-bridge-token'];
     if (this.token && providedToken !== this.token) {
+      this.#logSync('ws.unauthorized', {
+        remote: req.socket?.remoteAddress ?? '',
+        url: url.pathname,
+        has_token: Boolean(providedToken),
+      });
       ws.close(1008, 'unauthorized');
       return;
     }
 
     this.connections.add(ws);
+    this.#logSync('ws.connected', {
+      remote: req.socket?.remoteAddress ?? '',
+      url: req.url ?? '',
+      connections: this.connections.size,
+    });
     ws.send(JSON.stringify({
       type: 'hello',
       ok: true,
@@ -550,18 +613,38 @@ export class BridgeServer extends EventEmitter {
       const raw = buffer.toString('utf8');
       const parsed = safeJson(raw);
       if (!parsed.ok) {
+        this.#logSync('ws.message.bad_json', {
+          remote: req.socket?.remoteAddress ?? '',
+          bytes: Buffer.byteLength(raw),
+        });
         ws.send(JSON.stringify(createError(null, 'bad_json', 'invalid JSON', { raw })));
         return;
       }
       try {
+        this.#logSync('ws.message', {
+          remote: req.socket?.remoteAddress ?? '',
+          request_id: parsed.value?.id ?? null,
+          type: parsed.value?.type ?? '',
+          payload: summarizeClientPayload(parsed.value?.type ?? '', parsed.value?.payload),
+        });
         await this.#handleClientMessage(ws, parsed.value);
       } catch (error) {
+        this.#logSync('ws.message.error', {
+          remote: req.socket?.remoteAddress ?? '',
+          request_id: parsed.value?.id ?? null,
+          type: parsed.value?.type ?? '',
+          error: error?.message ?? String(error),
+        });
         ws.send(JSON.stringify(createError(parsed.value?.id ?? null, 'internal_error', error?.message ?? 'internal error')));
       }
     });
 
     ws.on('close', () => {
       this.connections.delete(ws);
+      this.#logSync('ws.closed', {
+        remote: req.socket?.remoteAddress ?? '',
+        connections: this.connections.size,
+      });
     });
   }
 
@@ -822,13 +905,34 @@ export class BridgeServer extends EventEmitter {
         return;
       }
       case 'approval.response': {
+        const clientRequestId = payload.request_id ?? payload.requestId;
+        const sessionId = payload.session_id ?? payload.thread_id;
+        const pendingApproval = this.store.getPendingApproval(sessionId, clientRequestId);
+        const backendRequestId = pendingApproval?.backend_request_id ?? clientRequestId;
+        const result = payload.result ?? this.#compileApprovalResult(payload);
+        const error = payload.error ?? null;
+        this.#logApproval('response.received', {
+          request_id: requestKey(clientRequestId),
+          backend_request_id: backendRequestId,
+          backend_request_id_type: typeof backendRequestId,
+          session_id: sessionId,
+          request_method: pendingApproval?.request_method ?? '',
+          result,
+          error,
+        });
         await this.backend.respondRequest(
-          payload.request_id ?? payload.requestId,
-          payload.result ?? this.#compileApprovalResult(payload),
-          payload.error ?? null,
+          backendRequestId,
+          result,
+          error,
         );
-        await this.store.resolveApproval(payload.session_id ?? payload.thread_id, payload.request_id ?? payload.requestId);
-        this.#emitSessionChanged(payload.session_id ?? payload.thread_id);
+        this.#logApproval('response.forwarded', {
+          request_id: requestKey(clientRequestId),
+          backend_request_id: backendRequestId,
+          backend_request_id_type: typeof backendRequestId,
+          session_id: sessionId,
+        });
+        await this.store.resolveApproval(sessionId, clientRequestId);
+        this.#emitSessionChanged(sessionId);
         ws.send(JSON.stringify(createResponse(id, { ok: true })));
         return;
       }
@@ -910,6 +1014,14 @@ export class BridgeServer extends EventEmitter {
       const threadId = payload.threadId ?? payload.thread_id ?? payload.thread?.id ?? payload.thread?.threadId ?? payload.thread?.sessionId ?? null;
       const turnId = payload.turnId ?? payload.turn_id ?? payload.turn?.id ?? null;
       const sessionId = threadId ?? payload.sessionId ?? payload.session_id ?? null;
+      if (message.method === 'serverRequest/resolved') {
+        this.#logApproval('server_request.resolved', {
+          request_id: requestKey(payload.requestId ?? payload.request_id),
+          thread_id: threadId,
+          session_id: sessionId,
+          turn_id: turnId,
+        });
+      }
       const event = createEvent(message.method, {
         session_id: sessionId,
         thread_id: threadId,
@@ -955,11 +1067,20 @@ export class BridgeServer extends EventEmitter {
       const payload = message.params ?? {};
       const threadId = payload.threadId ?? payload.thread_id ?? null;
       const turnId = payload.turnId ?? payload.turn_id ?? null;
+      this.#logApproval('request.received', {
+        request_id: requestKey(message.id),
+        backend_request_id: message.id,
+        backend_request_id_type: typeof message.id,
+        request_method: message.method,
+        thread_id: threadId,
+        turn_id: turnId,
+        payload: summarizeApprovalPayload(payload),
+      });
       const event = createEvent(message.method, {
         session_id: threadId,
         thread_id: threadId,
         turn_id: turnId,
-        request_id: message.id,
+        request_id: requestKey(message.id),
         payload,
       });
       let broadcastEvent = event;
@@ -978,7 +1099,8 @@ export class BridgeServer extends EventEmitter {
           });
         }
         await this.store.recordPendingApproval(threadId, {
-          request_id: message.id,
+          request_id: requestKey(message.id),
+          backend_request_id: message.id,
           request_method: message.method,
           thread_id: threadId,
           turn_id: turnId,

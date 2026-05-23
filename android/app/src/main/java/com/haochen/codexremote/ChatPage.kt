@@ -333,9 +333,9 @@ internal fun MainActivity.ApprovalDialog(
                     }
                 }
                 HorizontalDivider(color = uiBorder.copy(alpha = 0.8f))
-                Row(
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     approval.actions.forEach { action ->
                         val accepted = action.isPrimary
@@ -344,15 +344,20 @@ internal fun MainActivity.ApprovalDialog(
                                 ButtonDefaults.buttonColors(containerColor = uiPrimary, contentColor = Color.White)
                             } else {
                                 ButtonDefaults.outlinedButtonColors(contentColor = uiText)
-                            }
+                        }
                         if (accepted) {
-                            Button(onClick = { onDecision(action) }, colors = buttonColors) {
+                            Button(
+                                onClick = { onDecision(action) },
+                                colors = buttonColors,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
                                 Text(action.label)
                             }
                         } else {
                             OutlinedButton(
                                 onClick = { onDecision(action) },
                                 colors = ButtonDefaults.outlinedButtonColors(contentColor = uiText),
+                                modifier = Modifier.fillMaxWidth(),
                             ) {
                                 Text(action.label)
                             }

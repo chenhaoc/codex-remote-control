@@ -76,6 +76,9 @@ internal fun MainActivity.handleEvent(message: JSONObject) {
 
         if (eventName == "session/changed") {
             val sessionId = message.optString("session_id", "")
+            approvalDebugLog {
+                "event session_changed sessionId=$sessionId activeSessionId=${activeSessionId.orEmpty()} syncInFlight=$syncInFlight activeTurnId=${activeTurnId.orEmpty()} pendingApprovals=${pendingApprovals.size}"
+            }
             if (sessionId.isNotBlank() && sessionId == activeSessionId) {
                 if (syncInFlight) {
                     sessionContentDirty = true
@@ -84,6 +87,12 @@ internal fun MainActivity.handleEvent(message: JSONObject) {
                 }
             }
             return
+        }
+
+        if (eventName == "serverRequest/resolved") {
+            approvalDebugLog {
+                "event server_request_resolved requestId=${firstNonEmpty(payload.optString("requestId", ""), payload.optString("request_id", ""))} threadId=${firstNonEmpty(payload.optString("threadId", ""), payload.optString("thread_id", ""))} pendingApprovals=${pendingApprovals.size}"
+            }
         }
 
         val sessionId = message.optString("session_id", "")
@@ -113,6 +122,9 @@ internal fun MainActivity.handleEvent(message: JSONObject) {
             "item/permissions/requestApproval",
             "applyPatchApproval",
             "execCommandApproval" -> {
+                approvalDebugLog {
+                    "event approval_request event=$eventName requestId=${firstNonEmpty(message.optString("request_id", ""), message.optString("id", ""))} turnId=${extractExplicitTurnKey(message, payload)} decisions=${payload.optJSONArray("availableDecisions")?.toString() ?: "[]"}"
+                }
                 updateLiveTurnStatus(buildApprovalLiveStatus(eventName, payload))
                 handleApprovalRequest(eventName, message, payload)
             }
@@ -131,11 +143,20 @@ internal fun MainActivity.handleEvent(message: JSONObject) {
                     handleThreadItemEvent(eventName, payload)
                 }
             }
-            "warning" -> updateLiveTurnStatusFromWarning(payload)
-            "error" -> updateLiveTurnStatusFromError(payload)
+            "warning" -> {
+                approvalDebugLog { "event warning payload=${payload.toString()}" }
+                updateLiveTurnStatusFromWarning(payload)
+            }
+            "error" -> {
+                approvalDebugLog { "event error payload=${payload.toString()}" }
+                updateLiveTurnStatusFromError(payload)
+            }
             "thread/status/changed" -> updateLiveTurnStatusFromThreadStatus(payload.optJSONObject("status"))
             "turn/completed" -> {
                 val completedTurnId = message.optString("turn_id", "")
+                approvalDebugLog {
+                    "event turn_completed turnId=$completedTurnId activeTurnId=${activeTurnId.orEmpty()} pendingApprovals=${pendingApprovals.size}"
+                }
                 removeCompletedTurnApprovalItems(completedTurnId)
                 if (activeTurnId != null && activeTurnId == completedTurnId) {
                     activeTurnId = null
@@ -215,6 +236,9 @@ internal fun MainActivity.handleApprovalRequest(eventName: String, message: JSON
         if (requestId.isBlank()) return
 
         val presentation = buildApprovalPresentation(eventName, payload)
+        approvalDebugLog {
+            "handleApprovalRequest requestId=$requestId turnId=${extractExplicitTurnKey(message, payload)} actionCount=${buildApprovalActions(eventName, payload).size}"
+        }
         upsertPendingApproval(
             ApprovalDialogState(
                 requestId = requestId,

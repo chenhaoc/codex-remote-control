@@ -1,5 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import readline from 'node:readline';
 import { nowIso } from '../protocol.mjs';
 
@@ -20,6 +22,7 @@ export class CodexBackend extends EventEmitter {
     requestTimeoutMs = 30000,
     clientName = 'codex-remote-control',
     clientVersion = '0.1.0',
+    protocolLogPath = null,
   } = {}) {
     super();
     this.codexBin = codexBin;
@@ -29,6 +32,7 @@ export class CodexBackend extends EventEmitter {
     this.requestTimeoutMs = requestTimeoutMs;
     this.clientName = clientName;
     this.clientVersion = clientVersion;
+    this.protocolLogPath = protocolLogPath;
     this.child = null;
     this.stdoutRl = null;
     this.stderrRl = null;
@@ -69,6 +73,7 @@ export class CodexBackend extends EventEmitter {
     this.stdoutRl.on('line', (line) => this.#handleLine(line));
     this.stderrRl.on('line', (line) => {
       if (line.trim()) {
+        this.#protocolLog('codex-stderr', line);
         this.emit('message', {
           type: 'notification',
           method: 'warning',
@@ -211,6 +216,7 @@ export class CodexBackend extends EventEmitter {
   }
 
   #handleLine(line) {
+    this.#protocolLog('codex->bridge', line);
     const parsed = parseJsonLine(line);
     if (!parsed) return;
 
@@ -218,7 +224,7 @@ export class CodexBackend extends EventEmitter {
       this.emit('message', {
         type: 'request',
         method: parsed.method,
-        id: String(parsed.id),
+        id: parsed.id,
         params: parsed.params,
       });
       return;
@@ -252,6 +258,7 @@ export class CodexBackend extends EventEmitter {
     const id = String(++this.requestSeq);
     const request = { id, method, params };
     const line = JSON.stringify(request);
+    this.#protocolLog('bridge->codex', line);
     const result = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
@@ -264,7 +271,17 @@ export class CodexBackend extends EventEmitter {
   }
 
   async #respond(message) {
-    this.child.stdin.write(`${JSON.stringify(message)}\n`);
+    const line = JSON.stringify(message);
+    this.#protocolLog('bridge->codex', line);
+    this.child.stdin.write(`${line}\n`);
+  }
+
+  #protocolLog(direction, line) {
+    if (!this.protocolLogPath) return;
+    try {
+      fs.mkdirSync(path.dirname(this.protocolLogPath), { recursive: true });
+      fs.appendFileSync(this.protocolLogPath, `[${nowIso()}] ${direction} ${line}\n`, 'utf8');
+    } catch {}
   }
 
   #normalizeInput(input, fallbackText) {
