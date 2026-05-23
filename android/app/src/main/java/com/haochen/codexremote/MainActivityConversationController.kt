@@ -84,49 +84,17 @@ internal fun MainActivity.removeCompletedTurnApprovalItems(turnId: String) {
     }
 
 
-internal fun MainActivity.appendAssistantDeltaBubble(turnKey: String, itemKey: String, delta: String) {
+internal fun MainActivity.bufferAssistantDelta(turnKey: String, itemKey: String, delta: String) {
         if (delta.isBlank()) return
         val bubbleKey = buildAssistantBubbleKey(turnKey, itemKey)
-        val bubbleId = assistantItemIds[bubbleKey]
-        if (bubbleId == null) {
-            val created = createAssistantBubble(turnKey, delta, itemKey)
-            assistantItemIds[bubbleKey] = created.id
-            conversationItems.add(created)
-            return
-        }
-
-        replaceConversationItem(bubbleId) { item ->
-            if (item is ConversationItem.Bubble) {
-                item.copy(text = item.text + delta)
-            } else {
-                item
-            }
-        }
+        assistantDeltaBuffers[bubbleKey] = assistantDeltaBuffers[bubbleKey].orEmpty() + delta
     }
 
-internal fun MainActivity.finalizeAssistantBubble(turnKey: String, itemKey: String, text: String) {
-        if (text.isBlank()) return
-        if (itemKey.isBlank()) {
-            appendStandaloneAssistantBubble(turnKey, text)
-            return
-        }
-
-        val bubbleKey = buildAssistantBubbleKey(turnKey, itemKey)
-        val bubbleId = assistantItemIds[bubbleKey]
-        if (bubbleId == null) {
-            if (hasEquivalentAssistantBubble(turnKey, text)) return
-            val created = createAssistantBubble(turnKey, text, itemKey)
-            assistantItemIds[bubbleKey] = created.id
-            conversationItems.add(created)
-            return
-        }
-
-        replaceConversationItem(bubbleId) { item ->
-            if (item is ConversationItem.Bubble) {
-                item.copy(text = preferredAssistantText(item.text, text))
-            } else {
-                item
-            }
+internal fun MainActivity.discardBufferedAssistantText(turnKey: String, itemKey: String) {
+        val key = buildAssistantBubbleKey(turnKey, itemKey)
+        assistantDeltaBuffers.remove(key)
+        if (itemKey != "stream") {
+            assistantDeltaBuffers.remove(buildAssistantBubbleKey(turnKey, "stream"))
         }
     }
 

@@ -256,7 +256,9 @@ internal fun MainActivity.applySessionContentSnapshot(payload: JSONObject?, snap
             when (item) {
                 is ConversationItem.Bubble -> {
                     item.assistantKey?.takeIf { it.isNotBlank() }?.let { assistantKey ->
-                        assistantItemIds[buildAssistantBubbleKey(item.turnKey.orEmpty(), assistantKey)] = item.id
+                        val bubbleKey = buildAssistantBubbleKey(item.turnKey.orEmpty(), assistantKey)
+                        assistantItemIds[bubbleKey] = item.id
+                        assistantDeltaBuffers.remove(bubbleKey)
                     }
                 }
                 is ConversationItem.FileChange -> {
@@ -345,6 +347,7 @@ internal fun MainActivity.upsertSession(info: SessionInfo) {
 internal fun MainActivity.clearConversation() {
         conversationItems.clear()
         assistantItemIds.clear()
+        assistantDeltaBuffers.clear()
         toolItemIds.clear()
         fileChangeItemIds.clear()
         fileChangeTurnIds.clear()

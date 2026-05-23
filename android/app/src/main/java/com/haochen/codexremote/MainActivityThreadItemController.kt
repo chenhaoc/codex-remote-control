@@ -10,8 +10,10 @@ internal fun MainActivity.handleThreadItemEvent(eventName: String, payload: JSON
         when (item.optString("type", "")) {
             "agentMessage" -> {
                 if (eventName == "item/completed") {
-                    val text = extractThreadItemText(item).ifBlank { item.optString("text", "").trim() }
-                    finalizeAssistantBubble(turnKey, itemKey, text)
+                    discardBufferedAssistantText(turnKey, itemKey)
+                    activeSessionId?.takeIf { it.isNotBlank() }?.let { sessionId ->
+                        requestSessionContent(sessionId)
+                    }
                 }
             }
             "fileChange" -> handleFileChangeItem(turnKey, item)

@@ -59,6 +59,7 @@ class MainActivity : ComponentActivity() {
     internal val availableModels = mutableStateListOf<ModelInfo>()
     internal val conversationItems = mutableStateListOf<ConversationItem>()
     internal val assistantItemIds = mutableMapOf<String, String>()
+    internal val assistantDeltaBuffers = mutableMapOf<String, String>()
     internal val toolItemIds = mutableMapOf<String, String>()
     internal val fileChangeItemIds = mutableMapOf<String, String>()
     internal val fileChangeTurnIds = mutableMapOf<String, String>()

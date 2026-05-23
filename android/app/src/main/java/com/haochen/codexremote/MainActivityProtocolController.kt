@@ -203,7 +203,7 @@ internal fun MainActivity.handleAssistantDelta(message: JSONObject, payload: JSO
             payload.optString("text", ""),
             payload.optString("message", ""),
         )
-        appendAssistantDeltaBubble(turnKey, itemKey.ifBlank { "stream" }, delta)
+        bufferAssistantDelta(turnKey, itemKey.ifBlank { "stream" }, delta)
     }
 
 internal fun MainActivity.handleApprovalRequest(eventName: String, message: JSONObject, payload: JSONObject) {
