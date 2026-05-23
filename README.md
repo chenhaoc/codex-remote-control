@@ -111,6 +111,7 @@ bridge 提供了一个轻量 `file.read` 能力，供 Android 代码浏览器按
 - 默认状态文件在 `data/bridge-state.json`
 - 默认 token 文件在 `data/bridge-token.txt`
 - `codex` 模式会调用本机 `codex app-server --listen stdio://`
+- 会话增量同步实现细节见 [docs/session-incremental-sync.md](docs/session-incremental-sync.md)
 
 ## Android APK
 
@@ -134,8 +135,26 @@ Android 侧使用 Kotlin + Jetpack Compose + OkHttp WebSocket。UI 采用 Compos
 - `model.list` 拉取模型列表
 - 新会话时配置模型、思考强度、审批策略和沙箱
 - `session.content` 快照恢复聊天历史和待审批项
+- `session.sync` 增量快照同步，降低 5s 轮询时的通信量和本地处理成本
 - 基于 `conversationItems` 的聊天 WebView 增量渲染，避免简单消息追加时整页重载
 - 会话切换和历史恢复时按快照回填滚动位置
 - 输入法弹出或视口高度变化时保持当前阅读锚点，避免消息区被顶跳
 - `file.read` 驱动的代码/补丁浏览
 - 会话信息页展示模型、思考强度、审批策略、沙箱、上下文窗口和 token 统计
+
+### APK Sync Debug Logs
+
+APK 同步调试日志默认关闭，不进设置页，也不写文件。需要临时定位 `session.content` / `session.sync` 时，通过 logcat tag 打开：
+
+```bash
+adb shell setprop log.tag.CodexRemoteSync DEBUG
+adb logcat -s CodexRemoteSync:D
+```
+
+关闭：
+
+```bash
+adb shell setprop log.tag.CodexRemoteSync INFO
+```
+
+代码侧使用 `Log.isLoggable("CodexRemoteSync", Log.DEBUG)` 保护日志，默认运行时不会构造同步调试字符串，也不会遍历快照 entries 输出摘要。
