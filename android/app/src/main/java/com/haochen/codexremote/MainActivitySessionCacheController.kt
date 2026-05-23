@@ -18,7 +18,11 @@ internal fun MainActivity.loadLocalSessionCache() {
 }
 
 internal fun MainActivity.switchLocalSessionCache(url: String?) {
-    activeSessionCacheKey = sessionCacheKeyForUrl(url)
+    val targetCacheKey = sessionCacheKeyForUrl(url)
+    if (activeSessionCacheKey == targetCacheKey) {
+        return
+    }
+    activeSessionCacheKey = targetCacheKey
     stopSessionSyncLoop()
     clearConversation()
     sessions.clear()
