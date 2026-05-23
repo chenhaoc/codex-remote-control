@@ -105,7 +105,6 @@ internal fun MainActivity.handleEvent(message: JSONObject) {
             }
 
             "item/agentMessage/delta" -> {
-                updateLiveTurnStatus("Codex 正在输出…")
                 handleAssistantDelta(message, payload)
             }
             "item/commandExecution/requestApproval",
@@ -113,15 +112,15 @@ internal fun MainActivity.handleEvent(message: JSONObject) {
             "item/permissions/requestApproval",
             "applyPatchApproval",
             "execCommandApproval" -> {
-                updateLiveTurnStatus("等待审批…")
+                updateLiveTurnStatus(buildApprovalLiveStatus(eventName, payload))
                 handleApprovalRequest(eventName, message, payload)
             }
             "item/fileChange/patchUpdated" -> {
-                updateLiveTurnStatus("Codex 正在修改文件…")
+                updateLiveTurnStatus(buildFileChangePatchLiveStatus(payload))
                 handleFileChangePatchUpdated(message, payload)
             }
             "turn/diff/updated" -> {
-                updateLiveTurnStatus("Codex 正在修改文件…")
+                updateLiveTurnStatus(buildTurnDiffLiveStatus(payload))
                 handleTurnDiffUpdated(message, payload)
             }
             "item/started", "item/completed" -> {
@@ -204,6 +203,7 @@ internal fun MainActivity.handleAssistantDelta(message: JSONObject, payload: JSO
             payload.optString("message", ""),
         )
         bufferAssistantDelta(turnKey, itemKey.ifBlank { "stream" }, delta)
+        updateLiveTurnStatus(buildAssistantOutputLiveStatus(turnKey, itemKey.ifBlank { "stream" }))
     }
 
 internal fun MainActivity.handleApprovalRequest(eventName: String, message: JSONObject, payload: JSONObject) {

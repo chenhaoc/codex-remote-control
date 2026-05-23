@@ -247,21 +247,150 @@ internal fun MainActivity.isClientDirectiveLine(line: String): Boolean {
 internal fun MainActivity.updateLiveTurnStatusFromItem(eventName: String, item: JSONObject?) {
         if (item == null) return
         val started = eventName == "item/started"
-        val status = when (item.optString("type", "")) {
-            "contextCompaction" -> if (started) "Codex 正在整理上下文…" else "Codex 继续响应中…"
-            "reasoning" -> if (started) "Codex 正在思考…" else "Codex 继续响应中…"
-            "plan" -> if (started) "Codex 正在整理计划…" else "Codex 继续响应中…"
-            "commandExecution" -> if (started) "Codex 正在执行命令…" else "Codex 继续响应中…"
-            "fileChange" -> if (started) "Codex 正在修改文件…" else "Codex 继续响应中…"
-            "mcpToolCall" -> if (started) "Codex 正在调用工具…" else "Codex 继续响应中…"
-            "dynamicToolCall" -> if (started) "Codex 正在运行工具…" else "Codex 继续响应中…"
-            "collabAgentToolCall" -> if (started) "Codex 正在协调子任务…" else "Codex 继续响应中…"
-            "agentMessage" -> "Codex 正在输出…"
-            else -> null
-        }
+        val status = buildItemLiveStatus(item, started)
         if (status != null) {
             updateLiveTurnStatus(status)
         }
+    }
+
+internal fun MainActivity.buildItemLiveStatus(item: JSONObject, started: Boolean): String? {
+        return when (item.optString("type", "")) {
+            "contextCompaction" -> if (started) "Codex 正在整理上下文…" else "Codex 继续响应中…"
+            "reasoning" -> if (started) buildReasoningLiveStatus(item) else "Codex 继续响应中…"
+            "plan" -> if (started) "Codex 正在整理计划…" else "Codex 继续响应中…"
+            "commandExecution" -> if (started) buildCommandExecutionLiveStatus(item) else buildCompletedItemLiveStatus(item, "命令执行完成")
+            "fileChange" -> if (started) buildFileChangeItemLiveStatus(item) else buildCompletedItemLiveStatus(item, "文件修改完成")
+            "mcpToolCall" -> if (started) buildMcpToolLiveStatus(item) else buildCompletedItemLiveStatus(item, "工具调用完成")
+            "dynamicToolCall" -> if (started) buildDynamicToolLiveStatus(item) else buildCompletedItemLiveStatus(item, "工具运行完成")
+            "collabAgentToolCall" -> if (started) buildCollabAgentLiveStatus(item) else buildCompletedItemLiveStatus(item, "子任务完成")
+            "agentMessage" -> if (started) "Codex 正在准备回复…" else "Codex 回复已完成，正在同步…"
+            else -> null
+        }
+    }
+
+internal fun MainActivity.buildAssistantOutputLiveStatus(turnKey: String, itemKey: String): String {
+        val bufferedLength = assistantDeltaBuffers[buildAssistantBubbleKey(turnKey, itemKey)]?.length ?: 0
+        return if (bufferedLength > 0) {
+            "Codex 正在输出，已接收约 $bufferedLength 字…"
+        } else {
+            "Codex 正在输出…"
+        }
+    }
+
+internal fun MainActivity.buildApprovalLiveStatus(eventName: String, payload: JSONObject): String {
+        val detail = when (eventName) {
+            "item/fileChange/requestApproval", "applyPatchApproval" -> describeApprovalFileChanges(payload)
+            "item/permissions/requestApproval" -> describePermissionApproval(payload)
+            "execCommandApproval", "item/commandExecution/requestApproval" -> describeApprovalCommand(payload)
+            else -> ""
+        }
+        val label = when (eventName) {
+            "item/fileChange/requestApproval", "applyPatchApproval" -> "等待文件修改审批"
+            "item/permissions/requestApproval" -> "等待权限审批"
+            "execCommandApproval", "item/commandExecution/requestApproval" -> "等待命令审批"
+            else -> "等待审批"
+        }
+        return joinLiveStatus(label, detail)
+    }
+
+internal fun MainActivity.buildFileChangePatchLiveStatus(payload: JSONObject): String {
+        val diffEntries = payload.optJSONArray("changes").toConversationDiffEntries()
+        return joinLiveStatus("Codex 正在修改文件", describeDiffEntries(diffEntries))
+    }
+
+internal fun MainActivity.buildTurnDiffLiveStatus(payload: JSONObject): String {
+        val stats = buildDiffStatsLine(diffEntries = emptyList(), fallbackDiff = payload.optString("diff", ""))
+        return joinLiveStatus("Codex 正在修改文件", stats.orEmpty())
+    }
+
+internal fun MainActivity.buildReasoningLiveStatus(item: JSONObject): String {
+        val summaryCount = item.optJSONArray("summary")?.length() ?: 0
+        val contentCount = item.optJSONArray("content")?.length() ?: 0
+        val detail = when {
+            summaryCount > 0 && contentCount > 0 -> "$summaryCount 条摘要 / $contentCount 段思考"
+            summaryCount > 0 -> "$summaryCount 条摘要"
+            contentCount > 0 -> "$contentCount 段思考"
+            else -> ""
+        }
+        return joinLiveStatus("Codex 正在思考", detail)
+    }
+
+internal fun MainActivity.buildCommandExecutionLiveStatus(item: JSONObject): String {
+        return joinLiveStatus("Codex 正在执行命令", item.optString("command", "").trim())
+    }
+
+internal fun MainActivity.buildFileChangeItemLiveStatus(item: JSONObject): String {
+        val diffEntries = item.optJSONArray("changes").toConversationDiffEntries()
+        return joinLiveStatus("Codex 正在修改文件", describeDiffEntries(diffEntries))
+    }
+
+internal fun MainActivity.buildMcpToolLiveStatus(item: JSONObject): String {
+        return joinLiveStatus("Codex 正在调用 MCP 工具", firstNonEmpty(item.optString("server", ""), item.optString("tool", "")))
+    }
+
+internal fun MainActivity.buildDynamicToolLiveStatus(item: JSONObject): String {
+        val toolName = listOf(item.optString("namespace", ""), item.optString("tool", ""))
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .joinToString(".")
+        return joinLiveStatus("Codex 正在运行工具", toolName)
+    }
+
+internal fun MainActivity.buildCollabAgentLiveStatus(item: JSONObject): String {
+        val prompt = item.optString("prompt", "").trim()
+        return joinLiveStatus("Codex 正在协调子任务", item.optString("tool", "").ifBlank { prompt })
+    }
+
+internal fun MainActivity.buildCompletedItemLiveStatus(item: JSONObject, fallback: String): String {
+        val status = item.optString("status", "").trim()
+        return when (status) {
+            "failed" -> "Codex ${fallback.removeSuffix("完成")}失败"
+            "declined" -> "Codex ${fallback.removeSuffix("完成")}已拒绝"
+            else -> "$fallback，继续响应中…"
+        }
+    }
+
+internal fun MainActivity.describeApprovalCommand(payload: JSONObject): String {
+        return firstNonEmpty(
+            payload.optString("command", ""),
+            payload.optJSONObject("item")?.optString("command", "") ?: "",
+            payload.optString("reason", ""),
+        )
+    }
+
+internal fun MainActivity.describeApprovalFileChanges(payload: JSONObject): String {
+        val diffEntries = payload.optJSONObject("fileChanges").toApprovalDiffEntries()
+        return describeDiffEntries(diffEntries).ifBlank { payload.optString("reason", "") }
+    }
+
+internal fun MainActivity.describePermissionApproval(payload: JSONObject): String {
+        return firstNonEmpty(
+            payload.optString("grantRoot", ""),
+            payload.optString("cwd", ""),
+            payload.optString("reason", ""),
+        )
+    }
+
+internal fun MainActivity.describeDiffEntries(diffEntries: List<ConversationDiffEntry>): String {
+        if (diffEntries.isEmpty()) return ""
+        val stats = buildDiffStatsLine(diffEntries = diffEntries, fallbackDiff = null)
+        val fileLabel = when (diffEntries.size) {
+            1 -> diffEntries.first().filenameLabel()
+            else -> "${diffEntries.size} 个文件"
+        }
+        return listOf(fileLabel, stats).filter { !it.isNullOrBlank() }.joinToString(" ")
+    }
+
+internal fun joinLiveStatus(label: String, detail: String): String {
+        val cleanLabel = label.trim()
+        val cleanDetail = compactLiveStatusDetail(detail)
+        return if (cleanDetail.isBlank()) "$cleanLabel…" else "$cleanLabel: $cleanDetail"
+    }
+
+internal fun compactLiveStatusDetail(value: String, maxLength: Int = 42): String {
+        val normalized = value.replace(Regex("\\s+"), " ").trim()
+        if (normalized.length <= maxLength) return normalized
+        return normalized.take(maxLength - 1).trimEnd() + "…"
     }
 
 internal fun MainActivity.updateLiveTurnStatusFromWarning(payload: JSONObject) {
