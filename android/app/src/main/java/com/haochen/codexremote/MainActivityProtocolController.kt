@@ -107,8 +107,8 @@ internal fun MainActivity.handleEvent(message: JSONObject) {
 
             "turn/started" -> {
                 activeTurnId = firstNonEmpty(
-                    message.optString("turn_id", ""),
-                    payload.optJSONObject("turn")?.optString("id", "") ?: "",
+                    message.optProtocolString("turn_id"),
+                    payload.optJSONObject("turn")?.optProtocolString("id") ?: "",
                 )
                 interruptingTurnId = null
                 updateLiveTurnStatus("已开始，等待输出…")
@@ -153,7 +153,7 @@ internal fun MainActivity.handleEvent(message: JSONObject) {
             }
             "thread/status/changed" -> updateLiveTurnStatusFromThreadStatus(payload.optJSONObject("status"))
             "turn/completed" -> {
-                val completedTurnId = message.optString("turn_id", "")
+                val completedTurnId = message.optProtocolString("turn_id")
                 approvalDebugLog {
                     "event turn_completed turnId=$completedTurnId activeTurnId=${activeTurnId.orEmpty()} pendingApprovals=${pendingApprovals.size}"
                 }
@@ -180,14 +180,14 @@ internal fun MainActivity.handleTurnInput(message: JSONObject, payload: JSONObje
             payload.optString("message", ""),
         )
         val turnKey = firstNonEmpty(
-            message.optString("turn_id", ""),
-            payload.optString("turn_id", ""),
+            message.optProtocolString("turn_id"),
+            payload.optProtocolString("turn_id"),
         )
         val itemKey = firstNonEmpty(
-            payload.optString("itemId", ""),
-            payload.optString("item_id", ""),
-            message.optString("itemId", ""),
-            message.optString("item_id", ""),
+            payload.optProtocolString("itemId"),
+            payload.optProtocolString("item_id"),
+            message.optProtocolString("itemId"),
+            message.optProtocolString("item_id"),
         )
         appendUserInputBubble(turnKey, itemKey, text)
     }

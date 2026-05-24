@@ -98,6 +98,25 @@ internal fun firstNonEmpty(vararg values: String): String {
         return ""
     }
 
+internal fun normalizeProtocolString(value: Any?): String {
+        val text =
+            when (value) {
+                null, JSONObject.NULL -> return ""
+                is String -> value.trim()
+                else -> value.toString().trim()
+            }
+        return when {
+            text.isBlank() -> ""
+            text.equals("null", ignoreCase = true) -> ""
+            text.equals("undefined", ignoreCase = true) -> ""
+            else -> text
+        }
+    }
+
+internal fun JSONObject.optProtocolString(name: String): String = normalizeProtocolString(opt(name))
+
+internal fun JSONArray.optProtocolString(index: Int): String = normalizeProtocolString(opt(index))
+
 internal fun normalizeNullablePath(value: Any?): String? {
         val text =
             when (value) {

@@ -209,7 +209,7 @@ internal fun MainActivity.buildCurrentSessionCachePayload(sessionId: String, syn
         } else {
             for (index in 0 until previousEntries.length()) {
                 val entry = previousEntries.optJSONObject(index) ?: continue
-                val turnId = entry.optString("turn_id", "").trim()
+                val turnId = entry.optProtocolString("turn_id")
                 if ((turnId.isBlank() || !changedTurnIds.contains(turnId)) && !entry.isUnboundUserInputShadowOf(syncEntries)) {
                     mergedEntries.put(JSONObject(entry.toString()))
                 }
@@ -241,9 +241,9 @@ internal fun MainActivity.logSessionSyncEntries(prefix: String, payload: JSONObj
             val item = entry.optJSONObject("item")
             add(
                 listOf(
-                    entry.optString("turn_id", ""),
+                    entry.optProtocolString("turn_id"),
                     item?.optString("type", "").orEmpty(),
-                    item?.optString("id", "").orEmpty(),
+                    item?.optProtocolString("id").orEmpty(),
                     (item?.optString("text", "")?.length ?: item?.optJSONArray("content")?.optJSONObject(0)?.optString("text", "")?.length ?: 0).toString(),
                     entry.optString("status", ""),
                 ).joinToString(":"),
@@ -257,7 +257,7 @@ private fun MainActivity.entriesMatchChangedTurns(entries: JSONArray, changedTur
     val changedTurnSet = changedTurnIds.toSet()
     for (index in 0 until entries.length()) {
         val entry = entries.optJSONObject(index) ?: return false
-        val turnId = entry.optString("turn_id", "").trim()
+        val turnId = entry.optProtocolString("turn_id")
         if (turnId.isBlank() || !changedTurnSet.contains(turnId)) return false
     }
     return true
@@ -308,16 +308,16 @@ private fun ConversationItem.isUnboundUserInputShadowOf(sourceItemIds: Set<Strin
 }
 
 private fun JSONObject.isUnboundUserInputShadowOf(syncEntries: JSONArray): Boolean {
-    if (optString("turn_id", "").trim().isNotEmpty()) return false
+    if (optProtocolString("turn_id").isNotEmpty()) return false
     val item = optJSONObject("item") ?: return false
     if (item.optString("type", "") != "userMessage") return false
-    val itemId = item.optString("id", "").trim()
+    val itemId = item.optProtocolString("id")
     if (itemId.isBlank()) return false
     for (index in 0 until syncEntries.length()) {
         val syncEntry = syncEntries.optJSONObject(index) ?: continue
-        if (syncEntry.optString("turn_id", "").trim().isBlank()) continue
+        if (syncEntry.optProtocolString("turn_id").isBlank()) continue
         val syncItem = syncEntry.optJSONObject("item") ?: continue
-        if (syncItem.optString("type", "") == "userMessage" && syncItem.optString("id", "").trim() == itemId) {
+        if (syncItem.optString("type", "") == "userMessage" && syncItem.optProtocolString("id") == itemId) {
             return true
         }
     }
@@ -351,7 +351,7 @@ private fun JSONArray?.toStringList(): List<String> {
     if (this == null) return emptyList()
     return buildList {
         for (index in 0 until length()) {
-            optString(index, "").trim().takeIf { it.isNotBlank() }?.let(::add)
+            optProtocolString(index).takeIf { it.isNotBlank() }?.let(::add)
         }
     }
 }
@@ -360,7 +360,7 @@ private fun JSONArray.turnIdSummary(): List<String> {
     return buildList {
         for (index in 0 until length()) {
             val entry = optJSONObject(index) ?: continue
-            add("${entry.optString("turn_id", "")}:${entry.optJSONObject("item")?.optString("type", "").orEmpty()}:${entry.optJSONObject("item")?.optString("id", "").orEmpty()}")
+            add("${entry.optProtocolString("turn_id")}:${entry.optJSONObject("item")?.optString("type", "").orEmpty()}:${entry.optJSONObject("item")?.optProtocolString("id").orEmpty()}")
         }
     }
 }

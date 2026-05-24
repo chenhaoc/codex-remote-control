@@ -22,7 +22,7 @@ internal fun MainActivity.appendBubble(
         textColor: Int,
         turnKey: String? = null,
     ) {
-        val normalizedTurnKey = turnKey?.trim()?.takeIf { it.isNotBlank() }
+        val normalizedTurnKey = normalizeProtocolString(turnKey).takeIf { it.isNotBlank() }
         if (right) {
             val latestUserBubble = conversationItems.asReversed().firstOrNull { item ->
                 (item as? ConversationItem.Bubble)?.right == true
@@ -72,7 +72,7 @@ internal fun MainActivity.removeConversationItem(itemId: String) {
     }
 
 internal fun MainActivity.removeCompletedTurnApprovalItems(turnId: String) {
-        val normalizedTurnId = turnId.trim()
+        val normalizedTurnId = normalizeProtocolString(turnId)
         if (pendingApprovals.isEmpty()) return
 
         if (normalizedTurnId.isBlank()) {
@@ -107,8 +107,8 @@ internal fun MainActivity.appendStandaloneAssistantBubble(turnKey: String, text:
 internal fun MainActivity.appendUserInputBubble(turnKey: String, itemKey: String, text: String) {
         val normalizedText = text.trim()
         if (normalizedText.isBlank()) return
-        val normalizedItemKey = itemKey.trim()
-        val normalizedTurnKey = turnKey.trim()
+        val normalizedItemKey = normalizeProtocolString(itemKey)
+        val normalizedTurnKey = normalizeProtocolString(turnKey)
         val sourceItemId = normalizedItemKey.takeIf { it.isNotBlank() }
         val existing = conversationItems.asReversed().firstOrNull { item ->
             val bubble = item as? ConversationItem.Bubble ?: return@firstOrNull false
@@ -174,30 +174,30 @@ internal fun sanitizeConversationItemIdPart(value: String): String {
 
 internal fun MainActivity.extractTurnKey(message: JSONObject? = null, payload: JSONObject? = null): String {
         return firstNonEmpty(
-            message?.optString("turn_id", "") ?: "",
-            message?.optString("turnId", "") ?: "",
-            payload?.optString("turn_id", "") ?: "",
-            payload?.optString("turnId", "") ?: "",
+            message?.optProtocolString("turn_id") ?: "",
+            message?.optProtocolString("turnId") ?: "",
+            payload?.optProtocolString("turn_id") ?: "",
+            payload?.optProtocolString("turnId") ?: "",
             "assistant",
         )
     }
 
 internal fun MainActivity.extractExplicitTurnKey(message: JSONObject? = null, payload: JSONObject? = null): String {
         return firstNonEmpty(
-            message?.optString("turn_id", "") ?: "",
-            message?.optString("turnId", "") ?: "",
-            payload?.optString("turn_id", "") ?: "",
-            payload?.optString("turnId", "") ?: "",
+            message?.optProtocolString("turn_id") ?: "",
+            message?.optProtocolString("turnId") ?: "",
+            payload?.optProtocolString("turn_id") ?: "",
+            payload?.optProtocolString("turnId") ?: "",
         )
     }
 
 internal fun MainActivity.extractAssistantItemKey(message: JSONObject? = null, payload: JSONObject? = null, item: JSONObject? = null): String {
         return firstNonEmpty(
-            message?.optString("item_id", "") ?: "",
-            message?.optString("itemId", "") ?: "",
-            payload?.optString("item_id", "") ?: "",
-            payload?.optString("itemId", "") ?: "",
-            item?.optString("id", "") ?: "",
+            message?.optProtocolString("item_id") ?: "",
+            message?.optProtocolString("itemId") ?: "",
+            payload?.optProtocolString("item_id") ?: "",
+            payload?.optProtocolString("itemId") ?: "",
+            item?.optProtocolString("id") ?: "",
         )
     }
 

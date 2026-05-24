@@ -39,8 +39,8 @@ internal fun MainActivity.buildConversationItemFromSnapshotEntry(entry: JSONObje
 internal fun MainActivity.buildConversationSnapshotThreadItem(entry: JSONObject): ConversationItem? {
         val item = entry.optJSONObject("item") ?: return null
         val itemType = item.optString("type", "").trim()
-        val turnId = entry.optString("turn_id", "").trim()
-        val itemId = item.optString("id", "").trim()
+        val turnId = entry.optProtocolString("turn_id")
+        val itemId = item.optProtocolString("id")
         return when (itemType) {
             "userMessage" -> {
                 val text = extractThreadItemText(item)
@@ -87,7 +87,7 @@ internal fun MainActivity.buildConversationSnapshotThreadItem(entry: JSONObject)
     }
 
 internal fun MainActivity.buildConversationSnapshotTurnStatus(entry: JSONObject): ConversationItem? {
-        val turnId = entry.optString("turn_id", "").trim()
+        val turnId = entry.optProtocolString("turn_id")
         val status = entry.optString("status", "").trim()
         val errorText = extractErrorText(entry.optJSONObject("error"))
         if (status == "interrupted" && errorText.isBlank()) {
@@ -121,7 +121,7 @@ internal fun MainActivity.buildConversationApprovalFromSnapshot(approval: JSONOb
             detail = presentation.detail,
             actions = buildApprovalActions(eventName, payload),
             diffEntries = presentation.diffEntries,
-            turnId = approval.optString("turn_id", "").trim().takeIf { it.isNotBlank() },
+            turnId = approval.optProtocolString("turn_id").takeIf { it.isNotBlank() },
         )
     }
 
@@ -161,7 +161,7 @@ internal fun MainActivity.reconcileActiveTurnFromSnapshot(payload: JSONObject?) 
             }
             return
         }
-        val turnId = activeTurns.optJSONObject(activeTurns.length() - 1)?.optString("turn_id", "")?.trim().orEmpty()
+        val turnId = activeTurns.optJSONObject(activeTurns.length() - 1)?.optProtocolString("turn_id").orEmpty()
         if (turnId.isNotBlank()) {
             activeTurnId = turnId
             if (interruptingTurnId == turnId) {
@@ -340,7 +340,7 @@ internal fun MainActivity.inferOpenTurnLiveStatusFromSnapshotEntries(entries: JS
 
         for (index in 0 until entries.length()) {
             val entry = entries.optJSONObject(index) ?: continue
-            val turnId = entry.optString("turn_id", "").trim()
+            val turnId = entry.optProtocolString("turn_id")
             if (turnId.isBlank()) continue
             when (entry.optString("type", "")) {
                 "turn_started" -> {
@@ -373,8 +373,8 @@ private fun JSONArray.snapshotSignature(): String {
             add(
                 listOf(
                     entry.optString("type", ""),
-                    entry.optString("turn_id", ""),
-                    item?.optString("id", "").orEmpty(),
+                    entry.optProtocolString("turn_id"),
+                    item?.optProtocolString("id").orEmpty(),
                     item?.optString("type", "").orEmpty(),
                     item?.optString("status", "").orEmpty(),
                     item?.snapshotTextLength()?.toString().orEmpty(),
@@ -390,7 +390,7 @@ private fun JSONObject.snapshotHasTerminalTurnStatus(turnId: String): Boolean {
     val entries = optJSONArray("entries") ?: return false
     for (index in entries.length() - 1 downTo 0) {
         val entry = entries.optJSONObject(index) ?: continue
-        if (entry.optString("turn_id", "").trim() != turnId) continue
+        if (entry.optProtocolString("turn_id") != turnId) continue
         if (entry.optString("type", "") != "turn_status") continue
         val status = entry.optString("status", "").trim()
         if (status.isNotBlank() && status != "inProgress") {
