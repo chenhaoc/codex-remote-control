@@ -3084,6 +3084,107 @@ test('bridge preserves stored session metadata in session.list and session.conte
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test('bridge session.list includes stored sessions missing from backend page', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-session-list-store-test-'));
+  const listedThread = {
+    id: 'backend_thread_1',
+    sessionId: 'backend_thread_1',
+    forkedFromId: null,
+    preview: 'Backend session',
+    ephemeral: false,
+    model: 'gpt-5',
+    modelProvider: 'custom',
+    createdAt: 1,
+    updatedAt: 20,
+    status: { type: 'idle' },
+    path: null,
+    cwd: '/tmp/backend-workspace',
+    cliVersion: 'mock',
+    source: 'app-server',
+    threadSource: null,
+    agentNickname: null,
+    agentRole: null,
+    gitInfo: null,
+    name: 'Backend session',
+    turns: [],
+  };
+
+  class PagedSessionBackend extends EventEmitter {
+    async start() {}
+
+    async stop() {}
+
+    async listThreads() {
+      return [structuredClone(listedThread)];
+    }
+  }
+
+  const store = new StateStore(path.join(dir, 'state.json'));
+  await store.load();
+  await store.upsertSession({
+    session_id: 'backend_thread_1',
+    thread_id: 'backend_thread_1',
+    title: 'Stale backend title',
+    cwd: '/tmp/backend-workspace',
+    model: 'gpt-5',
+    backend: 'custom',
+    preview: 'Stale backend preview',
+    active: true,
+    updatedAt: '2026-05-20T00:00:00.000Z',
+  });
+  await store.upsertSession({
+    session_id: 'stored_only_thread_1',
+    thread_id: 'stored_only_thread_1',
+    title: 'Stored only session',
+    cwd: '/tmp/stored-workspace',
+    model: 'gpt-5',
+    backend: 'custom',
+    preview: 'Stored only session',
+    active: true,
+    updatedAt: '2026-05-21T00:00:00.000Z',
+  });
+
+  const bridge = new BridgeServer({
+    backend: new PagedSessionBackend(),
+    store,
+    host: '127.0.0.1',
+    port: 0,
+    token: 'test-token',
+  });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  await once(ws, 'open');
+
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  ws.send(JSON.stringify({ id: '1', type: 'session.list', payload: {} }));
+  await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '1'));
+  const sessionList = messages.find((m) => m.type === 'response' && m.id === '1');
+  assert.equal(sessionList.ok, true);
+  assert.deepEqual(
+    sessionList.payload.sessions.map((session) => session.session_id).sort(),
+    ['backend_thread_1', 'stored_only_thread_1'],
+  );
+  assert.deepEqual(
+    new Set(sessionList.payload.sessions.map((session) => session.cwd)),
+    new Set(['/tmp/backend-workspace', '/tmp/stored-workspace']),
+  );
+  assert.equal(
+    sessionList.payload.sessions.find((session) => session.session_id === 'backend_thread_1').title,
+    'Backend session',
+  );
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 test('bridge backfills historical session metadata from local rollout without remote resume', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-local-metadata-test-'));
   const rolloutPath = path.join(dir, 'history-rollout.jsonl');

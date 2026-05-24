@@ -212,14 +212,23 @@ export class BridgeServer extends EventEmitter {
         return;
       case 'session.list': {
         const backendThreads = await this.backend.listThreads(payload);
-        const sessions = backendThreads.map((thread) => {
+        const sessionsById = new Map();
+        const backendSessions = backendThreads.map((thread) => {
           const summary = normalizeThreadSummary(thread, backendName(this.backend));
           const stored = summary?.session_id ? this.store.getSession(summary.session_id) : null;
           return mergeSessionSummary(summary, stored);
-        });
-        for (const session of sessions) {
+        }).filter((session) => session?.session_id);
+        for (const session of backendSessions) {
           await this.store.upsertSession(session);
+          sessionsById.set(session.session_id, session);
         }
+        for (const session of this.store.listSessions()) {
+          if (!sessionsById.has(session.session_id)) {
+            sessionsById.set(session.session_id, session);
+          }
+        }
+        const sessions = [...sessionsById.values()]
+          .sort((a, b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')));
         ws.send(JSON.stringify(createResponse(id, { sessions })));
         return;
       }
