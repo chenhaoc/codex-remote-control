@@ -91,7 +91,10 @@ internal fun MainActivity.requestSessionSync(sessionId: String) {
                 updateSessionSyncCursor(responsePayload)
                 val mergedPayload = buildCurrentSessionCachePayload(requestedSessionId, responsePayload)
                 persistLocalSessionContent(requestedSessionId, mergedPayload)
-                updateLiveTurnStatusFromSnapshot(mergedPayload)
+                updateLiveTurnStatusFromSnapshot(
+                    mergedPayload,
+                    hasIncrementalChanges = changedTurnIds.isNotEmpty(),
+                )
                 syncDebugLog { "session.sync applied sessionId=$requestedSessionId conversationItems=${conversationItems.size} cacheEntries=${mergedPayload.optJSONArray("entries")?.length() ?: 0}" }
                 flushPendingSessionRefresh(requestedSessionId)
             }

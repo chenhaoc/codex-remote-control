@@ -158,13 +158,16 @@ internal fun MainActivity.handleEvent(message: JSONObject) {
                     "event turn_completed turnId=$completedTurnId activeTurnId=${activeTurnId.orEmpty()} pendingApprovals=${pendingApprovals.size}"
                 }
                 removeCompletedTurnApprovalItems(completedTurnId)
-                if (activeTurnId != null && activeTurnId == completedTurnId) {
+                val completesActiveTurn = activeTurnId != null && activeTurnId == completedTurnId
+                if (completesActiveTurn) {
                     activeTurnId = null
                 }
                 if (interruptingTurnId != null && interruptingTurnId == completedTurnId) {
                     interruptingTurnId = null
                 }
-                updateLiveTurnStatus(null)
+                if (completesActiveTurn) {
+                    updateLiveTurnStatus(null)
+                }
             }
 
             else -> Unit

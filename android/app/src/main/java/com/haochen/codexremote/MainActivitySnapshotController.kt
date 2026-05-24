@@ -125,18 +125,22 @@ internal fun MainActivity.buildConversationApprovalFromSnapshot(approval: JSONOb
         )
     }
 
-internal fun MainActivity.updateLiveTurnStatusFromSnapshot(payload: JSONObject?) {
+internal fun MainActivity.updateLiveTurnStatusFromSnapshot(
+        payload: JSONObject?,
+        hasIncrementalChanges: Boolean = false,
+) {
         val entries = payload?.optJSONArray("entries")
         val snapshotSignature = entries?.snapshotSignature().orEmpty()
         val snapshotItemCount = entries?.length() ?: 0
-        val snapshotGrew = snapshotItemCount > lastSnapshotItemCount
-        val snapshotChanged = snapshotSignature.isNotBlank() && lastSnapshotSignature != null && snapshotSignature != lastSnapshotSignature
+        val hasPreviousSnapshot = lastSnapshotSignature != null
+        val snapshotGrew = hasPreviousSnapshot && snapshotItemCount > lastSnapshotItemCount
+        val snapshotChanged = hasPreviousSnapshot && snapshotSignature.isNotBlank() && snapshotSignature != lastSnapshotSignature
         reconcileActiveTurnFromSnapshot(payload)
         val status = inferLiveTurnStatusFromSnapshot(payload)
         when {
             status != null -> updateLiveTurnStatus(status)
+            hasIncrementalChanges || snapshotGrew || snapshotChanged -> updateLiveTurnStatus("正在同步…")
             activeTurnId == null -> updateLiveTurnStatus(null)
-            snapshotGrew || snapshotChanged -> updateLiveTurnStatus("正在同步…")
             else -> Unit
         }
         if (snapshotSignature.isNotBlank()) {
@@ -148,8 +152,13 @@ internal fun MainActivity.updateLiveTurnStatusFromSnapshot(payload: JSONObject?)
 internal fun MainActivity.reconcileActiveTurnFromSnapshot(payload: JSONObject?) {
         val activeTurns = payload?.optJSONArray("active_turns") ?: return
         if (activeTurns.length() == 0) {
-            activeTurnId = null
-            interruptingTurnId = null
+            val turnId = activeTurnId
+            if (turnId != null && payload.snapshotHasTerminalTurnStatus(turnId)) {
+                activeTurnId = null
+                if (interruptingTurnId == turnId) {
+                    interruptingTurnId = null
+                }
+            }
             return
         }
         val turnId = activeTurns.optJSONObject(activeTurns.length() - 1)?.optString("turn_id", "")?.trim().orEmpty()
@@ -368,10 +377,36 @@ private fun JSONArray.snapshotSignature(): String {
                     item?.optString("id", "").orEmpty(),
                     item?.optString("type", "").orEmpty(),
                     item?.optString("status", "").orEmpty(),
+                    item?.snapshotTextLength()?.toString().orEmpty(),
                     entry.optString("status", ""),
                 ).joinToString(":"),
             )
         }
     }
     return "${length()}|${tail.joinToString("|")}"
+}
+
+private fun JSONObject.snapshotHasTerminalTurnStatus(turnId: String): Boolean {
+    val entries = optJSONArray("entries") ?: return false
+    for (index in entries.length() - 1 downTo 0) {
+        val entry = entries.optJSONObject(index) ?: continue
+        if (entry.optString("turn_id", "").trim() != turnId) continue
+        if (entry.optString("type", "") != "turn_status") continue
+        val status = entry.optString("status", "").trim()
+        if (status.isNotBlank() && status != "inProgress") {
+            return true
+        }
+    }
+    return false
+}
+
+private fun JSONObject.snapshotTextLength(): Int {
+    val text = optString("text", "")
+    if (text.isNotEmpty()) return text.length
+    val content = optJSONArray("content") ?: return 0
+    var length = 0
+    for (index in 0 until content.length()) {
+        length += content.optJSONObject(index)?.optString("text", "")?.length ?: 0
+    }
+    return length
 }
