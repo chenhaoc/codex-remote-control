@@ -1,13 +1,18 @@
 {
   "name": "codex-remote-control",
   "version": "0.1.0",
+  "description": "Private-network Android remote control client and bridge for Codex sessions.",
   "private": true,
+  "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
     "start": "node src/index.mjs",
     "bridge": "bash scripts/run-bridge.sh",
     "apk": "bash android/scripts/build-apk.sh",
     "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "dependencies": {
     "ws": "^8.18.3"

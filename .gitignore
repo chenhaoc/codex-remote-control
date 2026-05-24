@@ -9,6 +9,10 @@ android/.kotlin/
 android/debug.keystore
 HANDOFF.md
 handoff.md
+handoff-*.md
+task_plan.md
+findings.md
+progress.md
 
 # Local icon design drafts
 assets/app-icons/

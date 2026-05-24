@@ -1,0 +1,6 @@
+* text=auto eol=lf
+
+*.jar binary
+*.keystore binary
+
+src/generated/** linguist-generated=true
