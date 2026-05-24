@@ -52,6 +52,7 @@ internal fun MainActivity.buildConversationSnapshotThreadItem(entry: JSONObject)
                     backgroundColor = 0xFF1A8F55.toInt(),
                     textColor = AndroidColor.WHITE,
                     turnKey = turnId.takeIf { it.isNotBlank() },
+                    sourceItemId = itemId.takeIf { it.isNotBlank() },
                 )
             }
             "agentMessage" -> {

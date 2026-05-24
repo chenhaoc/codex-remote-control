@@ -749,8 +749,23 @@ test('bridge broadcasts stored seq values and backfills turn ids for synced user
 
   await waitFor(() => {
     const session = store.getSession(sessionId);
-    return session?.events?.some((event) => event.event === 'turn/input' && event.turn_id === 'turn_live_1');
+    return (session?.events ?? []).filter((event) => event.event === 'turn/input' && event.payload?.itemId === 'input_2').length >= 2;
   });
+  const boundTurnInput = messages.find((m) => (
+    m.type === 'event'
+    && m.event === 'turn/input'
+    && m.turn_id === 'turn_live_1'
+    && m.payload?.itemId === 'input_2'
+  ));
+  assert.ok(boundTurnInput);
+  assert.equal(typeof boundTurnInput.seq, 'number');
+  assert.ok(boundTurnInput.seq > liveTurnInput.seq);
+  assert.equal(boundTurnInput.replaces_seq, liveTurnInput.seq);
+  const storedInputEvents = store.getSession(sessionId).events.filter((event) => event.event === 'turn/input' && event.payload?.itemId === 'input_2');
+  assert.equal(storedInputEvents.length, 2);
+  assert.equal(storedInputEvents[0].turn_id, 'turn_live_1');
+  assert.equal(storedInputEvents[1].turn_id, 'turn_live_1');
+  assert.equal(storedInputEvents[1].replaces_seq, storedInputEvents[0].seq);
 
   ws.send(JSON.stringify({ id: '3', type: 'session.sync', payload: { session_id: sessionId, since_seq: 0 } }));
   await waitFor(() => messages.find((m) => m.type === 'response' && m.id === '3'));

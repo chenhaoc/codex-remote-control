@@ -149,7 +149,11 @@ internal fun MainActivity.applySessionSyncSnapshot(payload: JSONObject, changedT
             return false
         }
 
-        val nextItems = conversationItems.filterNot { item -> item.snapshotTurnKey()?.let(changedTurnSet::contains) == true } + incrementalItems
+        val incomingUserSourceItemIds = incrementalItems.userSourceItemIds()
+        val nextItems = conversationItems.filterNot { item ->
+            item.snapshotTurnKey()?.let(changedTurnSet::contains) == true
+                || item.isUnboundUserInputShadowOf(incomingUserSourceItemIds)
+        } + incrementalItems
         if (nextItems.distinctBy { it.id }.size != nextItems.size) {
             syncDebugLog { "session.sync apply reject duplicate_next_ids next=${nextItems.itemSummary()}" }
             return false
@@ -203,7 +207,7 @@ internal fun MainActivity.buildCurrentSessionCachePayload(sessionId: String, syn
             for (index in 0 until previousEntries.length()) {
                 val entry = previousEntries.optJSONObject(index) ?: continue
                 val turnId = entry.optString("turn_id", "").trim()
-                if (turnId.isBlank() || !changedTurnIds.contains(turnId)) {
+                if ((turnId.isBlank() || !changedTurnIds.contains(turnId)) && !entry.isUnboundUserInputShadowOf(syncEntries)) {
                     mergedEntries.put(JSONObject(entry.toString()))
                 }
             }
@@ -284,6 +288,39 @@ private fun MainActivity.canReplaceConversationTurns(
     return incomingIds.none { id -> unchangedIds.contains(id) && !changedIds.contains(id) }
 }
 
+private fun List<ConversationItem>.userSourceItemIds(): Set<String> {
+    return mapNotNull { item ->
+        val bubble = item as? ConversationItem.Bubble ?: return@mapNotNull null
+        if (!bubble.right) return@mapNotNull null
+        bubble.sourceItemId?.trim()?.takeIf { it.isNotBlank() }
+    }.toSet()
+}
+
+private fun ConversationItem.isUnboundUserInputShadowOf(sourceItemIds: Set<String>): Boolean {
+    if (sourceItemIds.isEmpty()) return false
+    val bubble = this as? ConversationItem.Bubble ?: return false
+    return bubble.right
+        && bubble.turnKey.isNullOrBlank()
+        && bubble.sourceItemId?.trim()?.let(sourceItemIds::contains) == true
+}
+
+private fun JSONObject.isUnboundUserInputShadowOf(syncEntries: JSONArray): Boolean {
+    if (optString("turn_id", "").trim().isNotEmpty()) return false
+    val item = optJSONObject("item") ?: return false
+    if (item.optString("type", "") != "userMessage") return false
+    val itemId = item.optString("id", "").trim()
+    if (itemId.isBlank()) return false
+    for (index in 0 until syncEntries.length()) {
+        val syncEntry = syncEntries.optJSONObject(index) ?: continue
+        if (syncEntry.optString("turn_id", "").trim().isBlank()) continue
+        val syncItem = syncEntry.optJSONObject("item") ?: continue
+        if (syncItem.optString("type", "") == "userMessage" && syncItem.optString("id", "").trim() == itemId) {
+            return true
+        }
+    }
+    return false
+}
+
 private fun MainActivity.rebuildConversationIndexes(items: List<ConversationItem>) {
     items.forEach { item ->
         when (item) {
@@ -328,7 +365,7 @@ private fun JSONArray.turnIdSummary(): List<String> {
 private fun List<ConversationItem>.itemSummary(): List<String> {
     return takeLast(12).map { item ->
         when (item) {
-            is ConversationItem.Bubble -> "${item.id}:${if (item.right) "user" else "assistant"}:${item.turnKey.orEmpty()}:${item.assistantKey.orEmpty()}:${item.text.length}"
+            is ConversationItem.Bubble -> "${item.id}:${if (item.right) "user" else "assistant"}:${item.turnKey.orEmpty()}:${item.assistantKey.orEmpty()}:${item.sourceItemId.orEmpty()}:${item.text.length}"
             is ConversationItem.FileChange -> "${item.id}:fileChange:${item.turnId.orEmpty()}:${item.sourceItemId.orEmpty()}"
             is ConversationItem.SystemNote -> "${item.id}:system:${item.itemKey.orEmpty()}:${item.text.length}"
         }

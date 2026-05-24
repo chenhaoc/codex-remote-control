@@ -50,6 +50,8 @@ export class TurnContentBuilder {
           sessionId,
           seq: event?.seq ?? entries.length,
         });
+        if (seenItemIds.has(itemId)) continue;
+        seenItemIds.add(itemId);
         entries.push({
           type: 'item',
           session_id: sessionId,
@@ -515,6 +517,7 @@ export class TurnContentBuilder {
     if (!session) return null;
 
     const items = [];
+    const seenItemIds = new Set();
     for (const event of session.events ?? []) {
       if ((event?.turn_id ?? '') !== turnId) continue;
       if (event.event === 'turn/input') {
@@ -527,6 +530,8 @@ export class TurnContentBuilder {
           sessionId,
           seq: event?.seq ?? items.length,
         });
+        if (seenItemIds.has(itemId)) continue;
+        seenItemIds.add(itemId);
         items.push({
           type: 'userMessage',
           id: itemId,
@@ -539,9 +544,12 @@ export class TurnContentBuilder {
       const item = event?.payload?.item;
       if (!item?.type) continue;
       if (item.type !== 'userMessage' && item.type !== 'agentMessage' && item.type !== 'fileChange') continue;
+      const itemId = item.id ?? `stored_item_${event.seq ?? items.length}`;
+      if (seenItemIds.has(itemId)) continue;
+      seenItemIds.add(itemId);
       items.push({
         ...item,
-        id: item.id ?? `stored_item_${event.seq ?? items.length}`,
+        id: itemId,
       });
     }
 

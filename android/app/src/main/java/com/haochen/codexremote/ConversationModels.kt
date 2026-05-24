@@ -11,6 +11,7 @@ sealed interface ConversationItem {
         val textColor: Int,
         val turnKey: String? = null,
         val assistantKey: String? = null,
+        val sourceItemId: String? = null,
     ) : ConversationItem
 
     data class SystemNote(

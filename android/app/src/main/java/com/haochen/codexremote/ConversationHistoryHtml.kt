@@ -98,6 +98,7 @@ internal fun buildConversationRenderSignature(
                 item.textColor.toString(),
                 item.turnKey.orEmpty(),
                 item.assistantKey.orEmpty(),
+                item.sourceItemId.orEmpty(),
             ).joinToString("\u001F")
 
         is ConversationItem.SystemNote ->

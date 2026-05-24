@@ -399,7 +399,15 @@ export class BridgeServer extends EventEmitter {
           turn = await this.backend.startTurn(targetThreadId, turnParams);
         }
         if (turn?.id) {
-          await this.store.attachTurnIdToRequestEvent(sessionId, id, turn.id);
+          const attachedInputEvent = await this.store.attachTurnIdToRequestEvent(sessionId, id, turn.id);
+          if (attachedInputEvent) {
+            const { seq, at, ...boundInputEvent } = attachedInputEvent;
+            const storedBoundInputEvent = await this.store.appendEvent(sessionId, {
+              ...boundInputEvent,
+              replaces_seq: seq ?? null,
+            });
+            this.#broadcast(storedBoundInputEvent);
+          }
         }
         this.#emitSessionChanged(sessionId);
         ws.send(JSON.stringify(createResponse(id, { turn, session_id: sessionId })));

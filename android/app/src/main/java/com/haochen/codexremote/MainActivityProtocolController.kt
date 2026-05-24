@@ -180,7 +180,6 @@ internal fun MainActivity.handleTurnInput(message: JSONObject, payload: JSONObje
             message.optString("turn_id", ""),
             payload.optString("turn_id", ""),
         )
-        if (turnKey.isBlank()) return
         val itemKey = firstNonEmpty(
             payload.optString("itemId", ""),
             payload.optString("item_id", ""),

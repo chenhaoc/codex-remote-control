@@ -109,11 +109,26 @@ internal fun MainActivity.appendUserInputBubble(turnKey: String, itemKey: String
         if (normalizedText.isBlank()) return
         val normalizedItemKey = itemKey.trim()
         val normalizedTurnKey = turnKey.trim()
+        val sourceItemId = normalizedItemKey.takeIf { it.isNotBlank() }
         val existing = conversationItems.asReversed().firstOrNull { item ->
             val bubble = item as? ConversationItem.Bubble ?: return@firstOrNull false
-            bubble.right && bubble.turnKey == normalizedTurnKey && normalizeAssistantText(bubble.text) == normalizeAssistantText(normalizedText)
+            if (!bubble.right) return@firstOrNull false
+            val sameSourceItem = sourceItemId != null && bubble.sourceItemId == sourceItemId
+            val sameTurnText = bubble.turnKey == normalizedTurnKey && normalizeAssistantText(bubble.text) == normalizeAssistantText(normalizedText)
+            sameSourceItem || sameTurnText
+        } as? ConversationItem.Bubble
+        if (existing != null) {
+            if (existing.turnKey.isNullOrBlank() && normalizedTurnKey.isNotBlank()) {
+                replaceConversationItem(existing.id) { item ->
+                    if (item is ConversationItem.Bubble) {
+                        item.copy(turnKey = normalizedTurnKey, sourceItemId = sourceItemId ?: item.sourceItemId)
+                    } else {
+                        item
+                    }
+                }
+            }
+            return
         }
-        if (existing != null) return
         conversationItems.add(
             ConversationItem.Bubble(
                 id = buildConversationItemId("user", normalizedItemKey.ifBlank { normalizedTurnKey }, normalizedTurnKey),
@@ -122,6 +137,7 @@ internal fun MainActivity.appendUserInputBubble(turnKey: String, itemKey: String
                 backgroundColor = 0xFF1A8F55.toInt(),
                 textColor = AndroidColor.WHITE,
                 turnKey = normalizedTurnKey,
+                sourceItemId = sourceItemId,
             ),
         )
     }
