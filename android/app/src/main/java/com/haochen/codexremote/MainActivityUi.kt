@@ -299,7 +299,7 @@ internal fun MainActivity.RemoteApp() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 internal fun MainActivity.AppTopBar(onOpenDrawer: () -> Unit) {
     val title =
@@ -313,6 +313,14 @@ internal fun MainActivity.AppTopBar(onOpenDrawer: () -> Unit) {
         title = {
             Text(
                 text = title,
+                modifier = Modifier.combinedClickable(
+                    onClick = {},
+                    onDoubleClick = {
+                        if (currentPage == AppPage.Chat) {
+                            scrollConversationTo(ConversationScrollTarget.Top)
+                        }
+                    },
+                ),
                 color = uiText,
                 fontWeight = FontWeight.Bold,
                 maxLines = 1,
@@ -341,31 +349,62 @@ internal fun MainActivity.AppTopBar(onOpenDrawer: () -> Unit) {
                 ),
             ) {
                 if (currentPage == AppPage.Chat && activeSession() != null) {
-                    IconButton(
-                        onClick = { openSessionInfoSheet() },
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .combinedClickable(
+                                onClick = { openSessionInfoSheet() },
+                                onLongClick = { rebuildActiveSessionHistory() },
+                            ),
+                        contentAlignment = Alignment.Center,
                     ) {
                         Icon(
                             painter = painterResource(id = android.R.drawable.ic_dialog_info),
-                            contentDescription = "会话信息",
+                            contentDescription = "会话信息，长按重建历史记录",
                             tint = uiMuted,
                             modifier = Modifier.size(19.dp),
                         )
                     }
                 }
-                StatusDot(active = connected)
+                StatusDot(
+                    active = connected,
+                    onClick = { handleConnectionStatusClick() },
+                    onLongClick = { openConnectionPage() },
+                )
             }
         },
     )
 }
 
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-internal fun MainActivity.StatusDot(active: Boolean) {
+internal fun MainActivity.StatusDot(
+    active: Boolean,
+    onClick: (() -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
+) {
+    val actionModifier =
+        if (onClick != null || onLongClick != null) {
+            Modifier
+                .size(40.dp)
+                .combinedClickable(
+                    onClick = { onClick?.invoke() },
+                    onLongClick = onLongClick,
+                )
+        } else {
+            Modifier.size(10.dp)
+        }
     Box(
-        modifier = Modifier
-            .size(10.dp)
-            .background(color = if (active) uiOnline else uiOffline, shape = CircleShape),
-    )
+        modifier = actionModifier,
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(10.dp)
+                .background(color = if (active) uiOnline else uiOffline, shape = CircleShape),
+        )
+    }
 }
 
 @Composable

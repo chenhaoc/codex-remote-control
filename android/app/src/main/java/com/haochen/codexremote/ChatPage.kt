@@ -72,8 +72,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -102,6 +104,13 @@ import kotlinx.coroutines.withContext
 @Composable
 internal fun MainActivity.ChatPage() {
     val activeSession = activeSession()
+    val hasConversationItems = conversationItems.isNotEmpty()
+
+    LaunchedEffect(hasConversationItems) {
+        if (!hasConversationItems) {
+            chatCanScrollToBottom = false
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -134,8 +143,17 @@ internal fun MainActivity.ChatPage() {
                     sessionId = activeSessionId,
                     displayBasePath = activeSession?.cwd,
                     restoreScrollY = chatRestoreScrollY,
+                    scrollCommand = chatScrollCommand,
                     onScrollRestored = {
                         chatRestoreScrollY = null
+                    },
+                    onScrollCommandHandled = { command ->
+                        if (chatScrollCommand == command) {
+                            chatScrollCommand = null
+                        }
+                    },
+                    onCanScrollToBottomChange = { canScroll ->
+                        chatCanScrollToBottom = canScroll
                     },
                     onOpenCodeBrowser = { itemId, path, scrollY ->
                         openCodeBrowser(itemId, path, scrollY)
@@ -144,6 +162,21 @@ internal fun MainActivity.ChatPage() {
                         .fillMaxSize()
                         .background(Color.White),
                 )
+                if (chatCanScrollToBottom) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = 2.dp, bottom = 8.dp)
+                            .size(40.dp)
+                            .clickable { scrollConversationTo(ConversationScrollTarget.Bottom) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        DownArrowGlyph(
+                            contentDescription = "跳到底部",
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
+                }
             }
         }
 
@@ -257,6 +290,55 @@ private fun SendGlyph(
             close()
         }
         drawPath(path, Color.White)
+    }
+}
+
+@Composable
+private fun MainActivity.DownArrowGlyph(
+    contentDescription: String,
+    modifier: Modifier = Modifier,
+) {
+    Canvas(
+        modifier = modifier.semantics {
+            this.contentDescription = contentDescription
+        },
+    ) {
+        val strokeWidth = size.minDimension * 0.13f
+        drawLine(
+            color = uiPrimary,
+            start = Offset(size.width * 0.18f, size.height * 0.14f),
+            end = Offset(size.width * 0.50f, size.height * 0.42f),
+            strokeWidth = strokeWidth,
+            cap = StrokeCap.Round,
+        )
+        drawLine(
+            color = uiPrimary,
+            start = Offset(size.width * 0.82f, size.height * 0.14f),
+            end = Offset(size.width * 0.50f, size.height * 0.42f),
+            strokeWidth = strokeWidth,
+            cap = StrokeCap.Round,
+        )
+        drawLine(
+            color = uiPrimary,
+            start = Offset(size.width * 0.18f, size.height * 0.44f),
+            end = Offset(size.width * 0.50f, size.height * 0.72f),
+            strokeWidth = strokeWidth,
+            cap = StrokeCap.Round,
+        )
+        drawLine(
+            color = uiPrimary,
+            start = Offset(size.width * 0.82f, size.height * 0.44f),
+            end = Offset(size.width * 0.50f, size.height * 0.72f),
+            strokeWidth = strokeWidth,
+            cap = StrokeCap.Round,
+        )
+        drawLine(
+            color = uiPrimary,
+            start = Offset(size.width * 0.14f, size.height * 0.92f),
+            end = Offset(size.width * 0.86f, size.height * 0.92f),
+            strokeWidth = strokeWidth,
+            cap = StrokeCap.Round,
+        )
     }
 }
 

@@ -8,6 +8,16 @@ internal enum class AppPage {
     Settings,
 }
 
+internal enum class ConversationScrollTarget {
+    Top,
+    Bottom,
+}
+
+internal data class ConversationScrollCommand(
+    val target: ConversationScrollTarget,
+    val nonce: Long,
+)
+
 internal data class ApprovalPresentation(
     val title: String,
     val detail: String,

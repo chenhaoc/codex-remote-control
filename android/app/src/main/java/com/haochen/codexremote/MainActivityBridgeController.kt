@@ -27,6 +27,37 @@ internal fun MainActivity.toggleConnection() {
         connectToBridge(url)
     }
 
+internal fun MainActivity.openConnectionPage() {
+        currentPage = AppPage.Connection
+    }
+
+internal fun MainActivity.handleConnectionStatusClick() {
+        if (connected) {
+            openConnectionPage()
+            return
+        }
+
+        retryCurrentConnection()
+    }
+
+internal fun MainActivity.retryCurrentConnection() {
+        val url = currentBridgeUrl?.takeIf { it.isNotBlank() }
+            ?: bridgeUrl.trim().takeIf { it.isNotBlank() }
+        if (url == null) {
+            openConnectionPage()
+            connectionDetail = "请先填写 Bridge URL"
+            showNotice(connectionDetail)
+            return
+        }
+        if (bridgeClient != null && bridgeClient?.isOpen() != true) {
+            disconnectRequested = true
+            bridgeClient?.close()
+            bridgeClient = null
+            connected = false
+        }
+        connectToBridge(url)
+    }
+
 internal fun MainActivity.disconnectBridge(
         detail: String,
         switchToConnectionPage: Boolean,

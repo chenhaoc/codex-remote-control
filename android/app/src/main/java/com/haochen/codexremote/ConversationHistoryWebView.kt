@@ -9,6 +9,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -39,7 +40,10 @@ internal fun ConversationHistoryWebView(
     sessionId: String?,
     displayBasePath: String?,
     restoreScrollY: Int? = null,
+    scrollCommand: ConversationScrollCommand? = null,
     onScrollRestored: () -> Unit = {},
+    onScrollCommandHandled: (ConversationScrollCommand) -> Unit = {},
+    onCanScrollToBottomChange: (Boolean) -> Unit = {},
     onOpenCodeBrowser: (itemId: String, path: String?, scrollY: Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -66,6 +70,9 @@ internal fun ConversationHistoryWebView(
             context = context,
             onOpenLink = { url -> uriHandler.openUri(url) },
             onOpenCodeBrowser = onOpenCodeBrowser,
+            onScrollChanged = { view ->
+                onCanScrollToBottomChange(!isConversationNearBottom(view))
+            },
             onPageFinished = { view ->
                 val targetTag = view.tag as? String ?: return@buildConversationWebView
                 val targetMode = pendingScrollModes[targetTag] ?: return@buildConversationWebView
@@ -90,6 +97,7 @@ internal fun ConversationHistoryWebView(
                                     fullRenderPending = false
                                     lastViewportHeight = view.height.takeIf { it > 0 } ?: lastViewportHeight
                                     viewportResizeAnchorY = null
+                                    onCanScrollToBottomChange(!isConversationNearBottom(view))
                                 }
                                 if (targetMode is ConversationScrollMode.Restore && !restoreAnnounced) {
                                     restoreAnnounced = true
@@ -102,6 +110,15 @@ internal fun ConversationHistoryWebView(
                 }
             },
         )
+    }
+
+    LaunchedEffect(sessionId, scrollCommand) {
+        val command = scrollCommand ?: return@LaunchedEffect
+        webView.post {
+            applyConversationScrollTarget(webView, command.target)
+            onCanScrollToBottomChange(!isConversationNearBottom(webView))
+            onScrollCommandHandled(command)
+        }
     }
 
     key(sessionId) {
@@ -128,6 +145,7 @@ internal fun ConversationHistoryWebView(
                                 if (sequence != viewportResizeSequence) return@postDelayed
                                 val viewportHeight = webView.height.takeIf { it > 0 } ?: size.height
                                 webView.scrollTo(0, (anchorY - viewportHeight).coerceAtLeast(0))
+                                onCanScrollToBottomChange(!isConversationNearBottom(webView))
                                 if (index == CONVERSATION_VIEWPORT_RESIZE_RESTORE_DELAYS_MS.lastIndex) {
                                     viewportResizeAnchorY = null
                                 }
@@ -178,6 +196,7 @@ internal fun ConversationHistoryWebView(
                             lastRenderSnapshot = renderSnapshot
                             pendingRenderSnapshots.remove(renderTag)
                             pendingRenderTag = null
+                            onCanScrollToBottomChange(!isConversationNearBottom(view))
                         },
                         onFallbackRenderStarted = {
                             fullRenderPending = true
@@ -389,9 +408,20 @@ private fun buildConversationWebView(
     context: Context,
     onOpenLink: (String) -> Unit,
     onOpenCodeBrowser: (itemId: String, path: String?, scrollY: Int) -> Unit,
+    onScrollChanged: (WebView) -> Unit,
     onPageFinished: (WebView) -> Unit,
 ): WebView =
-    WebView(context).apply {
+    object : WebView(context) {
+        override fun onScrollChanged(
+            left: Int,
+            top: Int,
+            oldLeft: Int,
+            oldTop: Int,
+        ) {
+            super.onScrollChanged(left, top, oldLeft, oldTop)
+            onScrollChanged(this)
+        }
+    }.apply {
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -465,6 +495,16 @@ private fun applyConversationScrollMode(
     when (mode) {
         ConversationScrollMode.Bottom -> scrollConversationToBottom(webView)
         is ConversationScrollMode.Restore -> webView.scrollTo(0, mode.y.coerceAtLeast(0))
+    }
+}
+
+private fun applyConversationScrollTarget(
+    webView: WebView,
+    target: ConversationScrollTarget,
+) {
+    when (target) {
+        ConversationScrollTarget.Top -> webView.scrollTo(0, 0)
+        ConversationScrollTarget.Bottom -> scrollConversationToBottom(webView)
     }
 }
 

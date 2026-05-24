@@ -103,6 +103,8 @@ class MainActivity : ComponentActivity() {
     internal var liveTurnStatus by mutableStateOf<String?>(null)
     internal var interruptingTurnId by mutableStateOf<String?>(null)
     internal var chatRestoreScrollY by mutableStateOf<Int?>(null)
+    internal var chatScrollCommand by mutableStateOf<ConversationScrollCommand?>(null)
+    internal var chatCanScrollToBottom by mutableStateOf(false)
     internal var codeBrowserState by mutableStateOf<CodeBrowserState?>(null)
     internal var disconnectRequested = false
     internal var bootSyncRequested = false
