@@ -191,8 +191,8 @@ internal fun JSONArray?.toConversationDiffEntries(): List<ConversationDiffEntry>
         }
     }
 
-internal fun JSONObject.toConversationDiffEntry(): ConversationDiffEntry? {
-        val path = normalizeNullablePath(opt("path")).orEmpty()
+internal fun JSONObject.toConversationDiffEntry(pathOverride: String? = null): ConversationDiffEntry? {
+        val path = normalizeNullablePath(pathOverride ?: opt("path")).orEmpty()
         if (path.isBlank()) return null
         val kindObject = optJSONObject("kind")
         val kindType = firstNonEmpty(
@@ -207,7 +207,7 @@ internal fun JSONObject.toConversationDiffEntry(): ConversationDiffEntry? {
         return ConversationDiffEntry(
             path = path,
             kind = kindType,
-            diff = optString("diff", "").trim(),
+            diff = buildConversationChangeDiffText(kindType, this),
             movePath = movePath,
         )
     }
@@ -220,21 +220,51 @@ internal fun JSONObject?.toApprovalDiffEntries(): List<ConversationDiffEntry> {
             val path = normalizeNullablePath(keys.next()).orEmpty()
             if (path.isBlank()) continue
             val change = optJSONObject(path) ?: continue
-            val kind = change.optString("type", "").trim().ifBlank { "update" }
-            val diff = when (kind) {
-                "update" -> change.optString("unified_diff", "").trim()
-                "add" -> change.optString("content", "").trim()
-                "delete" -> change.optString("content", "").trim()
-                else -> safeJson(change)
-            }
-            changes.add(
-                ConversationDiffEntry(
-                    path = path,
-                    kind = kind,
-                    diff = diff,
-                    movePath = normalizeNullablePath(change.opt("move_path")),
-                ),
-            )
+            change.toConversationDiffEntry(pathOverride = path)?.let(changes::add)
         }
         return changes
     }
+
+internal fun buildConversationChangeDiffText(kind: String, change: JSONObject): String {
+        val text = firstConversationChangeText(
+            change.opt("diff"),
+            change.opt("unified_diff"),
+            change.opt("content"),
+        )
+        if (text.isBlank()) return ""
+        if (looksLikeUnifiedDiff(text)) return text
+        return when (kind.trim()) {
+            "add" -> prefixConversationChangeLines(text, "+")
+            "delete" -> prefixConversationChangeLines(text, "-")
+            else -> text
+        }
+    }
+
+internal fun firstConversationChangeText(vararg values: Any?): String {
+        for (value in values) {
+            val text =
+                when (value) {
+                    null, JSONObject.NULL -> ""
+                    is String -> value
+                    else -> value.toString()
+                }.replace("\r\n", "\n").trimEnd()
+            if (text.isNotBlank()) return text
+        }
+        return ""
+    }
+
+internal fun looksLikeUnifiedDiff(text: String): Boolean {
+        return text.lineSequence().any { line ->
+            line.startsWith("diff --git") ||
+                line.startsWith("@@") ||
+                line.startsWith("+++ ") ||
+                line.startsWith("--- ") ||
+                line.startsWith("new file mode ") ||
+                line.startsWith("deleted file mode ") ||
+                line.startsWith("rename from ") ||
+                line.startsWith("rename to ")
+        }
+    }
+
+internal fun prefixConversationChangeLines(text: String, prefix: String): String =
+        text.split('\n').joinToString("\n") { line -> "$prefix$line" }
