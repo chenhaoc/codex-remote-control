@@ -36,6 +36,7 @@ internal const val KEY_STARTUP_PAGE = "startup_page"
 internal const val KEY_SESSION_SYNC_INTERVAL_SECONDS = "session_sync_interval_seconds"
 internal const val KEY_SESSION_INCREMENTAL_SYNC = "session_incremental_sync"
 internal const val MAX_CONNECTION_HISTORY = 8
+internal const val PROJECT_GROUP_DEFAULT_VISIBLE_SESSIONS = 8
 internal const val CODE_BROWSER_FILE_CACHE_SIZE = 24
 internal const val CODE_BROWSER_RENDER_CACHE_SIZE = 16
 internal const val DEFAULT_SESSION_SYNC_INTERVAL_SECONDS = 5
@@ -70,6 +71,7 @@ class MainActivity : ComponentActivity() {
     internal val connectionHistory = mutableStateListOf<BridgeHistoryEntry>()
     internal val pendingApprovals = mutableStateListOf<ApprovalDialogState>()
     internal val projectGroupExpanded = mutableStateMapOf<String, Boolean>()
+    internal val projectGroupSessionListExpanded = mutableStateMapOf<String, Boolean>()
     internal val sessionContentCache = mutableMapOf<String, JSONObject>()
     internal val sessionContentCacheSignatures = mutableMapOf<String, String>()
     internal val codeBrowserFileCache =

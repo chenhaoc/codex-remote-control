@@ -128,6 +128,7 @@ private fun MainActivity.clearVisibleSessionStateAfterCacheReset() {
     codeBrowserFileCache.clear()
     codeBrowserRenderCache.clear()
     projectGroupExpanded.clear()
+    projectGroupSessionListExpanded.clear()
     sessionInfoSheetState = null
     selectedWorkspace = null
     bootSyncRequested = false

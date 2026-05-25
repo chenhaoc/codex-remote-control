@@ -94,6 +94,7 @@ import kotlinx.coroutines.withContext
 internal fun MainActivity.AppDrawerContent(onCloseDrawer: () -> Unit) {
     val projectGroups = projectBuckets()
     syncProjectGroupExpansion(projectGroups)
+    syncProjectGroupSessionListExpansion(projectGroups)
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -290,6 +291,14 @@ internal fun MainActivity.ProjectGroupCard(
     onSelectSession: (SessionInfo) -> Unit,
 ) {
     val expanded = isProjectGroupExpanded(group)
+    val sessionListExpanded = isProjectGroupSessionListExpanded(group)
+    val visibleSessions =
+        if (sessionListExpanded) {
+            group.sessions
+        } else {
+            group.sessions.take(PROJECT_GROUP_DEFAULT_VISIBLE_SESSIONS)
+        }
+    val hiddenCount = (group.sessions.size - visibleSessions.size).coerceAtLeast(0)
 
     Card(
         colors = CardDefaults.cardColors(containerColor = uiSurface),
@@ -350,12 +359,27 @@ internal fun MainActivity.ProjectGroupCard(
                     BodyText("这个项目暂时还没有历史会话。")
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        group.sessions.forEach { session ->
+                        visibleSessions.forEach { session ->
                             SessionCard(
                                 session = session,
                                 selected = session.sessionId == activeSessionId,
                                 onClick = { onSelectSession(session) },
                             )
+                        }
+                        if (hiddenCount > 0) {
+                            TextButton(
+                                onClick = { setProjectGroupSessionListExpanded(group.key(), true) },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                            ) {
+                                Text("展开本项目全部历史（+$hiddenCount）", fontSize = 12.sp)
+                            }
+                        } else if (group.sessions.size > PROJECT_GROUP_DEFAULT_VISIBLE_SESSIONS) {
+                            TextButton(
+                                onClick = { setProjectGroupSessionListExpanded(group.key(), false) },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                            ) {
+                                Text("收起历史", fontSize = 12.sp)
+                            }
                         }
                     }
                 }
@@ -376,12 +400,38 @@ internal fun MainActivity.syncProjectGroupExpansion(projectGroups: List<ProjectG
     }
 }
 
+internal fun MainActivity.syncProjectGroupSessionListExpansion(projectGroups: List<ProjectGroup>) {
+    val nextKeys = projectGroups.mapTo(linkedSetOf()) { it.key() }
+    projectGroupSessionListExpanded.keys.toList().forEach { key ->
+        if (key !in nextKeys) {
+            projectGroupSessionListExpanded.remove(key)
+        }
+    }
+    projectGroups.forEach { group ->
+        val containsActiveSession = group.sessions.indexOfFirst { it.sessionId == activeSessionId }
+        val shouldExpand = containsActiveSession >= PROJECT_GROUP_DEFAULT_VISIBLE_SESSIONS
+        if (shouldExpand) {
+            projectGroupSessionListExpanded[group.key()] = true
+        } else {
+            projectGroupSessionListExpanded.putIfAbsent(group.key(), false)
+        }
+    }
+}
+
 internal fun MainActivity.isProjectGroupExpanded(group: ProjectGroup): Boolean {
     return projectGroupExpanded[group.key()] ?: group.sessions.any { it.sessionId == activeSessionId }
 }
 
 internal fun MainActivity.setProjectGroupExpanded(groupKey: String, expanded: Boolean) {
     projectGroupExpanded[groupKey] = expanded
+}
+
+internal fun MainActivity.isProjectGroupSessionListExpanded(group: ProjectGroup): Boolean {
+    return projectGroupSessionListExpanded[group.key()] ?: false
+}
+
+internal fun MainActivity.setProjectGroupSessionListExpanded(groupKey: String, expanded: Boolean) {
+    projectGroupSessionListExpanded[groupKey] = expanded
 }
 
 internal fun MainActivity.expandAllProjectGroups(projectGroups: List<ProjectGroup>) {
