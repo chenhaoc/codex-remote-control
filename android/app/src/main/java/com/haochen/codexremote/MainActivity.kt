@@ -23,6 +23,7 @@ import org.json.JSONObject
 
 internal const val PREFS = "codex_remote_settings"
 internal const val KEY_URL = "bridge_url"
+internal const val KEY_CONNECTION_ID = "connection_id"
 internal const val KEY_HOST = "host"
 internal const val KEY_PORT = "port"
 internal const val KEY_TOKEN = "token"
@@ -95,8 +96,9 @@ class MainActivity : ComponentActivity() {
     internal var selectedModel by mutableStateOf("")
     internal var connectionDetail by mutableStateOf("未连接")
     internal var currentBridgeUrl by mutableStateOf<String?>(null)
+    internal var currentConnectionId by mutableStateOf<String?>(null)
     internal var activeSessionCacheKey: String? = null
-    internal var connectionRenameState by mutableStateOf<ConnectionRenameDialogState?>(null)
+    internal var connectionEditState by mutableStateOf<ConnectionEditDialogState?>(null)
     internal var sessionInfoSheetState by mutableStateOf<SessionInfoSheetState?>(null)
     internal var composerText by mutableStateOf("")
     internal var newChatDraft by mutableStateOf<NewChatDraft?>(null)
@@ -139,8 +141,12 @@ class MainActivity : ComponentActivity() {
         override fun run() {
             reconnectScheduled = false
             if (!autoReconnectEnabled || connected || bridgeClient != null) return
-            val targetUrl = bridgeUrl.trim().takeIf { it.isNotBlank() } ?: currentBridgeUrl?.takeIf { it.isNotBlank() } ?: return
-            connectToBridge(targetUrl, isAutoReconnect = true)
+            val entry = findConnectionHistoryById(currentConnectionId)
+            val targetUrl = entry?.url?.takeIf { it.isNotBlank() }
+                ?: bridgeUrl.trim().takeIf { it.isNotBlank() }
+                ?: currentBridgeUrl?.takeIf { it.isNotBlank() }
+                ?: return
+            connectToBridge(targetUrl, isAutoReconnect = true, connectionId = entry?.id ?: currentConnectionId)
         }
     }
 
@@ -151,6 +157,7 @@ class MainActivity : ComponentActivity() {
         bridgeUrl = loadBridgeUrl()
         replaceConnectionHistory(loadConnectionHistory(bridgeUrl))
         persistConnectionHistory()
+        currentConnectionId = loadCurrentConnectionId()
         activeSessionId = prefs.getString(KEY_SESSION, null)
         selectedModel = prefs.getString(KEY_MODEL, "")?.trim().orEmpty()
         autoReconnectEnabled = prefs.getBoolean(KEY_AUTO_RECONNECT, false)

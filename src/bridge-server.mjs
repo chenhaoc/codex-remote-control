@@ -37,6 +37,7 @@ export class BridgeServer extends EventEmitter {
     host = '127.0.0.1',
     port = 8787,
     token = null,
+    bridgeId = null,
     name = 'codex-remote-control',
     version = '0.1.0',
     syncLogPath = null,
@@ -47,6 +48,7 @@ export class BridgeServer extends EventEmitter {
     this.host = host;
     this.port = port;
     this.token = token;
+    this.bridgeId = typeof bridgeId === 'string' && bridgeId.trim() ? bridgeId.trim() : randomUUID();
     this.name = name;
     this.version = version;
     this.syncLogPath = syncLogPath;
@@ -158,6 +160,7 @@ export class BridgeServer extends EventEmitter {
       payload: {
         name: this.name,
         version: this.version,
+        bridge_id: this.bridgeId,
         server_time: nowIso(),
       },
     }));

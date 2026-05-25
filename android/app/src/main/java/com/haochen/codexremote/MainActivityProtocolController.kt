@@ -13,6 +13,17 @@ internal fun MainActivity.handleIncoming(text: String) {
 
         when (message.optString("type", "")) {
             "hello" -> {
+                val payload = message.optJSONObject("payload") ?: JSONObject()
+                val bridgeId = payload.optProtocolString("bridge_id")
+                val url = currentBridgeUrl?.takeIf { it.isNotBlank() } ?: bridgeUrl.trim()
+                val entry = if (url.isNotBlank()) {
+                    rememberConnectionHistory(url, bridgeId)
+                } else {
+                    null
+                }
+                if (entry != null) {
+                    switchLocalSessionCache(entry)
+                }
                 connectionDetail = "Bridge 已就绪，正在拉取会话列表"
                 currentPage = AppPage.Chat
                 requestSessionList()

@@ -54,16 +54,16 @@ internal fun MainActivity.connectionStatusDetailText(): String {
 
 internal fun MainActivity.drawerConnectionSummaryText(): String {
         val target = currentBridgeUrl?.takeIf { it.isNotBlank() } ?: bridgeUrl.trim().takeIf { it.isNotBlank() }
-        val entry = target?.let { url ->
-            connectionHistory.firstOrNull { it.url == url } ?: BridgeHistoryEntry.fromUrl(url)
-        }
+        val entry = findConnectionHistoryById(currentConnectionId)
+            ?: target?.let { url -> connectionHistory.firstOrNull { it.url == url } ?: BridgeHistoryEntry.fromUrl(url) }
         val label = entry?.displayName()?.takeIf { it.isNotBlank() } ?: target
         return label?.let { "连接到 $it" } ?: "未连接"
     }
 
 internal fun MainActivity.currentConnectionEntry(): BridgeHistoryEntry? {
         val url = currentBridgeUrl?.takeIf { it.isNotBlank() } ?: bridgeUrl.takeIf { connected && it.isNotBlank() }
-        return url?.let { target ->
+        return findConnectionHistoryById(currentConnectionId)
+            ?: url?.let { target ->
             connectionHistory.firstOrNull { it.url == target } ?: BridgeHistoryEntry.fromUrl(target)
         }
     }

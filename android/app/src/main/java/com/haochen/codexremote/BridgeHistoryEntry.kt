@@ -1,8 +1,10 @@
 package com.haochen.codexremote
 
 import java.net.URI
+import java.util.UUID
 
 internal data class BridgeHistoryEntry(
+    val id: String,
     val url: String,
     val title: String,
     val pathLabel: String,
@@ -10,6 +12,7 @@ internal data class BridgeHistoryEntry(
     val maskedUrl: String,
     val lastUsedAt: Long,
     val name: String? = null,
+    val bridgeId: String? = null,
 ) {
     fun displayName(): String = name?.trim()?.takeIf { it.isNotBlank() } ?: title
 
@@ -20,8 +23,6 @@ internal data class BridgeHistoryEntry(
         return parts.distinct().joinToString(" · ")
     }
 
-    fun withName(value: String?): BridgeHistoryEntry = copy(name = value?.trim()?.takeIf { it.isNotBlank() })
-
     fun lastUsedLabel(): String {
         return formatBeijingDateTimeLabel(lastUsedAt, fallback = "刚刚", pattern = "yyyy-MM-dd HH:mm")
     }
@@ -31,6 +32,8 @@ internal data class BridgeHistoryEntry(
             url: String,
             lastUsedAt: Long = System.currentTimeMillis(),
             name: String? = null,
+            id: String = createId(),
+            bridgeId: String? = null,
         ): BridgeHistoryEntry? {
             return try {
                 val uri = URI.create(url)
@@ -60,6 +63,7 @@ internal data class BridgeHistoryEntry(
                     url.replace(token, maskedToken ?: "****")
                 }
                 BridgeHistoryEntry(
+                    id = id.trim().takeIf { it.isNotBlank() } ?: createId(),
                     url = url,
                     title = title,
                     pathLabel = if (path == "/") scheme else "$scheme $path",
@@ -67,11 +71,14 @@ internal data class BridgeHistoryEntry(
                     maskedUrl = maskedUrl,
                     lastUsedAt = lastUsedAt,
                     name = name?.trim()?.takeIf { it.isNotBlank() },
+                    bridgeId = bridgeId?.trim()?.takeIf { it.isNotBlank() },
                 )
             } catch (_: Exception) {
                 null
             }
         }
+
+        fun createId(): String = "conn_${UUID.randomUUID().toString().replace("-", "")}"
 
         private fun maskToken(token: String): String {
             if (token.isBlank()) return "****"

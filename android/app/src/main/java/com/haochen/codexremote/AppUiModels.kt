@@ -39,9 +39,10 @@ internal data class ApprovalDialogState(
     val turnId: String? = null,
 )
 
-internal data class ConnectionRenameDialogState(
-    val url: String,
+internal data class ConnectionEditDialogState(
+    val connectionId: String,
     val currentName: String,
+    val currentUrl: String,
 )
 
 internal data class CodeBrowserState(

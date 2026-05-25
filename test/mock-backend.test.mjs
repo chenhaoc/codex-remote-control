@@ -9,6 +9,37 @@ import { StateStore } from '../src/store.mjs';
 import { MockBackend } from '../src/backends/mock.mjs';
 import { BridgeServer } from '../src/bridge-server.mjs';
 
+test('bridge hello includes stable bridge id', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-id-test-'));
+  const store = new StateStore(path.join(dir, 'state.json'));
+  const backend = new MockBackend();
+  const bridge = new BridgeServer({
+    backend,
+    store,
+    host: '127.0.0.1',
+    port: 0,
+    token: 'test-token',
+    bridgeId: 'bridge-test-id',
+  });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  await waitFor(() => messages.find((m) => m.type === 'hello'));
+  const hello = messages.find((m) => m.type === 'hello');
+  assert.equal(hello.payload.bridge_id, 'bridge-test-id');
+
+  ws.close();
+  await once(ws, 'close');
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 test('mock backend produces events and approval flow', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-test-'));
   const store = new StateStore(path.join(dir, 'state.json'));

@@ -1,7 +1,6 @@
 package com.haochen.codexremote
 
 import java.io.File
-import java.net.URI
 import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONException
@@ -9,7 +8,7 @@ import org.json.JSONObject
 
 private const val SESSION_CACHE_FILE = "session_cache_index.json"
 private const val SESSION_CACHE_CONTENT_DIR = "session_cache"
-private const val SESSION_CACHE_VERSION = 1
+private const val SESSION_CACHE_VERSION = 2
 
 internal fun MainActivity.loadLocalSessionCache() {
     val cacheKey = sessionCacheKeyForCurrentConnection()
@@ -17,8 +16,8 @@ internal fun MainActivity.loadLocalSessionCache() {
     loadLocalSessionCacheForKey(cacheKey)
 }
 
-internal fun MainActivity.switchLocalSessionCache(url: String?) {
-    val targetCacheKey = sessionCacheKeyForUrl(url)
+internal fun MainActivity.switchLocalSessionCache(entry: BridgeHistoryEntry?) {
+    val targetCacheKey = sessionCacheKeyForConnection(entry)
     if (activeSessionCacheKey == targetCacheKey) {
         return
     }
@@ -188,7 +187,9 @@ private fun MainActivity.readSessionCacheRoot(): JSONObject? {
     val file = sessionCacheFile()
     if (!file.exists()) return null
     return try {
-        JSONObject(file.readText())
+        JSONObject(file.readText()).takeIf { root ->
+            root.optInt("version", 0) == SESSION_CACHE_VERSION
+        }
     } catch (_: JSONException) {
         null
     } catch (_: Exception) {
@@ -241,13 +242,14 @@ private fun MainActivity.sessionContentCacheFile(cacheKey: String?, sessionId: S
 }
 
 private fun MainActivity.sessionCacheKeyForCurrentConnection(): String {
-    return sessionCacheKeyForUrl(currentBridgeUrl ?: bridgeUrl)
+    return sessionCacheKeyForConnection(findConnectionHistoryById(currentConnectionId))
 }
 
-private fun MainActivity.sessionCacheKeyForUrl(url: String?): String {
-    val normalized = normalizeCacheUrl(url)
-    if (normalized.isBlank()) return "bridge_unconfigured"
-    return "bridge_${stableCacheDigest(normalized)}"
+private fun sessionCacheKeyForConnection(entry: BridgeHistoryEntry?): String {
+    val stableId = entry?.bridgeId?.takeIf { it.isNotBlank() }
+        ?: entry?.id?.takeIf { it.isNotBlank() }
+    if (stableId.isNullOrBlank()) return "bridge_unconfigured"
+    return "bridge_${stableCacheDigest(stableId)}"
 }
 
 private fun stableCacheDigest(value: String): String =
@@ -255,30 +257,3 @@ private fun stableCacheDigest(value: String): String =
         .digest(value.toByteArray(Charsets.UTF_8))
         .joinToString("") { "%02x".format(it) }
         .take(16)
-
-private fun MainActivity.normalizeCacheUrl(url: String?): String {
-    val raw = url?.trim().orEmpty()
-    if (raw.isBlank()) return ""
-    return try {
-        val normalized = normalizeBridgeUrl(raw, requireToken = false)
-        val uri = URI.create(normalized)
-        val scheme = uri.scheme?.lowercase().orEmpty().ifBlank { "ws" }
-        val host = uri.host?.lowercase().orEmpty()
-        val port = if (uri.port >= 0) uri.port else 8787
-        val path = uri.rawPath?.takeIf { it.isNotBlank() } ?: "/"
-        val queryWithoutToken = (uri.rawQuery ?: "")
-            .split('&')
-            .filter { it.isNotBlank() && !it.startsWith("token=") }
-            .sorted()
-            .joinToString("&")
-        buildString {
-            append("$scheme://$host:$port$path")
-            if (queryWithoutToken.isNotBlank()) {
-                append('?')
-                append(queryWithoutToken)
-            }
-        }
-    } catch (_: Exception) {
-        raw
-    }
-}

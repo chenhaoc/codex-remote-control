@@ -41,7 +41,9 @@ internal fun MainActivity.handleConnectionStatusClick() {
     }
 
 internal fun MainActivity.retryCurrentConnection() {
-        val url = currentBridgeUrl?.takeIf { it.isNotBlank() }
+        val entry = findConnectionHistoryById(currentConnectionId)
+        val url = entry?.url?.takeIf { it.isNotBlank() }
+            ?: currentBridgeUrl?.takeIf { it.isNotBlank() }
             ?: bridgeUrl.trim().takeIf { it.isNotBlank() }
         if (url == null) {
             openConnectionPage()
@@ -55,7 +57,7 @@ internal fun MainActivity.retryCurrentConnection() {
             bridgeClient = null
             connected = false
         }
-        connectToBridge(url)
+        connectToBridge(url, connectionId = entry?.id ?: currentConnectionId)
     }
 
 internal fun MainActivity.disconnectBridge(
@@ -82,14 +84,22 @@ internal fun MainActivity.disconnectBridge(
         connectionDetail = detail
     }
 
-internal fun MainActivity.connectToBridge(url: String, isAutoReconnect: Boolean = false) {
+internal fun MainActivity.connectToBridge(
+        url: String,
+        isAutoReconnect: Boolean = false,
+        connectionId: String? = null,
+    ) {
+        val targetEntry = resolveConnectionHistory(url = url, connectionId = connectionId)
+        val targetConnectionId = targetEntry?.id ?: connectionId?.trim()?.takeIf { it.isNotBlank() }
         if (bridgeClient?.isOpen() == true && currentBridgeUrl == url) {
+            currentConnectionId = targetConnectionId ?: currentConnectionId
             currentPage = AppPage.Chat
-            connectionDetail = "已连接到 ${connectionHistory.firstOrNull { it.url == url }?.displayName() ?: BridgeHistoryEntry.fromUrl(url)?.displayName() ?: url}"
+            connectionDetail = "已连接到 ${connectionDisplayName(url, currentConnectionId)}"
             return
         }
 
         if (bridgeClient != null && currentBridgeUrl == url) {
+            currentConnectionId = targetConnectionId ?: currentConnectionId
             connectionDetail =
                 if (isAutoReconnect || reconnectAttempt > 0) {
                     "自动重连中: $url"
@@ -108,9 +118,10 @@ internal fun MainActivity.connectToBridge(url: String, isAutoReconnect: Boolean 
         if (!isAutoReconnect) {
             reconnectAttempt = 0
         }
-        saveBridgeSettings(url)
+        saveBridgeSettings(url, targetConnectionId)
         bridgeUrl = url
-        switchLocalSessionCache(url)
+        currentConnectionId = targetConnectionId
+        switchLocalSessionCache(targetEntry)
         disconnectRequested = false
         bootSyncRequested = false
         connected = false
@@ -128,9 +139,8 @@ internal fun MainActivity.connectToBridge(url: String, isAutoReconnect: Boolean 
                     connected = true
                     reconnectAttempt = 0
                     cancelReconnectSchedule(resetAttempt = false)
-                    rememberConnectionHistory(url)
                     currentPage = AppPage.Chat
-                    connectionDetail = "已连接到 ${connectionHistory.firstOrNull { it.url == url }?.displayName() ?: BridgeHistoryEntry.fromUrl(url)?.displayName() ?: url}"
+                    connectionDetail = "已连接，等待 Bridge 握手"
                 }
             }
 
@@ -150,7 +160,10 @@ internal fun MainActivity.connectToBridge(url: String, isAutoReconnect: Boolean 
                     stopSessionSyncLoop()
                     bridgeClient = null
                     val detailSuffix = describeThrowable(error)
-                    val targetUrl = currentBridgeUrl?.takeIf { it.isNotBlank() } ?: bridgeUrl.trim().takeIf { it.isNotBlank() }
+                    val entry = findConnectionHistoryById(currentConnectionId)
+                    val targetUrl = entry?.url?.takeIf { it.isNotBlank() }
+                        ?: currentBridgeUrl?.takeIf { it.isNotBlank() }
+                        ?: bridgeUrl.trim().takeIf { it.isNotBlank() }
                     if (shouldScheduleReconnect(targetUrl)) {
                         scheduleReconnect(
                             url = targetUrl.orEmpty(),
@@ -176,8 +189,10 @@ internal fun MainActivity.connectToBridge(url: String, isAutoReconnect: Boolean 
             bridgeClient?.connect()
         } catch (error: RuntimeException) {
             bridgeClient = null
-            if (shouldScheduleReconnect(url)) {
-                scheduleReconnect(url = url, reason = "连接失败", error = error)
+            val entry = findConnectionHistoryById(currentConnectionId)
+            val targetUrl = entry?.url?.takeIf { it.isNotBlank() } ?: url
+            if (shouldScheduleReconnect(targetUrl)) {
+                scheduleReconnect(url = targetUrl, reason = "连接失败", error = error)
             } else {
                 currentBridgeUrl = null
                 showCachedHistoryAfterConnectionFailure()
@@ -188,21 +203,26 @@ internal fun MainActivity.connectToBridge(url: String, isAutoReconnect: Boolean 
     }
 
 internal fun MainActivity.applyHistoryConnection(entry: BridgeHistoryEntry) {
+        currentConnectionId = entry.id
         bridgeUrl = entry.url
-        switchLocalSessionCache(entry.url)
+        saveBridgeSettings(entry.url, entry.id)
+        switchLocalSessionCache(entry)
         connectionDetail = "已回填 ${entry.displayName()}，点击连接即可"
     }
 
 internal fun MainActivity.connectToHistory(entry: BridgeHistoryEntry) {
+        currentConnectionId = entry.id
         bridgeUrl = entry.url
-        connectToBridge(entry.url)
+        switchLocalSessionCache(entry)
+        connectToBridge(entry.url, connectionId = entry.id)
     }
 
-internal fun MainActivity.openRenameConnectionDialog(entry: BridgeHistoryEntry) {
-        connectionRenameState =
-            ConnectionRenameDialogState(
-                url = entry.url,
+internal fun MainActivity.openEditConnectionDialog(entry: BridgeHistoryEntry) {
+        connectionEditState =
+            ConnectionEditDialogState(
+                connectionId = entry.id,
                 currentName = entry.name.orEmpty(),
+                currentUrl = entry.url,
             )
     }
 
@@ -235,13 +255,19 @@ internal fun MainActivity.buildBridgeUrl(): String {
         return "$base?$finalQuery"
     }
 
-internal fun MainActivity.saveBridgeSettings(url: String) {
+internal fun MainActivity.saveBridgeSettings(url: String, connectionId: String? = currentConnectionId) {
         val token = extractTokenFromUrl(url)
         val uri = URI.create(url)
-        prefs.edit()
+        val editor = prefs.edit()
             .putString(KEY_URL, url)
             .putString(KEY_SESSION, activeSessionId)
-            .apply()
+        val normalizedConnectionId = connectionId?.trim()?.takeIf { it.isNotBlank() }
+        if (normalizedConnectionId == null) {
+            editor.remove(KEY_CONNECTION_ID)
+        } else {
+            editor.putString(KEY_CONNECTION_ID, normalizedConnectionId)
+        }
+        editor.apply()
         if (!token.isNullOrBlank()) {
             prefs.edit().putString(KEY_TOKEN, token).apply()
         }
@@ -253,33 +279,65 @@ internal fun MainActivity.saveBridgeSettings(url: String) {
         }
     }
 
-internal fun MainActivity.rememberConnectionHistory(url: String) {
-        val existingName = connectionHistory.firstOrNull { it.url == url }?.name
-        val entry = BridgeHistoryEntry.fromUrl(url, System.currentTimeMillis(), existingName) ?: return
+internal fun MainActivity.rememberConnectionHistory(url: String, bridgeId: String? = null): BridgeHistoryEntry? {
+        val normalizedBridgeId = bridgeId?.trim()?.takeIf { it.isNotBlank() }
+        val existing = resolveConnectionHistory(url = url, connectionId = currentConnectionId, bridgeId = normalizedBridgeId)
+        val entry = BridgeHistoryEntry.fromUrl(
+            url = url,
+            lastUsedAt = System.currentTimeMillis(),
+            name = existing?.name,
+            id = existing?.id ?: currentConnectionId?.trim()?.takeIf { it.isNotBlank() } ?: BridgeHistoryEntry.createId(),
+            bridgeId = normalizedBridgeId ?: existing?.bridgeId,
+        ) ?: return null
         replaceConnectionHistory(
-            listOf(entry) + connectionHistory.filterNot { it.url == entry.url },
+            listOf(entry) + connectionHistory.filterNot { it.conflictsWith(entry) },
         )
+        currentConnectionId = entry.id
+        saveBridgeSettings(url, entry.id)
+        persistConnectionHistory()
+        return entry
+    }
+
+internal fun MainActivity.removeConnectionHistory(connectionId: String) {
+        replaceConnectionHistory(connectionHistory.filterNot { it.id == connectionId })
+        if (currentConnectionId == connectionId) {
+            currentConnectionId = null
+            prefs.edit().remove(KEY_CONNECTION_ID).apply()
+        }
         persistConnectionHistory()
     }
 
-internal fun MainActivity.removeConnectionHistory(url: String) {
-        replaceConnectionHistory(connectionHistory.filterNot { it.url == url })
-        persistConnectionHistory()
-    }
-
-internal fun MainActivity.renameConnectionHistory(url: String, name: String) {
+internal fun MainActivity.updateConnectionHistory(
+        connectionId: String,
+        name: String,
+        url: String,
+    ): BridgeHistoryEntry? {
+        val existing = findConnectionHistoryById(connectionId) ?: return null
+        val normalizedUrl = normalizeBridgeUrl(url, requireToken = false)
+        val updated = BridgeHistoryEntry.fromUrl(
+            url = normalizedUrl,
+            lastUsedAt = existing.lastUsedAt,
+            name = name,
+            id = existing.id,
+            bridgeId = existing.bridgeId,
+        ) ?: return null
         replaceConnectionHistory(
-            connectionHistory.map { entry ->
-                if (entry.url == url) entry.withName(name) else entry
-            },
+            listOf(updated) + connectionHistory.filterNot { it.conflictsWith(updated) },
         )
+        if (currentConnectionId == connectionId || bridgeUrl.trim() == existing.url.trim()) {
+            currentConnectionId = updated.id
+            bridgeUrl = updated.url
+            saveBridgeSettings(updated.url, updated.id)
+            switchLocalSessionCache(updated)
+        }
         persistConnectionHistory()
+        return updated
     }
 
 internal fun MainActivity.replaceConnectionHistory(entries: List<BridgeHistoryEntry>) {
         val normalized = entries
             .sortedByDescending { it.lastUsedAt }
-            .distinctBy { it.url }
+            .distinctBy { entry -> entry.bridgeId?.let { "bridge:$it" } ?: "entry:${entry.id}" }
             .take(MAX_CONNECTION_HISTORY)
         connectionHistory.clear()
         connectionHistory.addAll(normalized)
@@ -299,6 +357,8 @@ internal fun MainActivity.loadConnectionHistory(fallbackUrl: String): List<Bridg
                         url = url,
                         lastUsedAt = item.optLong("lastUsedAt", 0L).takeIf { it > 0L } ?: System.currentTimeMillis(),
                         name = item.optString("name", "").trim(),
+                        id = item.optString("id", "").trim().takeIf { it.isNotBlank() } ?: BridgeHistoryEntry.createId(),
+                        bridgeId = item.optString("bridgeId", "").trim(),
                     )?.let(parsed::add)
                 }
             } catch (_: JSONException) {
@@ -319,13 +379,57 @@ internal fun MainActivity.persistConnectionHistory() {
         connectionHistory.take(MAX_CONNECTION_HISTORY).forEach { entry ->
             array.put(
                 JSONObject().apply {
+                    put("id", entry.id)
                     put("url", entry.url)
                     put("lastUsedAt", entry.lastUsedAt)
                     put("name", entry.name.orEmpty())
+                    put("bridgeId", entry.bridgeId.orEmpty())
                 },
             )
         }
         prefs.edit().putString(KEY_CONNECTION_HISTORY, array.toString()).apply()
+    }
+
+private fun BridgeHistoryEntry.conflictsWith(other: BridgeHistoryEntry): Boolean {
+        return id == other.id ||
+            (!bridgeId.isNullOrBlank() && bridgeId == other.bridgeId) ||
+            url == other.url
+    }
+
+internal fun MainActivity.loadCurrentConnectionId(): String? {
+        val saved = prefs.getString(KEY_CONNECTION_ID, null)?.trim()?.takeIf { it.isNotBlank() }
+        saved
+            ?.let { id -> connectionHistory.firstOrNull { it.id == id } }
+            ?.takeIf { entry -> bridgeUrl.isNotBlank() && entry.url == bridgeUrl }
+            ?.let { return it.id }
+        return connectionHistory.firstOrNull { it.url == bridgeUrl }?.id
+    }
+
+internal fun MainActivity.findConnectionHistoryById(connectionId: String?): BridgeHistoryEntry? {
+        val normalized = connectionId?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        return connectionHistory.firstOrNull { it.id == normalized }
+    }
+
+internal fun MainActivity.resolveConnectionHistory(
+        url: String,
+        connectionId: String? = null,
+        bridgeId: String? = null,
+    ): BridgeHistoryEntry? {
+        val normalizedBridgeId = bridgeId?.trim()?.takeIf { it.isNotBlank() }
+        if (normalizedBridgeId != null) {
+            connectionHistory.firstOrNull { it.bridgeId == normalizedBridgeId }?.let { return it }
+        }
+        findConnectionHistoryById(connectionId)
+            ?.takeIf { it.url == url }
+            ?.let { return it }
+        return connectionHistory.firstOrNull { it.url == url }
+    }
+
+internal fun MainActivity.connectionDisplayName(url: String, connectionId: String?): String {
+        return findConnectionHistoryById(connectionId)?.displayName()
+            ?: connectionHistory.firstOrNull { it.url == url }?.displayName()
+            ?: BridgeHistoryEntry.fromUrl(url)?.displayName()
+            ?: url
     }
 
 internal fun MainActivity.extractTokenFromUrl(url: String): String? {
@@ -370,6 +474,7 @@ internal fun MainActivity.pasteBridgeUrl() {
         } catch (_: Exception) {
             pasted
         }
+        currentConnectionId = resolveConnectionHistory(bridgeUrl)?.id
         connectionDetail = "已粘贴 Bridge URL，点击连接即可"
     }
 
@@ -463,12 +568,15 @@ internal fun MainActivity.updateAutoReconnectMaxAttempts(maxAttempts: Int) {
 
 internal fun MainActivity.resumeBridgeConnectionIfNeeded() {
         if (!autoReconnectEnabled || connected || bridgeClient != null) return
-        val targetUrl = bridgeUrl.trim().takeIf { it.isNotBlank() } ?: return
+        val entry = findConnectionHistoryById(currentConnectionId)
+        val targetUrl = entry?.url?.takeIf { it.isNotBlank() }
+            ?: bridgeUrl.trim().takeIf { it.isNotBlank() }
+            ?: return
         mainHandler.removeCallbacks(reconnectRunnable)
         reconnectScheduled = false
         mainHandler.post {
             if (!connected && bridgeClient == null && autoReconnectEnabled) {
-                connectToBridge(targetUrl, isAutoReconnect = true)
+                connectToBridge(targetUrl, isAutoReconnect = true, connectionId = entry?.id ?: currentConnectionId)
             }
         }
     }
@@ -482,6 +590,7 @@ internal fun MainActivity.scheduleReconnect(
         val normalizedUrl = url.trim()
         if (normalizedUrl.isBlank()) return
         if (connected || bridgeClient != null || reconnectScheduled) return
+        resolveConnectionHistory(normalizedUrl, currentConnectionId)?.let { currentConnectionId = it.id }
         reconnectAttempt += 1
         val delayMs = reconnectDelayMillis(reconnectAttempt)
         reconnectScheduled = true

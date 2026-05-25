@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { StateStore } from './store.mjs';
 import { MockBackend } from './backends/mock.mjs';
 import { CodexBackend } from './backends/codex.mjs';
@@ -12,6 +13,7 @@ function parseArgs(argv) {
     listen: '127.0.0.1:8787',
     state: path.join(process.cwd(), 'data', 'bridge-state.json'),
     tokenFile: path.join(process.cwd(), 'data', 'bridge-token.txt'),
+    bridgeIdFile: path.join(process.cwd(), 'data', 'bridge-id.txt'),
     syncLog: null,
     protocolLog: null,
     codexBin: 'codex',
@@ -25,6 +27,7 @@ function parseArgs(argv) {
     else if (arg === '--listen') out.listen = argv[++i];
     else if (arg === '--state') out.state = argv[++i];
     else if (arg === '--token-file') out.tokenFile = argv[++i];
+    else if (arg === '--bridge-id-file') out.bridgeIdFile = argv[++i];
     else if (arg === '--sync-log') out.syncLog = argv[++i];
     else if (arg === '--protocol-log') out.protocolLog = argv[++i];
     else if (arg === '--codex-bin') out.codexBin = argv[++i];
@@ -53,6 +56,17 @@ async function loadOrCreateToken(tokenFile) {
   return token;
 }
 
+async function loadOrCreateBridgeId(bridgeIdFile) {
+  await fs.mkdir(path.dirname(bridgeIdFile), { recursive: true });
+  try {
+    const bridgeId = (await fs.readFile(bridgeIdFile, 'utf8')).trim();
+    if (bridgeId) return bridgeId;
+  } catch {}
+  const bridgeId = randomUUID();
+  await fs.writeFile(bridgeIdFile, `${bridgeId}\n`, 'utf8');
+  return bridgeId;
+}
+
 function cryptoRandomToken() {
   return [...crypto.getRandomValues(new Uint8Array(24))]
     .map((n) => n.toString(16).padStart(2, '0'))
@@ -71,6 +85,7 @@ Options:
   --listen HOST:PORT
   --state PATH
   --token-file PATH
+  --bridge-id-file PATH
   --sync-log PATH        enable sync debug logging to a file
   --protocol-log PATH    capture raw bridge<->codex protocol lines
   --codex-bin PATH
@@ -82,6 +97,7 @@ Options:
 
   const { host, port } = parseListen(args.listen);
   const token = await loadOrCreateToken(args.tokenFile);
+  const bridgeId = await loadOrCreateBridgeId(args.bridgeIdFile);
   const store = new StateStore(args.state);
   const backend = args.backend === 'codex'
     ? new CodexBackend({
@@ -91,11 +107,12 @@ Options:
         protocolLogPath: args.protocolLog,
       })
     : new MockBackend();
-  const bridge = new BridgeServer({ backend, store, host, port, token, syncLogPath: args.syncLog });
+  const bridge = new BridgeServer({ backend, store, host, port, token, bridgeId, syncLogPath: args.syncLog });
 
   await bridge.start();
   const address = bridge.address();
   console.log(`Codex bridge ready on ${address.host}:${address.port}`);
+  console.log(`Bridge ID file: ${args.bridgeIdFile}`);
   console.log(`Token file: ${args.tokenFile}`);
   console.log(`State file: ${args.state}`);
   if (args.syncLog) {

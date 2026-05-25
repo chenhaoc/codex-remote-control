@@ -96,12 +96,13 @@ import kotlinx.coroutines.withContext
 
 
 @Composable
-internal fun MainActivity.RenameConnectionDialog(
-    state: ConnectionRenameDialogState,
+internal fun MainActivity.EditConnectionDialog(
+    state: ConnectionEditDialogState,
     onDismiss: () -> Unit,
-    onConfirm: (String) -> Unit,
+    onConfirm: (String, String) -> Unit,
 ) {
-    var draft by remember(state.url, state.currentName) { mutableStateOf(state.currentName) }
+    var nameDraft by remember(state.connectionId, state.currentName) { mutableStateOf(state.currentName) }
+    var urlDraft by remember(state.connectionId, state.currentUrl) { mutableStateOf(state.currentUrl) }
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -118,24 +119,45 @@ internal fun MainActivity.RenameConnectionDialog(
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 Text(
-                    text = "命名历史连接",
+                    text = "编辑历史连接",
                     color = uiText,
                     fontSize = 18.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    text = "给这条 bridge 连接起个更好认的名字，留空会恢复默认地址名。",
+                    text = "IP 变化时只改地址，连接身份和本地会话缓存会保留下来。",
                     color = uiMuted,
                     fontSize = 13.sp,
                     lineHeight = 18.sp,
                 )
                 OutlinedTextField(
-                    value = draft,
-                    onValueChange = { draft = it },
+                    value = nameDraft,
+                    onValueChange = { nameDraft = it },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     shape = RoundedCornerShape(18.dp),
+                    label = { Text("名称") },
                     placeholder = { Text("例如：家里 Mac mini") },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = uiPrimary,
+                        unfocusedBorderColor = uiBorder,
+                        focusedTextColor = uiText,
+                        unfocusedTextColor = uiText,
+                        cursorColor = uiPrimary,
+                    ),
+                )
+                OutlinedTextField(
+                    value = urlDraft,
+                    onValueChange = { urlDraft = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    shape = RoundedCornerShape(18.dp),
+                    label = { Text("Bridge URL") },
+                    placeholder = { Text("ws://192.168.31.206:8787/?token=...") },
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Uri,
+                        imeAction = ImeAction.Done,
+                    ),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = uiPrimary,
                         unfocusedBorderColor = uiBorder,
@@ -152,7 +174,7 @@ internal fun MainActivity.RenameConnectionDialog(
                         Text("取消")
                     }
                     Button(
-                        onClick = { onConfirm(draft.trim()) },
+                        onClick = { onConfirm(nameDraft.trim(), urlDraft.trim()) },
                         colors = ButtonDefaults.buttonColors(containerColor = uiPrimary),
                     ) {
                         Text("保存")
@@ -309,17 +331,17 @@ internal fun MainActivity.ConnectionPage() {
                     Column(modifier = Modifier.padding(18.dp)) {
                         SectionTitle("历史连接")
                         Spacer(modifier = Modifier.height(8.dp))
-                        BodyText("单击回填地址，长按可重命名或移除，也可以直接连接或切换。")
+                        BodyText("单击回填地址，长按可编辑地址或移除，也可以直接连接或切换。")
                         Spacer(modifier = Modifier.height(12.dp))
                         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             connectionHistory.forEach { entry ->
                                 HistoryConnectionCard(
                                     entry = entry,
-                                    active = currentBridgeUrl == entry.url,
+                                    active = currentConnectionId == entry.id && !currentBridgeUrl.isNullOrBlank(),
                                     onApply = { applyHistoryConnection(entry) },
                                     onConnect = { connectToHistory(entry) },
-                                    onRename = { openRenameConnectionDialog(entry) },
-                                    onDelete = { removeConnectionHistory(entry.url) },
+                                    onEdit = { openEditConnectionDialog(entry) },
+                                    onDelete = { removeConnectionHistory(entry.id) },
                                 )
                             }
                         }
@@ -329,21 +351,30 @@ internal fun MainActivity.ConnectionPage() {
         }
     }
 
-    connectionRenameState?.let { state ->
-        RenameConnectionDialog(
+    connectionEditState?.let { state ->
+        EditConnectionDialog(
             state = state,
-            onDismiss = { connectionRenameState = null },
-            onConfirm = { name ->
-                renameConnectionHistory(state.url, name)
-                val updatedName = connectionHistory.firstOrNull { it.url == state.url }?.displayName()
-                    ?: BridgeHistoryEntry.fromUrl(state.url, name = name)?.displayName()
-                    ?: state.url
-                if (currentBridgeUrl == state.url && connected) {
-                    connectionDetail = "已连接到 $updatedName"
-                } else if (bridgeUrl.trim() == state.url.trim()) {
-                    connectionDetail = "已回填 $updatedName，点击连接即可"
+            onDismiss = { connectionEditState = null },
+            onConfirm = { name, url ->
+                val updated = try {
+                    updateConnectionHistory(state.connectionId, name, url)
+                } catch (error: Exception) {
+                    connectionDetail = "连接地址无效: ${error.message}"
+                    showNotice(connectionDetail)
+                    return@EditConnectionDialog
                 }
-                connectionRenameState = null
+                if (updated == null) {
+                    connectionDetail = "历史连接不存在"
+                    showNotice(connectionDetail)
+                    connectionEditState = null
+                    return@EditConnectionDialog
+                }
+                if (currentConnectionId == updated.id && connected) {
+                    connectionDetail = "已连接到 ${updated.displayName()}"
+                } else if (currentConnectionId == updated.id || bridgeUrl.trim() == updated.url.trim()) {
+                    connectionDetail = "已回填 ${updated.displayName()}，点击连接即可"
+                }
+                connectionEditState = null
             },
         )
     }
@@ -356,7 +387,7 @@ internal fun MainActivity.HistoryConnectionCard(
     active: Boolean,
     onApply: () -> Unit,
     onConnect: () -> Unit,
-    onRename: () -> Unit,
+    onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val isConnectedState = active && connected
@@ -366,7 +397,7 @@ internal fun MainActivity.HistoryConnectionCard(
         connected -> "切换"
         else -> "连接"
     }
-    var actionsExpanded by remember(entry.url) { mutableStateOf(false) }
+    var actionsExpanded by remember(entry.id) { mutableStateOf(false) }
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -466,10 +497,10 @@ internal fun MainActivity.HistoryConnectionCard(
                 border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
             ) {
                 DropdownMenuItem(
-                    text = { Text("重命名") },
+                    text = { Text("编辑") },
                     onClick = {
                         actionsExpanded = false
-                        onRename()
+                        onEdit()
                     },
                 )
                 DropdownMenuItem(
