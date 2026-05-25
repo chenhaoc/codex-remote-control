@@ -12,8 +12,11 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -185,6 +188,41 @@ internal fun MainActivity.SettingsPage() {
                 modifier = Modifier.padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                SectionTitle("缓存")
+                Surface(
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
+                    color = uiSurfaceAlt,
+                    border = BorderStroke(1.dp, uiBorder),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Label("清除全部缓存")
+                        BodyText("删除所有本地会话缓存，包括旧版本残留。执行后会先清空界面；如果当前在线，会立即从 Bridge 重新拉取。")
+                    }
+                }
+                OutlinedButton(
+                    onClick = { clearAllCacheDialogVisible = true },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("清除全部缓存")
+                }
+            }
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = uiSurface),
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(22.dp),
+            border = BorderStroke(1.dp, uiBorder),
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
                 SectionTitle("关于")
                 Surface(
                     shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
@@ -210,5 +248,34 @@ internal fun MainActivity.SettingsPage() {
         }
 
         Spacer(modifier = Modifier.height(4.dp))
+    }
+
+    if (clearAllCacheDialogVisible) {
+        AppCenteredDialog(onDismiss = { clearAllCacheDialogVisible = false }) {
+            Text(
+                text = "清除全部缓存",
+                color = uiText,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            BodyText("会删除当前版本和旧版本残留的本地缓存。界面会立即清空；如果当前在线，会随后从 Bridge 重新加载。")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+            ) {
+                OutlinedButton(onClick = { clearAllCacheDialogVisible = false }) {
+                    Text("取消")
+                }
+                Button(
+                    onClick = {
+                        clearAllCacheDialogVisible = false
+                        clearAllSessionCaches()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = uiPrimary),
+                ) {
+                    Text("确认清除")
+                }
+            }
+        }
     }
 }

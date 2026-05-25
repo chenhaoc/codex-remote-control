@@ -185,6 +185,56 @@ internal fun MainActivity.EditConnectionDialog(
     }
 }
 
+@Composable
+internal fun MainActivity.RemoveConnectionDialog(
+    state: ConnectionRemovalDialogState,
+    onDismiss: () -> Unit,
+    onKeepCache: () -> Unit,
+    onDeleteCache: () -> Unit,
+) {
+    AppCenteredDialog(onDismiss = onDismiss) {
+        Text(
+            text = "移除历史连接",
+            color = uiText,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        BodyText("这是这个 bridge 的最后一个 URL。你可以只移除连接记录，或同时删除这组本地缓存。")
+        Surface(
+            shape = RoundedCornerShape(18.dp),
+            color = uiSurfaceAlt,
+            border = androidx.compose.foundation.BorderStroke(1.dp, uiBorder),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Label(state.displayName)
+                BodyText(state.maskedUrl)
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+        ) {
+            OutlinedButton(onClick = onDismiss) {
+                Text("取消")
+            }
+            OutlinedButton(onClick = onKeepCache) {
+                Text("仅移除连接")
+            }
+            Button(
+                onClick = onDeleteCache,
+                colors = ButtonDefaults.buttonColors(containerColor = uiPrimary),
+            ) {
+                Text("移除并删缓存")
+            }
+        }
+    }
+}
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -341,7 +391,7 @@ internal fun MainActivity.ConnectionPage() {
                                     onApply = { applyHistoryConnection(entry) },
                                     onConnect = { connectToHistory(entry) },
                                     onEdit = { openEditConnectionDialog(entry) },
-                                    onDelete = { removeConnectionHistory(entry.id) },
+                                    onDelete = { requestRemoveConnection(entry) },
                                 )
                             }
                         }
@@ -376,6 +426,15 @@ internal fun MainActivity.ConnectionPage() {
                 }
                 connectionEditState = null
             },
+        )
+    }
+
+    connectionRemovalState?.let { state ->
+        RemoveConnectionDialog(
+            state = state,
+            onDismiss = { connectionRemovalState = null },
+            onKeepCache = { confirmRemoveConnection(state.connectionId, deleteCache = false) },
+            onDeleteCache = { confirmRemoveConnection(state.connectionId, deleteCache = true) },
         )
     }
 }

@@ -45,6 +45,12 @@ internal data class ConnectionEditDialogState(
     val currentUrl: String,
 )
 
+internal data class ConnectionRemovalDialogState(
+    val connectionId: String,
+    val displayName: String,
+    val maskedUrl: String,
+)
+
 internal data class CodeBrowserState(
     val conversationItemId: String,
     val sessionId: String?,

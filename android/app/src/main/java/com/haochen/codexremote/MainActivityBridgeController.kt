@@ -226,6 +226,34 @@ internal fun MainActivity.openEditConnectionDialog(entry: BridgeHistoryEntry) {
             )
     }
 
+internal fun MainActivity.requestRemoveConnection(entry: BridgeHistoryEntry) {
+        if (hasOtherUrlsForBridge(entry) || !hasLocalSessionCacheForConnection(entry)) {
+            removeConnectionHistory(entry.id)
+            showNotice("已移除连接")
+            return
+        }
+        connectionRemovalState =
+            ConnectionRemovalDialogState(
+                connectionId = entry.id,
+                displayName = entry.displayName(),
+                maskedUrl = entry.maskedUrl,
+            )
+    }
+
+internal fun MainActivity.confirmRemoveConnection(
+        connectionId: String,
+        deleteCache: Boolean,
+    ) {
+        val entry = findConnectionHistoryById(connectionId)
+        removeConnectionHistory(connectionId)
+        if (deleteCache && entry != null) {
+            clearSessionCacheForConnection(entry)
+        } else {
+            showNotice("已移除连接")
+        }
+        connectionRemovalState = null
+    }
+
 
 internal fun MainActivity.buildBridgeUrl(): String {
         val raw = bridgeUrl.trim()
@@ -282,12 +310,20 @@ internal fun MainActivity.saveBridgeSettings(url: String, connectionId: String? 
 internal fun MainActivity.rememberConnectionHistory(url: String, bridgeId: String? = null): BridgeHistoryEntry? {
         val normalizedBridgeId = bridgeId?.trim()?.takeIf { it.isNotBlank() }
         val existing = resolveConnectionHistory(url = url, connectionId = currentConnectionId, bridgeId = normalizedBridgeId)
+        val currentEntry = findConnectionHistoryById(currentConnectionId)
+        val reusedConnectionId =
+            currentConnectionId?.trim()?.takeIf { it.isNotBlank() && (currentEntry == null || currentEntry.url == url) }
+        val inheritedName =
+            existing?.name
+                ?: normalizedBridgeId?.let { id ->
+                    connectionHistory.firstOrNull { it.bridgeId == id && !it.name.isNullOrBlank() }?.name
+                }
         val entry = BridgeHistoryEntry.fromUrl(
             url = url,
             lastUsedAt = System.currentTimeMillis(),
-            name = existing?.name,
-            id = existing?.id ?: currentConnectionId?.trim()?.takeIf { it.isNotBlank() } ?: BridgeHistoryEntry.createId(),
-            bridgeId = normalizedBridgeId ?: existing?.bridgeId,
+            name = inheritedName,
+            id = existing?.id ?: reusedConnectionId ?: BridgeHistoryEntry.createId(),
+            bridgeId = normalizedBridgeId ?: existing?.bridgeId ?: currentEntry?.bridgeId,
         ) ?: return null
         replaceConnectionHistory(
             listOf(entry) + connectionHistory.filterNot { it.conflictsWith(entry) },
@@ -301,8 +337,15 @@ internal fun MainActivity.rememberConnectionHistory(url: String, bridgeId: Strin
 internal fun MainActivity.removeConnectionHistory(connectionId: String) {
         replaceConnectionHistory(connectionHistory.filterNot { it.id == connectionId })
         if (currentConnectionId == connectionId) {
-            currentConnectionId = null
-            prefs.edit().remove(KEY_CONNECTION_ID).apply()
+            val fallbackUrl = currentBridgeUrl?.takeIf { it.isNotBlank() } ?: bridgeUrl.trim().takeIf { it.isNotBlank() }
+            currentConnectionId = fallbackUrl?.let(::resolveConnectionHistory)?.id
+            val editor = prefs.edit()
+            if (currentConnectionId == null) {
+                editor.remove(KEY_CONNECTION_ID)
+            } else {
+                editor.putString(KEY_CONNECTION_ID, currentConnectionId)
+            }
+            editor.apply()
         }
         persistConnectionHistory()
     }
@@ -337,7 +380,7 @@ internal fun MainActivity.updateConnectionHistory(
 internal fun MainActivity.replaceConnectionHistory(entries: List<BridgeHistoryEntry>) {
         val normalized = entries
             .sortedByDescending { it.lastUsedAt }
-            .distinctBy { entry -> entry.bridgeId?.let { "bridge:$it" } ?: "entry:${entry.id}" }
+            .distinctBy { entry -> entry.url }
             .take(MAX_CONNECTION_HISTORY)
         connectionHistory.clear()
         connectionHistory.addAll(normalized)
@@ -392,7 +435,6 @@ internal fun MainActivity.persistConnectionHistory() {
 
 private fun BridgeHistoryEntry.conflictsWith(other: BridgeHistoryEntry): Boolean {
         return id == other.id ||
-            (!bridgeId.isNullOrBlank() && bridgeId == other.bridgeId) ||
             url == other.url
     }
 
@@ -415,14 +457,18 @@ internal fun MainActivity.resolveConnectionHistory(
         connectionId: String? = null,
         bridgeId: String? = null,
     ): BridgeHistoryEntry? {
+        val normalizedUrl = url.trim()
         val normalizedBridgeId = bridgeId?.trim()?.takeIf { it.isNotBlank() }
-        if (normalizedBridgeId != null) {
+        findConnectionHistoryById(connectionId)
+            ?.takeIf { entry -> normalizedUrl.isBlank() || entry.url == normalizedUrl }
+            ?.let { return it }
+        if (normalizedUrl.isNotBlank()) {
+            connectionHistory.firstOrNull { it.url == normalizedUrl }?.let { return it }
+        }
+        if (normalizedUrl.isBlank() && normalizedBridgeId != null) {
             connectionHistory.firstOrNull { it.bridgeId == normalizedBridgeId }?.let { return it }
         }
-        findConnectionHistoryById(connectionId)
-            ?.takeIf { it.url == url }
-            ?.let { return it }
-        return connectionHistory.firstOrNull { it.url == url }
+        return null
     }
 
 internal fun MainActivity.connectionDisplayName(url: String, connectionId: String?): String {

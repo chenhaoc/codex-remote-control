@@ -16,6 +16,48 @@ internal fun MainActivity.loadLocalSessionCache() {
     loadLocalSessionCacheForKey(cacheKey)
 }
 
+internal fun MainActivity.clearAllSessionCaches() {
+    val reloadCacheKey = sessionCacheReloadKey()
+    clearVisibleSessionStateAfterCacheReset()
+    activeSessionCacheKey = if (connected) reloadCacheKey else sessionCacheKeyForCurrentConnection()
+    deleteAllSessionCacheFiles()
+    if (connected) {
+        showNotice("已清除全部缓存，正在重新加载")
+        requestSessionList()
+    } else {
+        showNotice("已清除全部缓存")
+    }
+}
+
+internal fun MainActivity.clearSessionCacheForConnection(entry: BridgeHistoryEntry) {
+    val cacheKey = sessionCacheKeyForConnection(entry)
+    deleteSessionCacheEntry(cacheKey)
+    if (activeSessionCacheKey == cacheKey) {
+        clearVisibleSessionStateAfterCacheReset()
+        activeSessionCacheKey = if (connected) sessionCacheReloadKey(cacheKey) else sessionCacheKeyForCurrentConnection()
+        if (connected) {
+            showNotice("已删除本地缓存，正在重新加载")
+            requestSessionList()
+        } else {
+            showNotice("已删除本地缓存")
+        }
+        return
+    }
+    showNotice("已删除本地缓存")
+}
+
+internal fun MainActivity.hasLocalSessionCacheForConnection(entry: BridgeHistoryEntry): Boolean {
+    val cacheKey = sessionCacheKeyForConnection(entry)
+    val cacheDir = File(File(filesDir, SESSION_CACHE_CONTENT_DIR), cacheKey)
+    if (cacheDir.exists()) return true
+    return readConnectionCache(cacheKey) != null
+}
+
+internal fun MainActivity.hasOtherUrlsForBridge(entry: BridgeHistoryEntry): Boolean {
+    val bridgeId = entry.bridgeId?.takeIf { it.isNotBlank() } ?: return false
+    return connectionHistory.any { it.id != entry.id && it.bridgeId == bridgeId }
+}
+
 internal fun MainActivity.switchLocalSessionCache(entry: BridgeHistoryEntry?) {
     val targetCacheKey = sessionCacheKeyForConnection(entry)
     if (activeSessionCacheKey == targetCacheKey) {
@@ -75,6 +117,22 @@ internal fun MainActivity.showCachedHistoryAfterConnectionFailure() {
     if (currentPage == AppPage.Connection) {
         currentPage = AppPage.Chat
     }
+}
+
+private fun MainActivity.clearVisibleSessionStateAfterCacheReset() {
+    stopSessionSyncLoop()
+    clearConversation()
+    sessions.clear()
+    sessionContentCache.clear()
+    sessionContentCacheSignatures.clear()
+    codeBrowserFileCache.clear()
+    codeBrowserRenderCache.clear()
+    projectGroupExpanded.clear()
+    sessionInfoSheetState = null
+    selectedWorkspace = null
+    bootSyncRequested = false
+    activeSessionId = null
+    prefs.edit().remove(KEY_SESSION).apply()
 }
 
 private fun MainActivity.loadLocalSessionCacheForKey(cacheKey: String?): String? {
@@ -205,6 +263,53 @@ private fun MainActivity.writeSessionCacheRoot(root: JSONObject) {
     } catch (_: Exception) {
         // Cache failures should not affect the bridge connection or chat flow.
     }
+}
+
+private fun MainActivity.deleteAllSessionCacheFiles() {
+    filesDir.listFiles()
+        ?.filter { file ->
+            file.name == SESSION_CACHE_FILE ||
+                file.name.startsWith(SESSION_CACHE_CONTENT_DIR)
+        }
+        ?.forEach(::deleteSessionCacheFile)
+}
+
+private fun MainActivity.deleteSessionCacheEntry(cacheKey: String) {
+    val root = readSessionCacheRoot()
+    val connections = root?.optJSONObject("connections")
+    connections?.remove(cacheKey)
+    val updatedRoot =
+        if (root != null && connections != null && connections.length() > 0) {
+            JSONObject(root.toString()).apply {
+                put("connections", connections)
+                put("updatedAt", System.currentTimeMillis())
+            }
+        } else {
+            null
+        }
+    if (updatedRoot == null) {
+        deleteSessionCacheFile(sessionCacheFile())
+    } else {
+        writeSessionCacheRoot(updatedRoot)
+    }
+    deleteSessionCacheFile(File(File(filesDir, SESSION_CACHE_CONTENT_DIR), cacheKey))
+}
+
+private fun MainActivity.deleteSessionCacheFile(file: File) {
+    if (!file.exists()) return
+    runCatching {
+        if (file.isDirectory) {
+            file.deleteRecursively()
+        } else {
+            file.delete()
+        }
+    }
+}
+
+private fun MainActivity.sessionCacheReloadKey(fallback: String? = null): String {
+    return activeSessionCacheKey?.takeIf { it.isNotBlank() }
+        ?: fallback?.takeIf { it.isNotBlank() }
+        ?: sessionCacheKeyForCurrentConnection()
 }
 
 private fun MainActivity.sessionCacheFile(): File = File(filesDir, SESSION_CACHE_FILE)
