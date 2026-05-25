@@ -271,7 +271,7 @@ internal fun buildConversationDiffEntryHtml(
 ): String {
     val panelId = "cr-diff-${browserItemId?.hashCode() ?: 0}-$entryIndex"
     val label = entry.displayPath(basePath = displayBasePath, maxLength = 52)
-    val statsLabel = entry.diffStatsLabel() ?: conversationKindLabel(entry.kind, entry.movePath)
+    val statsLabel = entry.changeLabel()
     val href =
         browserItemId?.takeIf { it.isNotBlank() }?.let {
             buildString {
@@ -345,12 +345,7 @@ internal fun buildConversationFallbackDiffHtml(
 }
 
 internal fun conversationKindLabel(kind: String, movePath: String?): String {
-    return when (kind.trim()) {
-        "add" -> "新增"
-        "delete" -> "删除"
-        "update" -> if (movePath.isNullOrBlank()) "修改" else "重命名"
-        else -> kind.ifBlank { "变更" }
-    }
+    return buildDiffKindLabel(kind, movePath)
 }
 
 internal enum class ConversationDiffLineKind {
@@ -383,23 +378,16 @@ internal fun buildConversationDiffStatsLine(
     diffEntries: List<ConversationDiffEntry>,
     fallbackDiff: String?,
 ): String? {
+    if (diffEntries.size == 1) {
+        return diffEntries.first().changeLabel()
+    }
     val source =
         if (diffEntries.isNotEmpty()) {
             diffEntries.joinToString("\n") { it.diff }
         } else {
             fallbackDiff.orEmpty()
         }
-    if (source.isBlank()) return null
-    var additions = 0
-    var deletions = 0
-    source.replace("\r\n", "\n").lineSequence().forEach { line ->
-        when {
-            line.startsWith("+") && !line.startsWith("+++") -> additions += 1
-            line.startsWith("-") && !line.startsWith("---") -> deletions += 1
-        }
-    }
-    if (additions == 0 && deletions == 0) return null
-    return "+$additions / -$deletions"
+    return parseDiffStats(source)?.toLabel()
 }
 
 internal fun buildConversationFileChangeMetaHtml(

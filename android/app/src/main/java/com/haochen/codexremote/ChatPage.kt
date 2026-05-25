@@ -401,7 +401,7 @@ internal fun MainActivity.ApprovalDialog(
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                     Text(
-                                        text = entry.diffStatsLabel().orEmpty(),
+                                        text = entry.changeLabel().orEmpty(),
                                         color = uiMuted,
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.SemiBold,

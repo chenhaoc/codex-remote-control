@@ -163,6 +163,9 @@ internal fun MainActivity.buildDiffStatsLine(
         diffEntries: List<ConversationDiffEntry>,
         fallbackDiff: String?,
     ): String? {
+        if (diffEntries.size == 1) {
+            return diffEntries.first().changeLabel()
+        }
         val source =
             if (diffEntries.isNotEmpty()) {
                 diffEntries.joinToString("\n") { it.diff }

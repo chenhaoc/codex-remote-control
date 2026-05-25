@@ -161,7 +161,7 @@ internal fun MainActivity.CodeBrowserPage(
                     visibleEntries.forEachIndexed { index, entry ->
                         CodeBrowserFileRow(
                             label = entry.filenameLabel(),
-                            stats = entry.diffStatsLabel(),
+                            stats = entry.changeLabel(),
                             selected = state.selectedPath == entry.browsePath(),
                             onClick = {
                                 selectCodeBrowserPath(entry.browsePath())

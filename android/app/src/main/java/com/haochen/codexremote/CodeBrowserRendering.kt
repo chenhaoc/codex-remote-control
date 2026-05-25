@@ -106,15 +106,15 @@ internal fun computeDiffLineNumbers(lines: List<String>): List<Int?> {
 
         when (classifyDiffLine(line)) {
             DiffLineKind.Added -> {
-                val current = newLine
+                val current = newLine ?: 1
                 result += current
-                if (current != null) newLine = current + 1
+                newLine = current + 1
             }
 
             DiffLineKind.Deleted -> {
-                val current = oldLine
+                val current = oldLine ?: 1
                 result += current
-                if (current != null) oldLine = current + 1
+                oldLine = current + 1
             }
 
             DiffLineKind.Context -> {

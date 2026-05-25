@@ -67,6 +67,8 @@ data class ConversationDiffEntry(
 
     fun diffStatsLabel(): String? = buildDiffStatsLabel(diff, kind)
 
+    fun changeLabel(): String? = buildDiffChangeLabel(diffText = diff, kind = kind, movePath = movePath)
+
     private fun normalizedPath(): String = sanitizeDiffPath(path).orEmpty()
 
     private fun normalizedMovePath(): String? = sanitizeDiffPath(movePath)
@@ -110,6 +112,34 @@ internal fun buildDiffStatsLabel(
         "delete" -> "删除"
         "update" -> "修改"
         else -> null
+    }
+}
+
+internal fun buildDiffChangeLabel(
+    diffText: String,
+    kind: String,
+    movePath: String?,
+): String? {
+    val kindLabel = buildDiffKindLabel(kind, movePath).takeIf { it.isNotBlank() }
+    val statsLabel = buildDiffStatsLabel(diffText, kind)
+    val normalizedKind = kind.trim()
+    return when {
+        normalizedKind == "add" || normalizedKind == "delete" ->
+            listOfNotNull(kindLabel, statsLabel?.takeUnless { it == kindLabel }).joinToString(" ").takeIf { it.isNotBlank() }
+
+        normalizedKind == "update" && !movePath.isNullOrBlank() ->
+            listOfNotNull(kindLabel, statsLabel?.takeUnless { it == kindLabel || it == "修改" }).joinToString(" ").takeIf { it.isNotBlank() }
+
+        else -> statsLabel ?: kindLabel
+    }
+}
+
+internal fun buildDiffKindLabel(kind: String, movePath: String?): String {
+    return when (kind.trim()) {
+        "add" -> "新增"
+        "delete" -> "删除"
+        "update" -> if (movePath.isNullOrBlank()) "修改" else "重命名"
+        else -> kind.ifBlank { "变更" }
     }
 }
 
