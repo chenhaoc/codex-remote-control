@@ -9,10 +9,10 @@ Do not expose the bridge directly to the public internet.
 ## Deployment Guidance
 
 - Bind the bridge to a private interface or private overlay network.
-- Keep `data/bridge-token.txt` secret.
+- Keep `~/.config/codex_remote_control/bridge-token.txt` secret.
 - Rotate the token if a phone, log, or shell history may have leaked it.
 - Prefer temporary locations for `--protocol-log`; it may contain prompts, paths, session ids, and protocol payloads.
-- Keep `data/` out of git.
+- Keep bridge runtime files out of the repository.
 - Treat the debug APK as a private development build.
 
 ## Reporting

@@ -28,7 +28,7 @@ The project is intentionally small. Prefer focused changes over introducing larg
   - `scripts/build-apk.sh`: debug APK build helper.
 - `scripts/run-bridge.sh`: local bridge launcher.
 - `test/`: Node-side tests for bridge and backend behavior.
-- `data/`: local bridge state and token files.
+- `~/.config/codex_remote_control/`: default local bridge state, token, and log files.
 
 ## Working Rules
 

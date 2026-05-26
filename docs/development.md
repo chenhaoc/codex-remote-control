@@ -71,6 +71,7 @@ Docs-only changes do not require Android compilation, but this repository is sma
 These files and directories are local-only:
 
 - `data/`
+- `~/.config/codex_remote_control/`
 - `node_modules/`
 - `android/build/`
 - `android/app/build/`

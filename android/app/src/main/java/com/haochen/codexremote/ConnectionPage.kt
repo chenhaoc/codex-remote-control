@@ -215,18 +215,30 @@ internal fun MainActivity.RemoveConnectionDialog(
                 BodyText(state.maskedUrl)
             }
         }
-        Row(
+        Column(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            OutlinedButton(onClick = onDismiss) {
-                Text("取消")
-            }
-            OutlinedButton(onClick = onKeepCache) {
-                Text("仅移除连接")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                OutlinedButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("取消")
+                }
+                OutlinedButton(
+                    onClick = onKeepCache,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("仅移除连接")
+                }
             }
             Button(
                 onClick = onDeleteCache,
+                modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.buttonColors(containerColor = uiPrimary),
             ) {
                 Text("移除并删缓存")

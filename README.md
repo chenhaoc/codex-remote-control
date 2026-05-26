@@ -43,6 +43,8 @@ The bridge prints one or more URLs like:
 ws://192.168.1.10:8787/?token=...
 ```
 
+By default the bridge stores its token, bridge id, state, and optional sync logs under `~/.config/codex_remote_control/`.
+
 Build the Android debug APK:
 
 ```bash

@@ -11,7 +11,11 @@ export class StateStore {
   constructor(filePath, { maxEventsPerSession = 500 } = {}) {
     this.filePath = filePath;
     this.maxEventsPerSession = maxEventsPerSession;
-    this.state = {
+    this.state = this.#emptyState();
+  }
+
+  #emptyState() {
+    return {
       version: 1,
       sessions: {},
       devices: {},
@@ -25,7 +29,7 @@ export class StateStore {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') {
         this.state = {
-          version: 1,
+          ...this.#emptyState(),
           sessions: parsed.sessions ?? {},
           devices: parsed.devices ?? {},
         };
@@ -34,6 +38,11 @@ export class StateStore {
       if (error?.code !== 'ENOENT') throw error;
       await this.save();
     }
+  }
+
+  async clear() {
+    this.state = this.#emptyState();
+    await this.save();
   }
 
   async save() {

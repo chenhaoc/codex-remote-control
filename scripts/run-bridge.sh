@@ -2,14 +2,38 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+DATA_DIR="${CODEX_REMOTE_DATA_DIR:-$CONFIG_HOME/codex_remote_control}"
 HOST="${CODEX_REMOTE_HOST:-0.0.0.0}"
 PORT="${CODEX_REMOTE_PORT:-8787}"
 BACKEND="${CODEX_REMOTE_BACKEND:-codex}"
-TOKEN_FILE="${CODEX_REMOTE_TOKEN_FILE:-$ROOT_DIR/data/bridge-token.txt}"
-BRIDGE_ID_FILE="${CODEX_REMOTE_BRIDGE_ID_FILE:-$ROOT_DIR/data/bridge-id.txt}"
-STATE_FILE="${CODEX_REMOTE_STATE_FILE:-$ROOT_DIR/data/bridge-state.json}"
+TOKEN_FILE="${CODEX_REMOTE_TOKEN_FILE:-$DATA_DIR/bridge-token.txt}"
+BRIDGE_ID_FILE="${CODEX_REMOTE_BRIDGE_ID_FILE:-$DATA_DIR/bridge-id.txt}"
+STATE_FILE="${CODEX_REMOTE_STATE_FILE:-$DATA_DIR/bridge-state.json}"
+CLEAR_STATE_ON_START="${CODEX_REMOTE_CLEAR_STATE_ON_START:-0}"
 SYNC_LOG="${CODEX_REMOTE_SYNC_LOG:-0}"
-SYNC_LOG_FILE="${CODEX_REMOTE_SYNC_LOG_FILE:-$ROOT_DIR/data/bridge-sync.log}"
+SYNC_LOG_FILE="${CODEX_REMOTE_SYNC_LOG_FILE:-$DATA_DIR/bridge-sync.log}"
+
+migrate_legacy_file() {
+  local source_file="$1"
+  local target_file="$2"
+  if [[ "$source_file" == "$target_file" ]]; then
+    return
+  fi
+  if [[ ! -f "$source_file" || -e "$target_file" ]]; then
+    return
+  fi
+  mkdir -p "$(dirname "$target_file")"
+  mv "$source_file" "$target_file"
+  echo "Migrated legacy runtime file: $source_file -> $target_file"
+}
+
+migrate_legacy_runtime_files() {
+  migrate_legacy_file "$ROOT_DIR/data/bridge-token.txt" "$TOKEN_FILE"
+  migrate_legacy_file "$ROOT_DIR/data/bridge-id.txt" "$BRIDGE_ID_FILE"
+  migrate_legacy_file "$ROOT_DIR/data/bridge-state.json" "$STATE_FILE"
+  migrate_legacy_file "$ROOT_DIR/data/bridge-sync.log" "$SYNC_LOG_FILE"
+}
 
 ensure_token() {
   node -e '
@@ -57,6 +81,7 @@ check_port_available() {
   exit 1
 }
 
+migrate_legacy_runtime_files
 TOKEN="$(ensure_token)"
 
 echo "Codex Remote Control bridge"
@@ -87,6 +112,10 @@ ARGS=(
 if [[ "$SYNC_LOG" == "1" || "$SYNC_LOG" == "true" || "$SYNC_LOG" == "yes" ]]; then
   ARGS+=(--sync-log "$SYNC_LOG_FILE")
   echo "Sync log: $SYNC_LOG_FILE"
+fi
+if [[ "$CLEAR_STATE_ON_START" == "1" || "$CLEAR_STATE_ON_START" == "true" || "$CLEAR_STATE_ON_START" == "yes" ]]; then
+  ARGS+=(--clear-state-on-start)
+  echo "State:  clear on startup"
 fi
 
 check_port_available

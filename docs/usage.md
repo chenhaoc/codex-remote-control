@@ -26,12 +26,13 @@ The default bridge launcher starts the real Codex backend and listens on all int
 npm run bridge
 ```
 
-It writes local state and token files under `data/`, then prints WebSocket URLs that can be pasted into the Android app.
+It writes local state and token files under `~/.config/codex_remote_control/` by default, then prints WebSocket URLs that can be pasted into the Android app.
 
 Default files:
 
-- `data/bridge-state.json`
-- `data/bridge-token.txt`
+- `~/.config/codex_remote_control/bridge-state.json`
+- `~/.config/codex_remote_control/bridge-token.txt`
+- `~/.config/codex_remote_control/bridge-id.txt`
 
 The bridge URL format is:
 
@@ -55,10 +56,12 @@ npm run bridge
 | `CODEX_REMOTE_HOST` | `0.0.0.0` | Bridge listen host |
 | `CODEX_REMOTE_PORT` | `8787` | Bridge listen port |
 | `CODEX_REMOTE_BACKEND` | `codex` | `codex` or `mock` |
-| `CODEX_REMOTE_TOKEN_FILE` | `data/bridge-token.txt` | Token file path |
-| `CODEX_REMOTE_STATE_FILE` | `data/bridge-state.json` | State file path |
+| `CODEX_REMOTE_DATA_DIR` | `~/.config/codex_remote_control` | Base directory for bridge runtime files |
+| `CODEX_REMOTE_TOKEN_FILE` | `~/.config/codex_remote_control/bridge-token.txt` | Token file path |
+| `CODEX_REMOTE_STATE_FILE` | `~/.config/codex_remote_control/bridge-state.json` | State file path |
+| `CODEX_REMOTE_CLEAR_STATE_ON_START` | `0` | Set `1`, `true`, or `yes` to clear local bridge history before startup |
 | `CODEX_REMOTE_SYNC_LOG` | `0` | Set `1`, `true`, or `yes` to enable sync logging |
-| `CODEX_REMOTE_SYNC_LOG_FILE` | `data/bridge-sync.log` | Sync log file path |
+| `CODEX_REMOTE_SYNC_LOG_FILE` | `~/.config/codex_remote_control/bridge-sync.log` | Sync log file path |
 
 Example using the mock backend:
 
@@ -72,6 +75,12 @@ Example using another port:
 CODEX_REMOTE_PORT=8790 npm run bridge
 ```
 
+Example clearing bridge-side local history on startup:
+
+```bash
+CODEX_REMOTE_CLEAR_STATE_ON_START=1 npm run bridge
+```
+
 ## Direct Bridge Command
 
 The Node entrypoint can be run directly:
@@ -80,8 +89,9 @@ The Node entrypoint can be run directly:
 node src/index.mjs \
   --backend codex \
   --listen 0.0.0.0:8787 \
-  --state data/bridge-state.json \
-  --token-file data/bridge-token.txt
+  --state ~/.config/codex_remote_control/bridge-state.json \
+  --token-file ~/.config/codex_remote_control/bridge-token.txt \
+  --clear-state-on-start
 ```
 
 Useful options:
@@ -90,11 +100,14 @@ Useful options:
 - `--listen HOST:PORT`
 - `--state PATH`
 - `--token-file PATH`
+- `--clear-state-on-start`
 - `--sync-log PATH`
 - `--protocol-log PATH`
 - `--codex-bin PATH`
 - `--codex-arg VALUE`
 - `--codex-config KEY=VALUE`
+
+`--clear-state-on-start` only clears the bridge state file. It does not change the token file or bridge id file.
 
 `--protocol-log` records raw bridge-to-Codex protocol lines and may contain sensitive content. Prefer a temporary path and delete it after debugging.
 
@@ -156,7 +169,7 @@ Bridge protocol logging:
 node src/index.mjs \
   --backend codex \
   --listen 0.0.0.0:8787 \
-  --state data/bridge-state.json \
-  --token-file data/bridge-token.txt \
+  --state ~/.config/codex_remote_control/bridge-state.json \
+  --token-file ~/.config/codex_remote_control/bridge-token.txt \
   --protocol-log /tmp/codex-remote-protocol.log
 ```

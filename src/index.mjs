@@ -7,13 +7,23 @@ import { MockBackend } from './backends/mock.mjs';
 import { CodexBackend } from './backends/codex.mjs';
 import { BridgeServer } from './bridge-server.mjs';
 
+function defaultDataDir() {
+  return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'codex_remote_control');
+}
+
+function legacyDataDir() {
+  return path.join(process.cwd(), 'data');
+}
+
 function parseArgs(argv) {
+  const dataDir = defaultDataDir();
   const out = {
     backend: 'mock',
     listen: '127.0.0.1:8787',
-    state: path.join(process.cwd(), 'data', 'bridge-state.json'),
-    tokenFile: path.join(process.cwd(), 'data', 'bridge-token.txt'),
-    bridgeIdFile: path.join(process.cwd(), 'data', 'bridge-id.txt'),
+    state: path.join(dataDir, 'bridge-state.json'),
+    tokenFile: path.join(dataDir, 'bridge-token.txt'),
+    bridgeIdFile: path.join(dataDir, 'bridge-id.txt'),
+    clearStateOnStart: false,
     syncLog: null,
     protocolLog: null,
     codexBin: 'codex',
@@ -28,6 +38,7 @@ function parseArgs(argv) {
     else if (arg === '--state') out.state = argv[++i];
     else if (arg === '--token-file') out.tokenFile = argv[++i];
     else if (arg === '--bridge-id-file') out.bridgeIdFile = argv[++i];
+    else if (arg === '--clear-state-on-start') out.clearStateOnStart = true;
     else if (arg === '--sync-log') out.syncLog = argv[++i];
     else if (arg === '--protocol-log') out.protocolLog = argv[++i];
     else if (arg === '--codex-bin') out.codexBin = argv[++i];
@@ -43,6 +54,44 @@ function parseArgs(argv) {
 function parseListen(listen) {
   const [host, portRaw] = listen.includes(':') ? listen.split(/:(?=[^:]*$)/) : [listen, '8787'];
   return { host, port: Number(portRaw) || 8787 };
+}
+
+async function migrateLegacyRuntimeFile(sourceFile, targetFile) {
+  if (sourceFile === targetFile) return;
+  try {
+    await fs.access(targetFile);
+    return;
+  } catch {}
+  try {
+    await fs.access(sourceFile);
+  } catch {
+    return;
+  }
+  await fs.mkdir(path.dirname(targetFile), { recursive: true });
+  try {
+    await fs.rename(sourceFile, targetFile);
+  } catch (error) {
+    if (error?.code !== 'EXDEV') throw error;
+    await fs.copyFile(sourceFile, targetFile);
+    await fs.unlink(sourceFile);
+  }
+  console.log(`Migrated legacy runtime file: ${sourceFile} -> ${targetFile}`);
+}
+
+async function maybeMigrateLegacyRuntimeFiles(args) {
+  const dataDir = defaultDataDir();
+  const legacyDir = legacyDataDir();
+  const mappings = [
+    ['bridge-token.txt', args.tokenFile],
+    ['bridge-id.txt', args.bridgeIdFile],
+    ['bridge-state.json', args.state],
+    ['bridge-sync.log', args.syncLog],
+  ];
+  for (const [filename, targetFile] of mappings) {
+    if (!targetFile) continue;
+    if (path.dirname(targetFile) !== dataDir) continue;
+    await migrateLegacyRuntimeFile(path.join(legacyDir, filename), targetFile);
+  }
 }
 
 async function loadOrCreateToken(tokenFile) {
@@ -86,6 +135,7 @@ Options:
   --state PATH
   --token-file PATH
   --bridge-id-file PATH
+  --clear-state-on-start  clear local bridge history before startup
   --sync-log PATH        enable sync debug logging to a file
   --protocol-log PATH    capture raw bridge<->codex protocol lines
   --codex-bin PATH
@@ -95,10 +145,14 @@ Options:
     process.exit(0);
   }
 
+  await maybeMigrateLegacyRuntimeFiles(args);
   const { host, port } = parseListen(args.listen);
   const token = await loadOrCreateToken(args.tokenFile);
   const bridgeId = await loadOrCreateBridgeId(args.bridgeIdFile);
   const store = new StateStore(args.state);
+  if (args.clearStateOnStart) {
+    await store.clear();
+  }
   const backend = args.backend === 'codex'
     ? new CodexBackend({
         codexBin: args.codexBin,

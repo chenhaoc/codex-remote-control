@@ -40,6 +40,39 @@ test('bridge hello includes stable bridge id', async () => {
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test('state store clear removes stored bridge history', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-clear-state-test-'));
+  const stateFile = path.join(dir, 'state.json');
+  const store = new StateStore(stateFile);
+  await store.load();
+  await store.upsertSession({
+    session_id: 'session_clear_1',
+    thread_id: 'session_clear_1',
+    title: 'Clear me',
+    cwd: '/tmp/clear-me',
+    model: 'gpt-5',
+    backend: 'mock',
+    preview: '',
+    active: true,
+  });
+  await store.appendEvent('session_clear_1', {
+    type: 'event',
+    event: 'turn/input',
+    session_id: 'session_clear_1',
+    thread_id: 'session_clear_1',
+    payload: { text: 'hello' },
+  });
+
+  assert.equal(store.listSessions().length, 1);
+  await store.clear();
+  assert.equal(store.listSessions().length, 0);
+
+  const reloadedStore = new StateStore(stateFile);
+  await reloadedStore.load();
+  assert.equal(reloadedStore.listSessions().length, 0);
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 test('mock backend produces events and approval flow', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-test-'));
   const store = new StateStore(path.join(dir, 'state.json'));

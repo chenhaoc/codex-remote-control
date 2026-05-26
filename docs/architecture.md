@@ -55,7 +55,7 @@ It initializes the app-server, sends JSON-RPC requests, receives notifications a
 - pending approvals
 - last sequence cursors
 
-The default state file is `data/bridge-state.json`. It is local runtime data and is ignored by git.
+The default state file is `~/.config/codex_remote_control/bridge-state.json`. It is local runtime data and is not stored in the repository.
 
 ## Session Content And Sync
 
