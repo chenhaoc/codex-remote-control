@@ -53,6 +53,15 @@ npm run apk
 
 Install `android/app/build/outputs/apk/debug/app-debug.apk`, open the app, and paste the bridge URL.
 
+Build the Android release APK:
+
+```bash
+npm run apk:release
+```
+
+The release build outputs `android/app/build/outputs/apk/release/app-release-unsigned.apk`.
+Sign it before distributing beyond local/private use.
+
 More setup options are documented in [Usage](docs/usage.md).
 
 ## Development
@@ -79,6 +88,7 @@ See [Development](docs/development.md) for repository layout, validation command
 - [Approval Flow](docs/approval-flow.md): approval request/response behavior and troubleshooting
 - [Session Incremental Sync](docs/session-incremental-sync.md): `session.sync` design and fallback rules
 - [Android README](android/README.md): Android client implementation notes
+- [Changelog](CHANGELOG.md): release notes and artifact paths
 - [Project Plan Archive](docs/project-plan.md): original personal implementation plan
 
 ## Security

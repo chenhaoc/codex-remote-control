@@ -125,9 +125,23 @@ Output:
 android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
+Build the release APK:
+
+```bash
+npm run apk:release
+```
+
+Output:
+
+```text
+android/app/build/outputs/apk/release/app-release-unsigned.apk
+```
+
+The release APK is unsigned by default. Sign it before distributing outside local/private use.
+
 You can also open `android/` in Android Studio.
 
-The debug app uses `ws://` cleartext traffic so it can connect to a private-network bridge. Do not treat the debug APK as a hardened public release build.
+The app uses `ws://` cleartext traffic so it can connect to a private-network bridge. Do not expose the bridge or the APK as a hardened public-internet deployment.
 
 ## Debug Logs
 

@@ -46,6 +46,12 @@ Build the Android debug APK:
 npm run apk
 ```
 
+Build the Android release APK:
+
+```bash
+npm run apk:release
+```
+
 Compile Android Kotlin:
 
 ```bash
@@ -63,6 +69,7 @@ source ~/.zshrc && cd android && ./gradlew assembleDebug
 - Bridge or protocol changes: run `npm test`.
 - Android code changes: run `source ~/.zshrc && cd android && ./gradlew :app:compileDebugKotlin`.
 - Packaging or install behavior changes: run `source ~/.zshrc && cd android && ./gradlew assembleDebug`.
+- Release packaging changes: run `source ~/.zshrc && cd android && ./gradlew assembleRelease`.
 
 Docs-only changes do not require Android compilation, but this repository is small enough that running the bridge tests is usually cheap.
 

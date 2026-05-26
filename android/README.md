@@ -16,15 +16,31 @@
 
 ## 构建
 
+Debug APK:
+
 ```bash
 bash android/scripts/build-apk.sh
 ```
 
-默认产物：
+Debug 产物：
 
 ```text
 android/app/build/outputs/apk/debug/app-debug.apk
 ```
+
+Release APK:
+
+```bash
+bash android/scripts/build-release-apk.sh
+```
+
+Release 产物：
+
+```text
+android/app/build/outputs/apk/release/app-release-unsigned.apk
+```
+
+Release APK 默认未签名，分发前需要自行签名。
 
 ## 说明
 

@@ -9,6 +9,7 @@
     "start": "node src/index.mjs",
     "bridge": "bash scripts/run-bridge.sh",
     "apk": "bash android/scripts/build-apk.sh",
+    "apk:release": "bash android/scripts/build-release-apk.sh",
     "test": "node --test"
   },
   "engines": {
