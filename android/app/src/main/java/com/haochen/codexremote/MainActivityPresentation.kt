@@ -25,6 +25,11 @@ internal fun MainActivity.connectionStatusHeadline(): String {
         val entry = currentConnectionEntry()
         if (!connected) {
             val name = entry?.displayName()?.takeIf { !currentBridgeUrl.isNullOrBlank() && it.isNotBlank() }
+            val detail = connectionDetail.trim()
+            val isFailureState = isConnectionFailureDetail(detail)
+            if (isFailureState) {
+                return connectionFailureHeadline(detail, reconnectScheduled)
+            }
             return if (name != null) {
                 if (reconnectScheduled || reconnectAttempt > 0) "自动重连：$name" else "正在连接：$name"
             } else {
@@ -42,10 +47,21 @@ internal fun MainActivity.connectionStatusHeadline(): String {
 internal fun MainActivity.connectionStatusDetailText(): String {
         val entry = currentConnectionEntry()
         if (!connected) {
-            if (currentBridgeUrl.isNullOrBlank() || entry == null) return connectionDetail
-            return buildList {
-                add(if (reconnectScheduled || reconnectAttempt > 0) "正在自动重连" else "正在建立连接")
-                entry.maskedUrl.takeIf { it.isNotBlank() }?.let(::add)
+            if (entry == null) return connectionDetail
+            val name = entry.displayName().takeIf { it.isNotBlank() }
+            val detail = connectionDetail.trim()
+            val isFailureState = isConnectionFailureDetail(detail)
+            return buildList<String> {
+                if (isFailureState) {
+                    name?.takeIf { it.isNotBlank() }?.let(::add)
+                    entry.maskedUrl.takeIf { it.isNotBlank() }?.let(::add)
+                    connectionFailureSupportingText(detail)
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { add("详细信息：$it") }
+                } else {
+                    add(if (reconnectScheduled || reconnectAttempt > 0) "正在自动重连" else "正在建立连接")
+                    entry.maskedUrl.takeIf { it.isNotBlank() }?.let(::add)
+                }
             }.joinToString("\n")
         }
         entry ?: return connectionDetail
@@ -61,7 +77,7 @@ internal fun MainActivity.drawerConnectionSummaryText(): String {
     }
 
 internal fun MainActivity.currentConnectionEntry(): BridgeHistoryEntry? {
-        val url = currentBridgeUrl?.takeIf { it.isNotBlank() } ?: bridgeUrl.takeIf { connected && it.isNotBlank() }
+        val url = currentBridgeUrl?.takeIf { it.isNotBlank() } ?: bridgeUrl.takeIf { it.isNotBlank() }
         return findConnectionHistoryById(currentConnectionId)
             ?: url?.let { target ->
             connectionHistory.firstOrNull { it.url == target } ?: BridgeHistoryEntry.fromUrl(target)
@@ -84,6 +100,53 @@ internal fun MainActivity.showNotice(message: String) {
         noticeToast?.cancel()
         noticeToast = Toast.makeText(this, message, Toast.LENGTH_SHORT)
         noticeToast?.show()
+    }
+
+internal fun isConnectionFailureDetail(detail: String): Boolean {
+        val normalized = detail.trim()
+        return normalized.startsWith("连接失败") ||
+            normalized.startsWith("连接超时") ||
+            normalized.startsWith("token 不正确") ||
+            normalized.startsWith("连接已断开") ||
+            normalized.startsWith("心跳超时") ||
+            normalized.startsWith("重连次数已用尽") ||
+            normalized.startsWith("握手超时") ||
+            normalized.startsWith("Bridge 握手超时") ||
+            normalized.startsWith("已达到最大自动重连次数")
+    }
+
+internal fun connectionFailureHeadline(
+        detail: String,
+        reconnecting: Boolean = false,
+    ): String {
+        val normalized = detail.trim()
+        return when {
+            normalized.startsWith("token 不正确") -> "认证失败，请检查 token"
+            normalized.startsWith("心跳超时") -> "连接已中断，未收到心跳响应"
+            normalized.startsWith("连接超时") -> "连接超时，请检查网络或主机地址"
+            normalized.startsWith("Bridge 握手超时") || normalized.startsWith("握手超时") -> "Bridge 响应超时，未完成握手"
+            normalized.startsWith("已达到最大自动重连次数") || normalized.startsWith("重连次数已用尽") -> "自动重连已停止，请手动重试"
+            normalized.contains("已达到最大自动重连次数") -> "自动重连已停止，请手动重试"
+            normalized.startsWith("连接已断开") ->
+                if (reconnecting) "连接已断开，正在重试" else "连接已断开，请重新连接"
+            normalized.startsWith("连接失败") -> "连接失败，请稍后重试"
+            else -> normalized.ifBlank { "当前未连接" }
+        }
+    }
+
+internal fun connectionFailureSupportingText(detail: String): String? {
+        val normalized = detail.trim()
+        return when {
+            normalized.startsWith("token 不正确") -> null
+            normalized.startsWith("已达到最大自动重连次数") || normalized.startsWith("重连次数已用尽") -> null
+            normalized.contains("已达到最大自动重连次数") -> null
+            normalized.startsWith("连接超时") -> null
+            normalized.startsWith("心跳超时") -> null
+            normalized.startsWith("Bridge 握手超时") || normalized.startsWith("握手超时") -> null
+            normalized.startsWith("连接失败:") -> normalized.removePrefix("连接失败:").trim()
+            normalized.startsWith("连接已断开:") -> normalized.removePrefix("连接已断开:").trim()
+            else -> normalized.takeIf { it.contains(':') }
+        }
     }
 
 

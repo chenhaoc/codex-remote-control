@@ -15,7 +15,7 @@ public final class BridgeClient {
 
         void onText(String text);
 
-        void onDisconnected(String reason, Throwable error);
+        void onDisconnected(int code, String reason, Throwable error);
     }
 
     private final URI uri;
@@ -24,15 +24,16 @@ public final class BridgeClient {
 
     private volatile boolean closed;
     private volatile boolean connected;
+    private volatile boolean finished;
     private volatile WebSocket webSocket;
 
-    public BridgeClient(URI uri, Listener listener) {
+    public BridgeClient(URI uri, Listener listener, int connectTimeoutSeconds, int pingIntervalSeconds) {
         this.uri = uri;
         this.listener = listener;
         this.client = new OkHttpClient.Builder()
-                .connectTimeout(10, TimeUnit.SECONDS)
+                .connectTimeout(connectTimeoutSeconds, TimeUnit.SECONDS)
                 .readTimeout(0, TimeUnit.SECONDS)
-                .pingInterval(20, TimeUnit.SECONDS)
+                .pingInterval(pingIntervalSeconds, TimeUnit.SECONDS)
                 .build();
     }
 
@@ -57,13 +58,19 @@ public final class BridgeClient {
             }
 
             @Override
+            public void onClosing(WebSocket socket, int code, String reason) {
+                socket.close(code, reason);
+                finish(code, reason == null || reason.isEmpty() ? "连接已断开" : reason, null);
+            }
+
+            @Override
             public void onClosed(WebSocket socket, int code, String reason) {
-                finish(reason == null || reason.isEmpty() ? "连接已断开" : reason, null);
+                finish(code, reason == null || reason.isEmpty() ? "连接已断开" : reason, null);
             }
 
             @Override
             public void onFailure(WebSocket socket, Throwable error, Response response) {
-                finish("连接失败", error);
+                finish(-1, "连接失败", error);
             }
         });
     }
@@ -93,13 +100,17 @@ public final class BridgeClient {
         client.dispatcher().executorService().shutdown();
     }
 
-    private void finish(String reason, Throwable error) {
+    private synchronized void finish(int code, String reason, Throwable error) {
+        if (finished) {
+            return;
+        }
+        finished = true;
         boolean notify = !closed;
         connected = false;
         webSocket = null;
         client.dispatcher().executorService().shutdown();
         if (notify) {
-            listener.onDisconnected(reason, error);
+            listener.onDisconnected(code, reason, error);
         }
     }
 }

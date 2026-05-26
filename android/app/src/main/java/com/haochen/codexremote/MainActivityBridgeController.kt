@@ -66,6 +66,7 @@ internal fun MainActivity.disconnectBridge(
     ) {
         stopSessionSyncLoop()
         cancelReconnectSchedule(resetAttempt = true)
+        mainHandler.removeCallbacks(bridgeHelloTimeoutRunnable)
         disconnectRequested = true
         bridgeClient?.close()
         bridgeClient = null
@@ -114,6 +115,7 @@ internal fun MainActivity.connectToBridge(
         }
 
         mainHandler.removeCallbacks(reconnectRunnable)
+        mainHandler.removeCallbacks(bridgeHelloTimeoutRunnable)
         reconnectScheduled = false
         if (!isAutoReconnect) {
             reconnectAttempt = 0
@@ -133,57 +135,70 @@ internal fun MainActivity.connectToBridge(
                 "连接中: $url"
             }
 
-        bridgeClient = BridgeClient(URI.create(url), object : BridgeClient.Listener {
-            override fun onOpen() {
-                mainHandler.post {
-                    connected = true
-                    reconnectAttempt = 0
-                    cancelReconnectSchedule(resetAttempt = false)
-                    currentPage = AppPage.Chat
-                    connectionDetail = "已连接，等待 Bridge 握手"
-                }
-            }
-
-            override fun onText(text: String) {
-                mainHandler.post { handleIncoming(text) }
-            }
-
-            override fun onDisconnected(reason: String, error: Throwable?) {
-                mainHandler.post {
-                    connected = false
-                    activeTurnId = null
-                    interruptingTurnId = null
-                    sessionContentDirty = false
-                    assistantDeltaBuffers.clear()
-                    pendingApprovals.clear()
-                    pendingRequests.clear()
-                    stopSessionSyncLoop()
-                    bridgeClient = null
-                    val detailSuffix = describeThrowable(error)
-                    val entry = findConnectionHistoryById(currentConnectionId)
-                    val targetUrl = entry?.url?.takeIf { it.isNotBlank() }
-                        ?: currentBridgeUrl?.takeIf { it.isNotBlank() }
-                        ?: bridgeUrl.trim().takeIf { it.isNotBlank() }
-                    if (shouldScheduleReconnect(targetUrl)) {
-                        scheduleReconnect(
-                            url = targetUrl.orEmpty(),
-                            reason = reason,
-                            error = error,
+        bridgeClient = BridgeClient(
+            URI.create(url),
+            object : BridgeClient.Listener {
+                override fun onOpen() {
+                    mainHandler.post {
+                        connected = false
+                        connectionDetail = "已建立连接，等待 Bridge 握手"
+                        mainHandler.removeCallbacks(bridgeHelloTimeoutRunnable)
+                        mainHandler.postDelayed(
+                            bridgeHelloTimeoutRunnable,
+                            bridgeConnectTimeoutSeconds.coerceAtLeast(1) * 1000L,
                         )
-                    } else {
-                        currentBridgeUrl = null
-                        if (sessions.isEmpty()) {
-                            selectedWorkspace = null
-                            currentPage = AppPage.Connection
-                        } else {
-                            showCachedHistoryAfterConnectionFailure()
-                        }
-                        connectionDetail = buildReconnectExhaustedDetail(reason + detailSuffix)
                     }
-                    disconnectRequested = false
                 }
-            }
-        })
+
+                override fun onText(text: String) {
+                    mainHandler.post { handleIncoming(text) }
+                }
+
+                override fun onDisconnected(code: Int, reason: String, error: Throwable?) {
+                    mainHandler.post {
+                        connected = false
+                        mainHandler.removeCallbacks(bridgeHelloTimeoutRunnable)
+                        activeTurnId = null
+                        interruptingTurnId = null
+                        sessionContentDirty = false
+                        assistantDeltaBuffers.clear()
+                        pendingApprovals.clear()
+                        pendingRequests.clear()
+                        stopSessionSyncLoop()
+                        bridgeClient = null
+                        val normalizedReason = normalizeBridgeDisconnectReason(code, reason, error)
+                        val entry = findConnectionHistoryById(currentConnectionId)
+                        val targetUrl = entry?.url?.takeIf { it.isNotBlank() }
+                            ?: currentBridgeUrl?.takeIf { it.isNotBlank() }
+                            ?: bridgeUrl.trim().takeIf { it.isNotBlank() }
+                        if (normalizedReason == "token 不正确或已过期") {
+                            currentBridgeUrl = null
+                            connectionDetail = normalizedReason
+                            currentPage = AppPage.Connection
+                            showNotice(connectionDetail)
+                        } else if (shouldScheduleReconnect(targetUrl)) {
+                            scheduleReconnect(
+                                url = targetUrl.orEmpty(),
+                                reason = normalizedReason,
+                                error = error,
+                            )
+                        } else {
+                            currentBridgeUrl = null
+                            if (sessions.isEmpty()) {
+                                selectedWorkspace = null
+                                currentPage = AppPage.Connection
+                            } else {
+                                showCachedHistoryAfterConnectionFailure()
+                            }
+                            connectionDetail = buildReconnectExhaustedDetail(normalizedReason)
+                        }
+                        disconnectRequested = false
+                    }
+                }
+            },
+            bridgeConnectTimeoutSeconds,
+            bridgePingIntervalSeconds,
+        )
 
         try {
             bridgeClient?.connect()
@@ -196,13 +211,16 @@ internal fun MainActivity.connectToBridge(
             } else {
                 currentBridgeUrl = null
                 showCachedHistoryAfterConnectionFailure()
-                connectionDetail = buildReconnectExhaustedDetail("连接失败: ${error.message}")
+                connectionDetail = buildReconnectExhaustedDetail(normalizeBridgeDisconnectReason(-1, "连接失败", error))
                 showNotice(connectionDetail)
             }
         }
     }
 
 internal fun MainActivity.applyHistoryConnection(entry: BridgeHistoryEntry) {
+        cancelReconnectSchedule(resetAttempt = true)
+        mainHandler.removeCallbacks(bridgeHelloTimeoutRunnable)
+        currentBridgeUrl = null
         currentConnectionId = entry.id
         bridgeUrl = entry.url
         saveBridgeSettings(entry.url, entry.id)
@@ -483,6 +501,29 @@ internal fun MainActivity.extractTokenFromUrl(url: String): String? {
             extractTokenFromQuery(URI.create(url).rawQuery ?: "")
         } catch (_: Exception) {
             null
+    }
+}
+
+internal fun MainActivity.normalizeBridgeDisconnectReason(
+        code: Int,
+        reason: String,
+        error: Throwable? = null,
+    ): String {
+        val rawReason = reason.trim()
+        val rawError = error?.message?.trim().orEmpty()
+        val combined = listOf(rawReason, rawError)
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+            .lowercase()
+        return when {
+            code == 1008 || rawReason.equals("unauthorized", ignoreCase = true) -> "token 不正确或已过期"
+            combined.contains("ping") || combined.contains("pong") -> "心跳超时，连接已断开"
+            combined.contains("timeout") || combined.contains("timed out") -> "连接超时"
+            rawReason.equals("连接失败", ignoreCase = true) && rawError.isNotBlank() -> "连接失败: $rawError"
+            rawReason.isNotBlank() && rawError.isNotBlank() && !rawReason.contains(rawError) -> "$rawReason: $rawError"
+            rawReason.isNotBlank() -> rawReason
+            rawError.isNotBlank() -> "连接失败: $rawError"
+            else -> "连接已断开"
         }
     }
 
@@ -510,6 +551,9 @@ internal fun MainActivity.copyTextToClipboard(label: String, text: String): Bool
     }
 
 internal fun MainActivity.pasteBridgeUrl() {
+        cancelReconnectSchedule(resetAttempt = true)
+        mainHandler.removeCallbacks(bridgeHelloTimeoutRunnable)
+        currentBridgeUrl = null
         val pasted = pasteBridgeUrlFromClipboard()
         if (pasted.isNullOrBlank()) {
             connectionDetail = "剪贴板里没有可粘贴的地址"
@@ -607,7 +651,7 @@ internal fun MainActivity.updateAutoReconnectMaxAttempts(maxAttempts: Int) {
             currentBridgeUrl = null
             selectedWorkspace = null
             currentPage = AppPage.Connection
-            connectionDetail = "已达到最大自动重连次数"
+            connectionDetail = "重连次数已用尽"
             showNotice(connectionDetail)
         }
     }
@@ -641,9 +685,15 @@ internal fun MainActivity.scheduleReconnect(
         val delayMs = reconnectDelayMillis(reconnectAttempt)
         reconnectScheduled = true
         currentBridgeUrl = normalizedUrl
+        val errorSuffix = describeThrowable(error)
+        val detailReason =
+            if (errorSuffix.isNotBlank() && reason.contains(error?.message.orEmpty(), ignoreCase = true)) {
+                reason
+            } else {
+                reason + errorSuffix
+            }
         connectionDetail = buildString {
-            append(reason.ifBlank { "连接已断开" })
-            append(describeThrowable(error))
+            append(detailReason.ifBlank { "连接已断开" })
             append("，")
             append((delayMs / 1000L).coerceAtLeast(1L))
             append(" 秒后自动重连")
@@ -681,7 +731,7 @@ internal fun MainActivity.canScheduleReconnectAttempt(attempt: Int): Boolean {
 
 internal fun MainActivity.buildReconnectExhaustedDetail(baseDetail: String): String {
         if (autoReconnectEnabled && autoReconnectMaxAttempts > 0 && reconnectAttempt >= autoReconnectMaxAttempts) {
-            return "$baseDetail，已达到最大自动重连次数"
+            return "重连次数已用尽"
         }
         return baseDetail
     }

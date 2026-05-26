@@ -62,6 +62,74 @@ internal fun MainActivity.sessionSyncIntervalDescription(): String {
     return "当前打开会话的内容轮询间隔。只影响 active session，不影响项目和历史列表刷新。"
 }
 
+internal fun MainActivity.loadBridgeConnectTimeoutSeconds(): Int {
+    val value = prefs.getInt(KEY_BRIDGE_CONNECT_TIMEOUT_SECONDS, DEFAULT_BRIDGE_CONNECT_TIMEOUT_SECONDS)
+    return value.coerceIn(1, 30)
+}
+
+internal fun MainActivity.updateBridgeConnectTimeoutSeconds(seconds: Int) {
+    val normalized = seconds.coerceIn(1, 30)
+    bridgeConnectTimeoutSeconds = normalized
+    prefs.edit().putInt(KEY_BRIDGE_CONNECT_TIMEOUT_SECONDS, normalized).apply()
+}
+
+internal fun MainActivity.bridgeConnectTimeoutMenuOptions(): List<SelectionMenuOption> {
+    return listOf(3, 5, 10, 15).map { seconds ->
+        SelectionMenuOption(
+            value = seconds.toString(),
+            label = "${seconds} 秒",
+            supporting =
+                if (seconds == DEFAULT_BRIDGE_CONNECT_TIMEOUT_SECONDS) {
+                    "默认值，弱网下更快暴露失败。"
+                } else {
+                    "适合网络更慢或跨网段连接。"
+                },
+        )
+    }
+}
+
+internal fun MainActivity.bridgeConnectTimeoutLabel(): String {
+    return "${bridgeConnectTimeoutSeconds} 秒"
+}
+
+internal fun MainActivity.bridgeConnectTimeoutDescription(): String {
+    return "WebSocket 建连超时。超时后会按当前自动重连策略处理。"
+}
+
+internal fun MainActivity.loadBridgePingIntervalSeconds(): Int {
+    val value = prefs.getInt(KEY_BRIDGE_PING_INTERVAL_SECONDS, DEFAULT_BRIDGE_PING_INTERVAL_SECONDS)
+    return value.coerceIn(5, 120)
+}
+
+internal fun MainActivity.updateBridgePingIntervalSeconds(seconds: Int) {
+    val normalized = seconds.coerceIn(5, 120)
+    bridgePingIntervalSeconds = normalized
+    prefs.edit().putInt(KEY_BRIDGE_PING_INTERVAL_SECONDS, normalized).apply()
+}
+
+internal fun MainActivity.bridgePingIntervalMenuOptions(): List<SelectionMenuOption> {
+    return listOf(10, 20, 30, 60).map { seconds ->
+        SelectionMenuOption(
+            value = seconds.toString(),
+            label = "${seconds} 秒",
+            supporting =
+                if (seconds == DEFAULT_BRIDGE_PING_INTERVAL_SECONDS) {
+                    "默认值，兼顾断线发现速度和功耗。"
+                } else {
+                    "更快发现断线，或更少心跳流量。"
+                },
+        )
+    }
+}
+
+internal fun MainActivity.bridgePingIntervalLabel(): String {
+    return "${bridgePingIntervalSeconds} 秒"
+}
+
+internal fun MainActivity.bridgePingIntervalDescription(): String {
+    return "WebSocket 心跳间隔。越短越快发现断线，但会增加心跳流量。"
+}
+
 internal fun MainActivity.loadSessionIncrementalSyncEnabled(): Boolean {
     return prefs.getBoolean(KEY_SESSION_INCREMENTAL_SYNC, true)
 }

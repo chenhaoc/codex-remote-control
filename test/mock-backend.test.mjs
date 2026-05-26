@@ -40,6 +40,37 @@ test('bridge hello includes stable bridge id', async () => {
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test('bridge rejects websocket clients with wrong token before hello', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-unauthorized-test-'));
+  const store = new StateStore(path.join(dir, 'state.json'));
+  const backend = new MockBackend();
+  const bridge = new BridgeServer({
+    backend,
+    store,
+    host: '127.0.0.1',
+    port: 0,
+    token: 'expected-token',
+    bridgeId: 'bridge-test-id',
+  });
+  await bridge.start();
+  const { port } = bridge.address();
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=wrong-token`);
+  const messages = [];
+  ws.on('message', (buffer) => {
+    messages.push(JSON.parse(buffer.toString('utf8')));
+  });
+
+  const [code, reasonBuffer] = await once(ws, 'close');
+  const reason = Buffer.isBuffer(reasonBuffer) ? reasonBuffer.toString('utf8') : String(reasonBuffer);
+  assert.equal(code, 1008);
+  assert.equal(reason, 'unauthorized');
+  assert.equal(messages.length, 0);
+
+  await bridge.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 test('state store clear removes stored bridge history', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-bridge-clear-state-test-'));
   const stateFile = path.join(dir, 'state.json');

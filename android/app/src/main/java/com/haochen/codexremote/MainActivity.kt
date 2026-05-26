@@ -35,10 +35,14 @@ internal const val KEY_AUTO_RECONNECT_MAX_ATTEMPTS = "auto_reconnect_max_attempt
 internal const val KEY_STARTUP_PAGE = "startup_page"
 internal const val KEY_SESSION_SYNC_INTERVAL_SECONDS = "session_sync_interval_seconds"
 internal const val KEY_SESSION_INCREMENTAL_SYNC = "session_incremental_sync"
+internal const val KEY_BRIDGE_CONNECT_TIMEOUT_SECONDS = "bridge_connect_timeout_seconds"
+internal const val KEY_BRIDGE_PING_INTERVAL_SECONDS = "bridge_ping_interval_seconds"
 internal const val MAX_CONNECTION_HISTORY = 8
 internal const val PROJECT_GROUP_DEFAULT_VISIBLE_SESSIONS = 8
 internal const val CODE_BROWSER_FILE_CACHE_SIZE = 24
 internal const val CODE_BROWSER_RENDER_CACHE_SIZE = 16
+internal const val DEFAULT_BRIDGE_CONNECT_TIMEOUT_SECONDS = 3
+internal const val DEFAULT_BRIDGE_PING_INTERVAL_SECONDS = 20
 internal const val DEFAULT_SESSION_SYNC_INTERVAL_SECONDS = 5
 
 class MainActivity : ComponentActivity() {
@@ -125,6 +129,8 @@ class MainActivity : ComponentActivity() {
     internal var startupPagePreference by mutableStateOf(AppPage.Chat)
     internal var sessionSyncIntervalSeconds by mutableStateOf(DEFAULT_SESSION_SYNC_INTERVAL_SECONDS)
     internal var sessionIncrementalSyncEnabled by mutableStateOf(true)
+    internal var bridgeConnectTimeoutSeconds by mutableStateOf(DEFAULT_BRIDGE_CONNECT_TIMEOUT_SECONDS)
+    internal var bridgePingIntervalSeconds by mutableStateOf(DEFAULT_BRIDGE_PING_INTERVAL_SECONDS)
     internal var reconnectAttempt = 0
     internal var reconnectScheduled = false
     internal var noticeToast: Toast? = null
@@ -154,6 +160,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    internal val bridgeHelloTimeoutRunnable = Runnable {
+        if (connected || bridgeClient == null) return@Runnable
+        val detail = "Bridge 握手超时（${bridgeConnectTimeoutSeconds.coerceAtLeast(1)} 秒）"
+        disconnectBridge(detail = detail, switchToConnectionPage = true)
+        showNotice(detail)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -169,6 +182,8 @@ class MainActivity : ComponentActivity() {
         startupPagePreference = loadStartupPagePreference()
         sessionSyncIntervalSeconds = loadSessionSyncIntervalSeconds()
         sessionIncrementalSyncEnabled = loadSessionIncrementalSyncEnabled()
+        bridgeConnectTimeoutSeconds = loadBridgeConnectTimeoutSeconds()
+        bridgePingIntervalSeconds = loadBridgePingIntervalSeconds()
         currentPage = startupPagePreference
         loadLocalSessionCache()
 

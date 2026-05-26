@@ -37,9 +37,13 @@ internal fun MainActivity.SettingsPage() {
     var startupPageExpanded by remember { mutableStateOf(false) }
     var reconnectAttemptsExpanded by remember { mutableStateOf(false) }
     var sessionSyncIntervalExpanded by remember { mutableStateOf(false) }
+    var bridgeConnectTimeoutExpanded by remember { mutableStateOf(false) }
+    var bridgePingIntervalExpanded by remember { mutableStateOf(false) }
     val startupPageOptions = startupPageMenuOptions()
     val reconnectAttemptOptions = autoReconnectAttemptMenuOptions()
     val sessionSyncIntervalOptions = sessionSyncIntervalMenuOptions()
+    val bridgeConnectTimeoutOptions = bridgeConnectTimeoutMenuOptions()
+    val bridgePingIntervalOptions = bridgePingIntervalMenuOptions()
 
     Column(
         modifier = Modifier
@@ -148,6 +152,42 @@ internal fun MainActivity.SettingsPage() {
                     },
                 )
                 BodyText(sessionSyncIntervalDescription())
+            }
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = uiSurface),
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(22.dp),
+            border = BorderStroke(1.dp, uiBorder),
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                SectionTitle("连接")
+                SelectionMenuField(
+                    label = "连接超时",
+                    selectedLabel = bridgeConnectTimeoutLabel(),
+                    expanded = bridgeConnectTimeoutExpanded,
+                    onExpandedChange = { bridgeConnectTimeoutExpanded = it },
+                    options = bridgeConnectTimeoutOptions,
+                    onSelect = { value ->
+                        updateBridgeConnectTimeoutSeconds(value.toIntOrNull() ?: DEFAULT_BRIDGE_CONNECT_TIMEOUT_SECONDS)
+                    },
+                )
+                BodyText(bridgeConnectTimeoutDescription())
+                SelectionMenuField(
+                    label = "心跳间隔",
+                    selectedLabel = bridgePingIntervalLabel(),
+                    expanded = bridgePingIntervalExpanded,
+                    onExpandedChange = { bridgePingIntervalExpanded = it },
+                    options = bridgePingIntervalOptions,
+                    onSelect = { value ->
+                        updateBridgePingIntervalSeconds(value.toIntOrNull() ?: DEFAULT_BRIDGE_PING_INTERVAL_SECONDS)
+                    },
+                )
+                BodyText(bridgePingIntervalDescription())
             }
         }
 

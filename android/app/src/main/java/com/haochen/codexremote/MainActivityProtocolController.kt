@@ -16,6 +16,10 @@ internal fun MainActivity.handleIncoming(text: String) {
                 val payload = message.optJSONObject("payload") ?: JSONObject()
                 val bridgeId = payload.optProtocolString("bridge_id")
                 val url = currentBridgeUrl?.takeIf { it.isNotBlank() } ?: bridgeUrl.trim()
+                mainHandler.removeCallbacks(bridgeHelloTimeoutRunnable)
+                connected = true
+                reconnectAttempt = 0
+                cancelReconnectSchedule(resetAttempt = false)
                 val entry = if (url.isNotBlank()) {
                     rememberConnectionHistory(url, bridgeId)
                 } else {
