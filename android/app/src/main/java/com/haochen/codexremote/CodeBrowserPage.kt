@@ -26,7 +26,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -74,7 +73,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
@@ -105,15 +103,16 @@ internal fun MainActivity.CodeBrowserPage(
     val selectedEntry = state.selectedEntry()
     val diffStats = buildDiffStatsLine(diffEntries = state.diffEntries, fallbackDiff = state.fallbackDiff)
     var fileListExpanded by remember(state.conversationItemId) { mutableStateOf(false) }
+    val hasDiffContent = state.hasDiffContent()
     val selectedPathLabel =
-        selectedEntry?.displayPath(basePath = state.basePath, maxLength = 96)
+        (selectedEntry?.displayPath(basePath = state.basePath, maxLength = 96)
             ?: state.selectedPath?.takeIf { it.isNotBlank() }?.let {
                 compactDiffDisplayPath(it, state.basePath, maxLength = 96)
             }
-            ?: "未选择文件"
+            ?: "未选择文件") + state.lineSuffixLabel()
 
     LaunchedEffect(state.conversationItemId, state.mode, state.selectedPath, state.fileReadState) {
-        if (state.mode == CodeBrowserMode.File && selectedEntry != null && state.fileReadState is CodeBrowserFileReadState.Idle) {
+        if (state.mode == CodeBrowserMode.File && state.canReadSelectedFile() && state.fileReadState is CodeBrowserFileReadState.Idle) {
             loadCodeBrowserFileContent(state)
         }
     }
@@ -133,7 +132,7 @@ internal fun MainActivity.CodeBrowserPage(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "文件修改",
+                    text = if (hasDiffContent) "文件修改" else "文件浏览",
                     color = uiText,
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold,
@@ -194,13 +193,14 @@ internal fun MainActivity.CodeBrowserPage(
                 CodeBrowserModeButton(
                     text = "Diff",
                     selected = state.mode == CodeBrowserMode.Diff,
+                    enabled = hasDiffContent,
                     modifier = Modifier.weight(1f),
                     onClick = { setCodeBrowserMode(CodeBrowserMode.Diff) },
                 )
                 CodeBrowserModeButton(
                     text = "文件",
                     selected = state.mode == CodeBrowserMode.File,
-                    enabled = selectedEntry != null,
+                    enabled = state.canReadSelectedFile(),
                     modifier = Modifier.weight(1f),
                     onClick = { setCodeBrowserMode(CodeBrowserMode.File) },
                 )
@@ -322,7 +322,7 @@ internal fun MainActivity.CodeBrowserPage(
                                     verticalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
                                     Text(
-                                        text = compactDiffDisplayPath(fileState.content.resolvedPath, state.basePath, maxLength = 96),
+                                        text = compactDiffDisplayPath(fileState.content.resolvedPath, state.basePath, maxLength = 96) + state.lineSuffixLabel(),
                                         color = uiMuted,
                                         fontSize = 11.sp,
                                         maxLines = 2,
@@ -332,6 +332,7 @@ internal fun MainActivity.CodeBrowserPage(
                                         text = fileState.content.content,
                                         mode = CodeTextMode.File,
                                         pathHint = fileState.content.resolvedPath,
+                                        scrollToLine = state.selectedLine,
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .weight(1f),
@@ -474,9 +475,11 @@ internal fun MainActivity.CodeBrowserTextPane(
     text: String,
     mode: CodeTextMode,
     pathHint: String? = null,
+    scrollToLine: Int? = null,
     modifier: Modifier = Modifier,
 ) {
     val verticalScroll = rememberScrollState()
+    val lazyListState = rememberLazyListState()
     val cacheKey = remember(mode, pathHint, text.length, text.hashCode()) {
         buildCodeBrowserRenderCacheKey(text, mode, pathHint)
     }
@@ -508,28 +511,41 @@ internal fun MainActivity.CodeBrowserTextPane(
         return
     }
 
+    val renderedContent = rendered
+    val renderedLines = renderedContent?.lines.orEmpty()
+
+    LaunchedEffect(renderedContent, mode, pathHint, scrollToLine, renderedLines.size) {
+        val line = scrollToLine?.takeIf { mode == CodeTextMode.File && it > 0 && renderedLines.isNotEmpty() } ?: return@LaunchedEffect
+        val targetItem = line.coerceIn(1, renderedLines.size)
+        lazyListState.animateScrollToItem(index = targetItem, scrollOffset = -64)
+    }
+
     SelectionContainer {
-        Box(
-            modifier = modifier
-                .background(c(0xFFF8FBF9), RoundedCornerShape(10.dp))
-                .verticalScroll(verticalScroll)
-                .padding(vertical = 8.dp),
-        ) {
-            val renderedContent = rendered
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                if (renderedContent?.lightweight == true) {
+        if (renderedLines.isNotEmpty()) {
+            CodeBrowserLineList(
+                renderedContent = renderedContent,
+                mode = mode,
+                listState = lazyListState,
+                modifier = modifier,
+            )
+        } else {
+            Box(
+                modifier = modifier
+                    .background(c(0xFFF8FBF9), RoundedCornerShape(10.dp))
+                    .verticalScroll(verticalScroll)
+                    .padding(vertical = 8.dp),
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (renderedContent?.lightweight == true) {
+                        Text(
+                            text = "大文件已切换到轻量渲染，优先保证打开速度。",
+                            color = uiMuted,
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(horizontal = 10.dp),
+                        )
+                    }
                     Text(
-                        text = "大文件已切换到轻量渲染，优先保证打开速度。",
-                        color = uiMuted,
-                        fontSize = 11.sp,
-                        modifier = Modifier.padding(horizontal = 10.dp),
-                    )
-                }
-                if (!renderedContent?.lines.isNullOrEmpty()) {
-                    CodeBrowserLineBlock(renderedContent = renderedContent, mode = mode)
-                } else {
-                    Text(
-                        text = rendered?.text ?: AnnotatedString(""),
+                        text = renderedContent?.text ?: AnnotatedString(""),
                         modifier = Modifier.padding(horizontal = 10.dp),
                         color = uiText,
                         fontFamily = FontFamily.Monospace,
@@ -543,33 +559,45 @@ internal fun MainActivity.CodeBrowserTextPane(
 }
 
 @Composable
-internal fun MainActivity.CodeBrowserLineBlock(
+internal fun MainActivity.CodeBrowserLineList(
     renderedContent: CodeBrowserRenderedContent?,
     mode: CodeTextMode,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    modifier: Modifier = Modifier,
 ) {
     val lines = renderedContent?.lines.orEmpty()
     val lineNumberWidth = maxOf(2, renderedContent?.lineNumberWidth ?: lines.size.toString().length)
 
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth(),
-        shape = RoundedCornerShape(10.dp),
-        color = c(0xFFFDFEFD),
-        border = androidx.compose.foundation.BorderStroke(1.dp, c(0xFFD8E8DB)),
+    LazyColumn(
+        state = listState,
+        modifier = modifier
+            .background(c(0xFFF8FBF9), RoundedCornerShape(10.dp))
+            .padding(vertical = 8.dp),
+        contentPadding = PaddingValues(horizontal = 0.dp),
     ) {
-        Column {
+        if (renderedContent?.lightweight == true) {
+            item(key = "lightweight") {
+                Text(
+                    text = "大文件已切换到轻量渲染，优先保证打开速度。",
+                    color = uiMuted,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                )
+            }
+        }
+        item(key = "header") {
             CodeBrowserCodeBlockHeader(mode = mode, lineCount = lines.size)
             HorizontalDivider(color = c(0xFFE0ECE4))
-            Column(
-                modifier = Modifier.background(c(0xFFFEFFFE)),
-            ) {
-                lines.forEachIndexed { index, line ->
-                    if (mode == CodeTextMode.Diff) {
-                        CodeBrowserDiffLine(index = index, line = line, lineNumberWidth = lineNumberWidth)
-                    } else {
-                        CodeBrowserFileLine(index = index, line = line, lineNumberWidth = lineNumberWidth)
-                    }
-                }
+        }
+        items(
+            count = lines.size,
+            key = { index -> "line-$index" },
+        ) { index ->
+            val line = lines[index]
+            if (mode == CodeTextMode.Diff) {
+                CodeBrowserDiffLine(index = index, line = line, lineNumberWidth = lineNumberWidth)
+            } else {
+                CodeBrowserFileLine(index = index, line = line, lineNumberWidth = lineNumberWidth)
             }
         }
     }

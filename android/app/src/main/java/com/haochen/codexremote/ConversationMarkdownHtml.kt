@@ -458,8 +458,20 @@ internal fun buildConversationInlineHtml(text: String): String {
                         ) {
                             val urlEnd = source.indexOf(')', startIndex = urlStart + 1)
                             if (urlEnd != -1) {
-                                val label = parseSegment(source.substring(index + 1, labelEnd), allowAutolinks = false)
-                                val url = escapeConversationHtmlAttribute(source.substring(urlStart + 1, urlEnd))
+                                val rawLabel = source.substring(index + 1, labelEnd)
+                                val rawUrl = source.substring(urlStart + 1, urlEnd)
+                                val fileTarget = conversationFileTargetFromLinkTarget(rawUrl)
+                                    ?.withFallbackLine(rawLabel)
+                                val href = fileTarget?.browserHref() ?: rawUrl
+                                val labelLine = fileTarget?.line ?: readConversationFileLineReference(rawUrl)
+                                val labelText =
+                                    if (labelLine != null && isConversationLikelyFileLabel(rawLabel)) {
+                                        appendConversationLineToLabel(rawLabel, labelLine)
+                                    } else {
+                                        fileTarget?.appendLineToLabel(rawLabel) ?: rawLabel
+                                    }
+                                val label = parseSegment(labelText, allowAutolinks = false)
+                                val url = escapeConversationHtmlAttribute(href)
                                 append("""<a href="$url">$label</a>""")
                                 index = urlEnd + 1
                                 continue

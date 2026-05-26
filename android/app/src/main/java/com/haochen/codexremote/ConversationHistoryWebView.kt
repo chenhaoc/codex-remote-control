@@ -45,6 +45,7 @@ internal fun ConversationHistoryWebView(
     onScrollCommandHandled: (ConversationScrollCommand) -> Unit = {},
     onCanScrollToBottomChange: (Boolean) -> Unit = {},
     onOpenCodeBrowser: (itemId: String, path: String?, scrollY: Int) -> Unit,
+    onOpenCodeBrowserFile: (path: String, line: Int?, scrollY: Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -70,6 +71,7 @@ internal fun ConversationHistoryWebView(
             context = context,
             onOpenLink = { url -> uriHandler.openUri(url) },
             onOpenCodeBrowser = onOpenCodeBrowser,
+            onOpenCodeBrowserFile = onOpenCodeBrowserFile,
             onScrollChanged = { view ->
                 onCanScrollToBottomChange(!isConversationNearBottom(view))
             },
@@ -408,6 +410,7 @@ private fun buildConversationWebView(
     context: Context,
     onOpenLink: (String) -> Unit,
     onOpenCodeBrowser: (itemId: String, path: String?, scrollY: Int) -> Unit,
+    onOpenCodeBrowserFile: (path: String, line: Int?, scrollY: Int) -> Unit,
     onScrollChanged: (WebView) -> Unit,
     onPageFinished: (WebView) -> Unit,
 ): WebView =
@@ -448,7 +451,7 @@ private fun buildConversationWebView(
                     request: WebResourceRequest?,
                 ): Boolean {
                     val url = request?.url?.toString() ?: return false
-                    return handleConversationUrl(url, view?.scrollY ?: 0, onOpenLink, onOpenCodeBrowser)
+                    return handleConversationUrl(url, view?.scrollY ?: 0, onOpenLink, onOpenCodeBrowser, onOpenCodeBrowserFile)
                 }
 
                 @Deprecated("Deprecated in Java")
@@ -457,7 +460,7 @@ private fun buildConversationWebView(
                     url: String?,
                 ): Boolean {
                     if (url.isNullOrBlank()) return false
-                    return handleConversationUrl(url, view?.scrollY ?: 0, onOpenLink, onOpenCodeBrowser)
+                    return handleConversationUrl(url, view?.scrollY ?: 0, onOpenLink, onOpenCodeBrowser, onOpenCodeBrowserFile)
                 }
 
                 override fun onPageFinished(
@@ -475,15 +478,32 @@ private fun handleConversationUrl(
     currentScrollY: Int,
     onOpenLink: (String) -> Unit,
     onOpenCodeBrowser: (itemId: String, path: String?, scrollY: Int) -> Unit,
+    onOpenCodeBrowserFile: (path: String, line: Int?, scrollY: Int) -> Unit,
 ): Boolean {
     val uri = Uri.parse(rawUrl)
     if (uri.scheme == "codex-code-browser") {
-        val itemId = uri.getQueryParameter("itemId").orEmpty()
-        if (itemId.isNotBlank()) {
-            onOpenCodeBrowser(itemId, uri.getQueryParameter("path"), currentScrollY)
+        when (uri.host) {
+            "file" -> {
+                val path = uri.getQueryParameter("path").orEmpty()
+                if (path.isNotBlank()) {
+                    onOpenCodeBrowserFile(path, uri.getQueryParameter("line")?.toIntOrNull(), currentScrollY)
+                }
+            }
+
+            else -> {
+                val itemId = uri.getQueryParameter("itemId").orEmpty()
+                if (itemId.isNotBlank()) {
+                    onOpenCodeBrowser(itemId, uri.getQueryParameter("path"), currentScrollY)
+                }
+            }
         }
         return true
     }
+    conversationFileTargetFromLinkTarget(rawUrl)?.let { target ->
+        onOpenCodeBrowserFile(target.path, target.line, currentScrollY)
+        return true
+    }
+    if (rawUrl.equals("about:blank", ignoreCase = true)) return true
     onOpenLink(rawUrl)
     return true
 }

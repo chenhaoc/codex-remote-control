@@ -2,6 +2,8 @@ package com.haochen.codexremote
 
 import org.json.JSONObject
 
+private const val CODE_BROWSER_FILE_READ_TIMEOUT_MS = 20000L
+
 internal fun MainActivity.openCodeBrowser(itemId: String, selectedPath: String?, scrollY: Int) {
         val sessionId = activeSessionId
         val item = conversationItems.firstOrNull { it.id == itemId }
@@ -30,6 +32,34 @@ internal fun MainActivity.openCodeBrowser(itemId: String, selectedPath: String?,
         codeBrowserState = state
     }
 
+internal fun MainActivity.openCodeBrowserFile(path: String, line: Int?, scrollY: Int) {
+        val requestedPath = path.trim()
+        if (requestedPath.isBlank()) {
+            showNotice("文件路径为空")
+            return
+        }
+        val sessionId = activeSessionId
+        if (sessionId.isNullOrBlank()) {
+            showNotice("请先选择一个会话")
+            return
+        }
+
+        chatRestoreScrollY = scrollY.coerceAtLeast(0)
+        val selectedLine = line?.takeIf { it > 0 }
+        val title = requestedPath.substringAfterLast('/').ifBlank { requestedPath }
+        codeBrowserState = CodeBrowserState(
+            conversationItemId = "file:${requestedPath.hashCode()}:${selectedLine ?: 0}",
+            sessionId = sessionId,
+            title = title + (selectedLine?.let { " (line $it)" } ?: ""),
+            basePath = activeSession()?.cwd,
+            diffEntries = emptyList(),
+            fallbackDiff = null,
+            selectedPath = requestedPath,
+            selectedLine = selectedLine,
+            mode = CodeBrowserMode.File,
+        )
+    }
+
 internal fun MainActivity.closeCodeBrowser() {
         codeBrowserState = null
     }
@@ -47,6 +77,8 @@ internal fun MainActivity.selectCodeBrowserPath(path: String) {
 internal fun MainActivity.setCodeBrowserMode(mode: CodeBrowserMode) {
         val state = codeBrowserState ?: return
         if (state.mode == mode) return
+        if (mode == CodeBrowserMode.Diff && !state.hasDiffContent()) return
+        if (mode == CodeBrowserMode.File && !state.canReadSelectedFile()) return
         codeBrowserState = state.copy(
             mode = mode,
             fileReadState = when {
@@ -59,16 +91,16 @@ internal fun MainActivity.setCodeBrowserMode(mode: CodeBrowserMode) {
 internal fun MainActivity.loadCodeBrowserFileContent(state: CodeBrowserState) {
         val entry = state.selectedEntry()
         val sessionId = state.sessionId ?: activeSessionId
-        if (entry == null || sessionId.isNullOrBlank()) {
+        if (sessionId.isNullOrBlank()) {
             codeBrowserState = state.copy(fileReadState = CodeBrowserFileReadState.Error("没有可读取的文件内容"))
             return
         }
-        if (entry.kind.trim() == "delete" && entry.movePath.isNullOrBlank()) {
+        if (entry != null && entry.kind.trim() == "delete" && entry.movePath.isNullOrBlank()) {
             codeBrowserState = state.copy(fileReadState = CodeBrowserFileReadState.Error("该文件已经被删除，当前内容无法读取"))
             return
         }
 
-        val candidatePaths = entry.browseCandidates()
+        val candidatePaths = state.selectedFileCandidates()
         if (candidatePaths.isEmpty()) {
             codeBrowserState = state.copy(fileReadState = CodeBrowserFileReadState.Error("没有可读取的文件路径"))
             return
@@ -79,6 +111,23 @@ internal fun MainActivity.loadCodeBrowserFileContent(state: CodeBrowserState) {
         }
         val browsePath = candidatePaths.first()
         codeBrowserState = state.copy(fileReadState = CodeBrowserFileReadState.Loading)
+        mainHandler.postDelayed(
+            {
+                val current = codeBrowserState ?: return@postDelayed
+                if (
+                    current.conversationItemId == state.conversationItemId &&
+                    current.selectedPath == browsePath &&
+                    current.fileReadState is CodeBrowserFileReadState.Loading
+                ) {
+                    codeBrowserState = current.copy(
+                        fileReadState = CodeBrowserFileReadState.Error(
+                            "文件读取超时\n候选路径: ${candidatePaths.joinToString(" | ") { compactDiffDisplayPath(it, state.basePath, maxLength = 64) }}",
+                        ),
+                    )
+                }
+            },
+            CODE_BROWSER_FILE_READ_TIMEOUT_MS,
+        )
 
         fun requestAt(index: Int) {
             val requestedPath = candidatePaths.getOrNull(index)
@@ -135,6 +184,8 @@ internal fun MainActivity.loadCodeBrowserFileContent(state: CodeBrowserState) {
                         ),
                     )
                 }
+
+                override fun suppressDefaultErrorUi(): Boolean = true
             })
 
             if (!sent) {

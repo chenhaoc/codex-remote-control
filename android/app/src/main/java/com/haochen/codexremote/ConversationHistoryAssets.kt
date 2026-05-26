@@ -2,6 +2,76 @@ package com.haochen.codexremote
 
 internal fun buildConversationScript(): String =
     """
+    function findConversationAnchor(target) {
+      while (target && target !== document) {
+        if (target.tagName && target.tagName.toLowerCase() === 'a') return target;
+        target = target.parentNode;
+      }
+      return null;
+    }
+
+    function normalizeConversationFileTarget(value) {
+      if (!value) return '';
+      var text = String(value).trim();
+      if (!text) return '';
+      if (/^codex-code-browser:/i.test(text)) return '';
+      if (/^about:blank\//i.test(text)) {
+        text = text.substring('about:blank/'.length);
+      }
+      if (/^file:/i.test(text)) {
+        text = text.replace(/^file:\/*/i, '/');
+      } else {
+        var editorMatch = text.match(/^(?:vscode|vscode-insiders|cursor|zed|sublime|txmt):\/\/file(\/[^?#]*)/i);
+        if (editorMatch) {
+          text = editorMatch[1];
+        } else if (/^[a-z][a-z0-9+.-]*:/i.test(text)) {
+          return '';
+        }
+      }
+      try {
+        text = decodeURIComponent(text);
+      } catch (error) {
+      }
+      text = text.replace(/\s*\(\s*line\s+\d+\s*\)\s*$/i, '');
+      return text;
+    }
+
+    function isConversationLikelyFileTarget(value) {
+      var text = normalizeConversationFileTarget(value);
+      if (!text) return '';
+      var lineMatch = text.match(/:(\d+)(?::\d+)?$/) ||
+        text.match(/[#?&](?:line=|line-|L)(\d+)(?:\D|$)/i) ||
+        String(value || '').match(/\(\s*line\s+(\d+)\s*\)\s*$/i);
+      var withoutLine = text.split('#')[0].split('?')[0].replace(/:\d+(?::\d+)?$/, '').trim();
+      var name = withoutLine.split('/').pop() || withoutLine;
+      if (!name || name === '.' || name === '..') return '';
+      var absolute = withoutLine.charAt(0) === '/';
+      if (!absolute && /\s/.test(text)) return '';
+      var extensionMatch = name.match(/\.([A-Za-z0-9_-]{1,12})$/);
+      if (absolute || (withoutLine.indexOf('/') !== -1 && extensionMatch)) {
+        return {
+          path: withoutLine,
+          line: lineMatch ? parseInt(lineMatch[1], 10) : 0
+        };
+      }
+      return null;
+    }
+
+    document.addEventListener('click', function(event) {
+      var anchor = findConversationAnchor(event.target);
+      if (!anchor) return;
+      var target = isConversationLikelyFileTarget(anchor.getAttribute('href')) ||
+        isConversationLikelyFileTarget(anchor.textContent);
+      if (!target) return;
+      event.preventDefault();
+      event.stopPropagation();
+      var nextHref = 'codex-code-browser://file?path=' + encodeURIComponent(target.path);
+      if (target.line > 0) {
+        nextHref += '&line=' + encodeURIComponent(String(target.line));
+      }
+      window.location.href = nextHref;
+    }, true);
+
     function toggleConversationDiff(event, panelId, button) {
       if (event) {
         event.preventDefault();
@@ -480,6 +550,11 @@ internal fun buildConversationCss(): String =
         background: #E5F2E8 !important;
         border-color: #C9DFCf !important;
         line-height: 1.45 !important;
+    }
+
+    .cr-file-path-link {
+        color: inherit !important;
+        text-decoration: none !important;
     }
 
     .cr-md-inline-code-keyword {

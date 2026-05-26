@@ -158,6 +158,9 @@ internal fun MainActivity.ChatPage() {
                     onOpenCodeBrowser = { itemId, path, scrollY ->
                         openCodeBrowser(itemId, path, scrollY)
                     },
+                    onOpenCodeBrowserFile = { path, line, scrollY ->
+                        openCodeBrowserFile(path, line, scrollY)
+                    },
                     modifier = Modifier
                         .fillMaxSize()
                         .background(Color.White),

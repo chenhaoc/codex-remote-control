@@ -152,12 +152,19 @@ internal fun conversationCodeKeywords(language: ConversationCodeLanguage): Set<S
             setOf()
     }
 
-internal fun buildConversationInlineCodeHtml(text: String): String =
-    buildString {
-        append("""<code class="cr-md-inline-code">""")
-        append(highlightConversationInlineCode(text))
-        append("</code>")
-    }
+internal fun buildConversationInlineCodeHtml(text: String): String {
+    val fileTarget = conversationFileTargetFromLinkTarget(text)?.withFallbackLine(text)
+    val displayText = fileTarget?.appendLineToLabel(text) ?: text
+    val codeHtml =
+        buildString {
+            append("""<code class="cr-md-inline-code">""")
+            append(highlightConversationInlineCode(displayText))
+            append("</code>")
+        }
+    return fileTarget?.let {
+        """<a class="cr-file-path-link" href="${it.browserHref()}">$codeHtml</a>"""
+    } ?: codeHtml
+}
 
 internal fun highlightConversationInlineCode(text: String): String =
     buildString {

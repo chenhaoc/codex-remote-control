@@ -59,6 +59,7 @@ internal data class CodeBrowserState(
     val diffEntries: List<ConversationDiffEntry>,
     val fallbackDiff: String?,
     val selectedPath: String?,
+    val selectedLine: Int? = null,
     val mode: CodeBrowserMode = CodeBrowserMode.Diff,
     val fileReadState: CodeBrowserFileReadState = CodeBrowserFileReadState.Idle,
 ) {
@@ -66,6 +67,17 @@ internal data class CodeBrowserState(
         if (diffEntries.isEmpty()) return null
         return diffEntries.firstOrNull { it.browsePath() == selectedPath } ?: diffEntries.first()
     }
+
+    fun selectedFileCandidates(): List<String> {
+        return selectedEntry()?.browseCandidates()
+            ?: listOfNotNull(selectedPath?.trim()?.takeIf { it.isNotBlank() })
+    }
+
+    fun canReadSelectedFile(): Boolean = selectedFileCandidates().isNotEmpty()
+
+    fun hasDiffContent(): Boolean = diffEntries.isNotEmpty() || !fallbackDiff.isNullOrBlank()
+
+    fun lineSuffixLabel(): String = selectedLine?.takeIf { it > 0 }?.let { " (line $it)" }.orEmpty()
 }
 
 internal enum class CodeBrowserMode {

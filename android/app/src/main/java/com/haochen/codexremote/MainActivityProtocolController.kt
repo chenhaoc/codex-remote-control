@@ -35,8 +35,7 @@ internal fun MainActivity.handleIncoming(text: String) {
             }
 
             "event" -> handleEvent(message)
-            "response", "pong" -> handleResponse(message)
-            "error" -> appendSystemNote("错误: ${safeJson(message.optJSONObject("error"))}")
+            "response", "pong", "error" -> handleResponse(message)
         }
     }
 
