@@ -16,6 +16,12 @@
 
 ## 构建
 
+初始化本机个人签名 key，一份 key 同时用于 debug 和 release：
+
+```bash
+npm run apk:release:setup
+```
+
 Debug APK:
 
 ```bash
@@ -37,10 +43,10 @@ bash android/scripts/build-release-apk.sh
 Release 产物：
 
 ```text
-android/app/build/outputs/apk/release/app-release-unsigned.apk
+android/app/build/outputs/apk/release/codex-remote-control-v0.1.0-release.apk
 ```
 
-Release APK 默认未签名，分发前需要自行签名。
+Debug 和 release APK 都使用本机 `android/release.keystore` 签名，后续升级必须继续使用同一份 keystore 和 `release-signing.properties`。
 
 ## 说明
 

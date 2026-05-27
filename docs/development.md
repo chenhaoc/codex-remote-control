@@ -43,6 +43,7 @@ npm run bridge
 Build the Android debug APK:
 
 ```bash
+npm run apk:release:setup # one time per signing key
 npm run apk
 ```
 
@@ -69,7 +70,8 @@ source ~/.zshrc && cd android && ./gradlew assembleDebug
 - Bridge or protocol changes: run `npm test`.
 - Android code changes: run `source ~/.zshrc && cd android && ./gradlew :app:compileDebugKotlin`.
 - Packaging or install behavior changes: run `source ~/.zshrc && cd android && ./gradlew assembleDebug`.
-- Release packaging changes: run `source ~/.zshrc && cd android && ./gradlew assembleRelease`.
+- Packaging changes: run `source ~/.zshrc && cd android && ./gradlew assembleDebug assembleRelease`.
+  APK packaging requires the local signing files created by `npm run apk:release:setup`.
 
 Docs-only changes do not require Android compilation, but this repository is small enough that running the bridge tests is usually cheap.
 

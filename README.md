@@ -45,6 +45,12 @@ ws://192.168.1.10:8787/?token=...
 
 By default the bridge stores its token, bridge id, state, and optional sync logs under `~/.config/codex_remote_control/`.
 
+Create the local personal Android signing key once:
+
+```bash
+npm run apk:release:setup
+```
+
 Build the Android debug APK:
 
 ```bash
@@ -52,6 +58,7 @@ npm run apk
 ```
 
 Install `android/app/build/outputs/apk/debug/app-debug.apk`, open the app, and paste the bridge URL.
+Debug and release APKs use the same local personal signing key, so they can share app data and replace each other after the first install with that key.
 
 Build the Android release APK:
 
@@ -59,8 +66,8 @@ Build the Android release APK:
 npm run apk:release
 ```
 
-The release build outputs `android/app/build/outputs/apk/release/app-release-unsigned.apk`.
-Sign it before distributing beyond local/private use.
+The release build outputs `android/app/build/outputs/apk/release/codex-remote-control-v0.1.0-release.apk`.
+It is signed with the local personal key under `android/release.keystore`.
 
 More setup options are documented in [Usage](docs/usage.md).
 

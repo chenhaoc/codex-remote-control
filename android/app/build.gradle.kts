@@ -1,10 +1,37 @@
+import org.gradle.api.GradleException
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val localDebugKeystore = rootProject.file("debug.keystore")
+val releaseSigningPropertiesFile = rootProject.file("release-signing.properties")
+val releaseSigningProperties = Properties().apply {
+    if (releaseSigningPropertiesFile.exists()) {
+        releaseSigningPropertiesFile.inputStream().use { load(it) }
+    }
+}
+fun releaseSigningProperty(name: String): String? =
+    releaseSigningProperties.getProperty(name)?.trim()?.takeIf { it.isNotEmpty() }
+val releaseKeystoreFile = releaseSigningProperty("storeFile")?.let { rootProject.file(it) }
+val hasPersonalReleaseSigning =
+    releaseKeystoreFile?.exists() == true &&
+        releaseSigningProperty("storePassword") != null &&
+        releaseSigningProperty("keyAlias") != null &&
+        releaseSigningProperty("keyPassword") != null
+val requestedSignedApkBuild = gradle.startParameter.taskNames.any { taskName ->
+    val normalized = taskName.substringAfterLast(":").lowercase()
+    normalized == "assemble" ||
+        normalized.startsWith("assemble") ||
+        normalized.startsWith("install")
+}
+if (requestedSignedApkBuild && !hasPersonalReleaseSigning) {
+    throw GradleException(
+        "Missing Android signing config. Run `bash android/scripts/create-release-keystore.sh` first.",
+    )
+}
 val gitCommitShort =
     providers.exec {
         commandLine("git", "rev-parse", "--short", "HEAD")
@@ -23,18 +50,25 @@ android {
     }
 
     signingConfigs {
-        create("localDebug") {
-            storeFile = localDebugKeystore
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+        if (hasPersonalReleaseSigning) {
+            create("personal") {
+                storeFile = checkNotNull(releaseKeystoreFile)
+                storePassword = checkNotNull(releaseSigningProperty("storePassword"))
+                keyAlias = checkNotNull(releaseSigningProperty("keyAlias"))
+                keyPassword = checkNotNull(releaseSigningProperty("keyPassword"))
+            }
         }
     }
 
     buildTypes {
         debug {
-            if (localDebugKeystore.exists()) {
-                signingConfig = signingConfigs.getByName("localDebug")
+            if (hasPersonalReleaseSigning) {
+                signingConfig = signingConfigs.getByName("personal")
+            }
+        }
+        release {
+            if (hasPersonalReleaseSigning) {
+                signingConfig = signingConfigs.getByName("personal")
             }
         }
     }

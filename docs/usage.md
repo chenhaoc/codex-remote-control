@@ -116,6 +116,7 @@ Useful options:
 Build the debug APK:
 
 ```bash
+npm run apk:release:setup # one time per signing key
 npm run apk
 ```
 
@@ -134,10 +135,11 @@ npm run apk:release
 Output:
 
 ```text
-android/app/build/outputs/apk/release/app-release-unsigned.apk
+android/app/build/outputs/apk/release/codex-remote-control-v0.1.0-release.apk
 ```
 
-The release APK is unsigned by default. Sign it before distributing outside local/private use.
+Debug and release APKs are signed with the same local personal key in `android/release.keystore`.
+Keep `android/release.keystore` and `android/release-signing.properties` backed up securely; future upgrades must use the same key.
 
 You can also open `android/` in Android Studio.
 
