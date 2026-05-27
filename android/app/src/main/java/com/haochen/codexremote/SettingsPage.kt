@@ -1,5 +1,7 @@
 package com.haochen.codexremote
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -34,6 +36,16 @@ import androidx.compose.ui.unit.sp
 @Composable
 internal fun MainActivity.SettingsPage() {
     val scrollState = rememberScrollState()
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json"),
+    ) { uri ->
+        uri?.let(::exportSettingsBackup)
+    }
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        uri?.let(::prepareSettingsBackupImport)
+    }
     var startupPageExpanded by remember { mutableStateOf(false) }
     var reconnectAttemptsExpanded by remember { mutableStateOf(false) }
     var sessionSyncIntervalExpanded by remember { mutableStateOf(false) }
@@ -102,6 +114,53 @@ internal fun MainActivity.SettingsPage() {
                     },
                 )
                 BodyText(autoReconnectMaxAttemptsDescription())
+            }
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = uiSurface),
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(22.dp),
+            border = BorderStroke(1.dp, uiBorder),
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                SectionTitle("备份")
+                Surface(
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
+                    color = uiSurfaceAlt,
+                    border = BorderStroke(1.dp, uiBorder),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Label("设置和连接信息")
+                        BodyText("导出 Bridge URL、token、连接历史和本页设置；不包含会话缓存、聊天内容或签名文件。")
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = { importLauncher.launch(arrayOf("application/json", "text/*", "*/*")) },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("导入")
+                    }
+                    Button(
+                        onClick = { exportLauncher.launch(defaultBackupFileName()) },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = uiPrimary),
+                    ) {
+                        Text("导出")
+                    }
+                }
             }
         }
 
@@ -314,6 +373,35 @@ internal fun MainActivity.SettingsPage() {
                     colors = ButtonDefaults.buttonColors(containerColor = uiPrimary),
                 ) {
                     Text("确认清除")
+                }
+            }
+        }
+    }
+
+    backupImportPreview?.let { preview ->
+        AppCenteredDialog(onDismiss = { cancelSettingsBackupImport() }) {
+            Text(
+                text = "导入备份",
+                color = uiText,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            BodyText(
+                "将覆盖当前连接信息和本页设置。备份包含 ${preview.connectionCount} 条连接记录" +
+                    if (preview.hasCurrentConnection) "，并包含当前连接。" else "。",
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+            ) {
+                OutlinedButton(onClick = { cancelSettingsBackupImport() }) {
+                    Text("取消")
+                }
+                Button(
+                    onClick = { confirmSettingsBackupImport(preview) },
+                    colors = ButtonDefaults.buttonColors(containerColor = uiPrimary),
+                ) {
+                    Text("确认导入")
                 }
             }
         }

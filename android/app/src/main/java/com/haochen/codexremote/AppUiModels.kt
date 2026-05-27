@@ -117,6 +117,12 @@ internal data class SelectionMenuOption(
     val supporting: String? = null,
 )
 
+internal data class BackupImportPreview(
+    val document: String,
+    val connectionCount: Int,
+    val hasCurrentConnection: Boolean,
+)
+
 internal fun interface ResponseHandler {
     fun onResponse(response: JSONObject)
 

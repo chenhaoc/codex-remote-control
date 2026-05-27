@@ -107,6 +107,7 @@ class MainActivity : ComponentActivity() {
     internal var connectionEditState by mutableStateOf<ConnectionEditDialogState?>(null)
     internal var connectionRemovalState by mutableStateOf<ConnectionRemovalDialogState?>(null)
     internal var clearAllCacheDialogVisible by mutableStateOf(false)
+    internal var backupImportPreview by mutableStateOf<BackupImportPreview?>(null)
     internal var sessionInfoSheetState by mutableStateOf<SessionInfoSheetState?>(null)
     internal var composerText by mutableStateOf("")
     internal var newChatDraft by mutableStateOf<NewChatDraft?>(null)
