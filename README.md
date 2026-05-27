@@ -1,4 +1,10 @@
+<p align="center">
+  <img src="docs/assets/app-icon.svg" width="96" height="96" alt="CodexRemote icon">
+</p>
+
 # Codex Remote Control
+
+[中文 README](README.zh-CN.md)
 
 Codex Remote Control is a small self-hosted bridge plus Android client for controlling Codex sessions from a phone on a private network.
 
@@ -57,7 +63,7 @@ Build the Android debug APK:
 npm run apk
 ```
 
-Install `android/app/build/outputs/apk/debug/app-debug.apk`, open the app, and paste the bridge URL.
+Install `android/app/build/outputs/apk/debug/codex-remote-control-v0.1.0-debug.apk`, open the app, and paste the bridge URL.
 Debug and release APKs use the same local personal signing key, so they can share app data and replace each other after the first install with that key.
 
 Build the Android release APK:
@@ -103,6 +109,12 @@ See [Development](docs/development.md) for repository layout, validation command
 The bridge can control Codex sessions and approve local commands. Bind it only to a trusted private network, keep the token secret, and avoid exposing it directly to the public internet.
 
 See [SECURITY.md](SECURITY.md) for supported reporting and deployment guidance.
+
+## Q&A
+
+### How should I solve networking between the phone and bridge host?
+
+Codex Remote Control expects the Android app to reach your own bridge over a trusted network. For different locations, do not expose the bridge directly to the public internet. Prefer your own tunneling or private mesh/VPN setup, such as a reverse tunnel, WireGuard, Tailscale, ZeroTier, or another self-managed overlay network.
 
 ## License
 

@@ -1,3 +1,4 @@
+import com.android.build.gradle.internal.api.BaseVariantOutputImpl
 import org.gradle.api.GradleException
 import java.util.Properties
 
@@ -36,6 +37,7 @@ val gitCommitShort =
     providers.exec {
         commandLine("git", "rev-parse", "--short", "HEAD")
     }.standardOutput.asText.get().trim().ifBlank { "unknown" }
+val appVersionName = "0.1.0"
 
 android {
     namespace = "com.haochen.codexremote"
@@ -46,7 +48,7 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = appVersionName
     }
 
     signingConfigs {
@@ -89,6 +91,13 @@ android {
 
     defaultConfig {
         buildConfigField("String", "GIT_COMMIT_SHORT", "\"$gitCommitShort\"")
+    }
+}
+
+android.applicationVariants.all variant@{
+    outputs.all {
+        (this as BaseVariantOutputImpl).outputFileName =
+            "codex-remote-control-v$appVersionName-${this@variant.name}.apk"
     }
 }
 

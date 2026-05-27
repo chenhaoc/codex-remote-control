@@ -1,6 +1,6 @@
 # Usage
 
-This guide covers the local bridge and Android debug APK workflow.
+This guide covers the local bridge and Android APK workflow.
 
 ## Requirements
 
@@ -123,7 +123,7 @@ npm run apk
 Output:
 
 ```text
-android/app/build/outputs/apk/debug/app-debug.apk
+android/app/build/outputs/apk/debug/codex-remote-control-v0.1.0-debug.apk
 ```
 
 Build the release APK:

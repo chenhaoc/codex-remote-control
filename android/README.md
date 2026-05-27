@@ -31,7 +31,7 @@ bash android/scripts/build-apk.sh
 Debug 产物：
 
 ```text
-android/app/build/outputs/apk/debug/app-debug.apk
+android/app/build/outputs/apk/debug/codex-remote-control-v0.1.0-debug.apk
 ```
 
 Release APK:
@@ -47,6 +47,12 @@ android/app/build/outputs/apk/release/codex-remote-control-v0.1.0-release.apk
 ```
 
 Debug 和 release APK 都使用本机 `android/release.keystore` 签名，后续升级必须继续使用同一份 keystore 和 `release-signing.properties`。
+
+## Q&A
+
+### 网络怎么解决？
+
+Android 客户端需要能访问运行 bridge 的主机。局域网内可以直接使用 bridge 输出的 `ws://HOST:PORT/?token=...`；跨网络使用时，推荐自行使用外网穿透或异地组网方案，例如反向隧道、WireGuard、Tailscale、ZeroTier 或其他自维护 overlay network。不要把 bridge 直接裸露到公网。
 
 ## 说明
 

@@ -19,7 +19,7 @@ First formal release of Codex Remote Control.
 
 ### Release Artifacts
 
-- Android debug APK: `android/app/build/outputs/apk/debug/app-debug.apk`
+- Android debug APK: `android/app/build/outputs/apk/debug/codex-remote-control-v0.1.0-debug.apk`
 - Android release APK: `android/app/build/outputs/apk/release/codex-remote-control-v0.1.0-release.apk`
 
 ### Notes
