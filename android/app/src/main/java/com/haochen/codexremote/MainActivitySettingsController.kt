@@ -1,7 +1,40 @@
 package com.haochen.codexremote
 
+import android.content.Intent
+import android.net.Uri
+
+private const val PROJECT_GITHUB_URL = "https://github.com/chenhaoc/codex-remote-control"
+private const val SUPPORT_ALIPAY_ACCOUNT = "1635273709@qq.com"
+
 internal fun MainActivity.openSettingsPage() {
     currentPage = AppPage.Settings
+}
+
+internal fun projectGithubUrl(): String {
+    return PROJECT_GITHUB_URL
+}
+
+internal fun supportAlipayAccount(): String {
+    return SUPPORT_ALIPAY_ACCOUNT
+}
+
+internal fun MainActivity.openExternalUrl(url: String) {
+    runCatching {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+            addCategory(Intent.CATEGORY_BROWSABLE)
+        }
+        startActivity(intent)
+    }.onFailure {
+        showNotice("无法打开链接")
+    }
+}
+
+internal fun MainActivity.copySupportAccountToClipboard() {
+    if (copyTextToClipboard("支付宝账户", supportAlipayAccount())) {
+        showNotice("账号已复制")
+    } else {
+        showNotice("复制失败")
+    }
 }
 
 internal fun MainActivity.hasNavigableChatTarget(): Boolean {
@@ -153,6 +186,25 @@ internal fun MainActivity.updateStartupPagePreference(page: AppPage) {
 
 internal fun MainActivity.appVersionLabel(): String {
     return "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) · ${BuildConfig.GIT_COMMIT_SHORT}"
+}
+
+internal fun MainActivity.appBuildTypeLabel(): String {
+    return if (BuildConfig.DEBUG) "Debug" else "Release"
+}
+
+internal fun MainActivity.appPackageLabel(): String {
+    return BuildConfig.APPLICATION_ID
+}
+
+internal fun appFeatureSummaries(): List<String> {
+    return listOf(
+        "连接私有网络中的 Codex Bridge",
+        "查看、切换和恢复 Codex 会话",
+        "发送消息并流式查看回复",
+        "处理审批请求和文件变更",
+        "浏览代码文件、diff 和会话变更",
+        "备份和恢复连接信息与本地设置",
+    )
 }
 
 internal fun MainActivity.startupPageMenuOptions(): List<SelectionMenuOption> {

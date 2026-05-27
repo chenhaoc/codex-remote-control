@@ -3,6 +3,7 @@ package com.haochen.codexremote
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -343,6 +344,105 @@ internal fun MainActivity.SettingsPage() {
                         )
                     }
                 }
+                Surface(
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
+                    color = uiSurfaceAlt,
+                    border = BorderStroke(1.dp, uiBorder),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Label("构建信息")
+                        AboutInfoRow("包名", appPackageLabel())
+                        AboutInfoRow("构建类型", appBuildTypeLabel())
+                    }
+                }
+                Surface(
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
+                    color = uiSurfaceAlt,
+                    border = BorderStroke(1.dp, uiBorder),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Label("主要功能")
+                        appFeatureSummaries().forEach { feature ->
+                            BodyText("• $feature")
+                        }
+                    }
+                }
+                Surface(
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
+                    color = uiSurfaceAlt,
+                    border = BorderStroke(1.dp, uiBorder),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Label("作者")
+                        AboutInfoRow("作者", "Hao Chen")
+                        AboutInfoRow(
+                            label = "GitHub",
+                            value = projectGithubUrl(),
+                            onClick = { openExternalUrl(projectGithubUrl()) },
+                            isLink = true,
+                        )
+                        BodyText("仅建议在可信私有网络中使用。")
+                    }
+                }
+                Surface(
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
+                    color = uiSurfaceAlt,
+                    border = BorderStroke(1.dp, uiBorder),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Label("联系与支持")
+                        BodyText("如果这个工具对你有帮助，可以支持后续维护与打磨。")
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { copySupportAccountToClipboard() },
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                Text(
+                                    text = "支付宝账户",
+                                    color = uiMuted,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Text(
+                                    text = supportAlipayAccount(),
+                                    color = uiText,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            }
+                            OutlinedButton(onClick = { copySupportAccountToClipboard() }) {
+                                Text("复制账号")
+                            }
+                        }
+                        BodyText("转账时可备注 ID 或项目名，感谢支持。")
+                    }
+                }
             }
         }
 
@@ -405,5 +505,38 @@ internal fun MainActivity.SettingsPage() {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun MainActivity.AboutInfoRow(
+    label: String,
+    value: String,
+    onClick: (() -> Unit)? = null,
+    isLink: Boolean = false,
+) {
+    Column(
+        modifier =
+            if (onClick != null) {
+                Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onClick)
+            } else {
+                Modifier
+            },
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(
+            text = label,
+            color = uiMuted,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = value,
+            color = if (isLink) uiPrimary else uiText,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
     }
 }
